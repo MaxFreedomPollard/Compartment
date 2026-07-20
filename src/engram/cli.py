@@ -321,6 +321,10 @@ def cmd_selftest(args) -> None:
 
 
 def cmd_bench(args) -> None:
+    if args.longmemeval:
+        from . import longmemeval
+        _print(longmemeval.run(variant=args.variant, limit=args.limit))
+        return
     from . import bench
     v = _open_vault(args)
     _print(bench.run(v, synthetic_n=args.records))
@@ -564,6 +568,13 @@ def cmd_setup(args) -> None:
                 "prefix_passage": spec.get("prefix_passage", "")}
         (d / "HASHES.json").write_text(json.dumps(pins, indent=2))
         print(f"installed model {name} → {d} (hashes pinned)")
+    elif args.setup_cmd == "download-longmemeval":
+        if offline_guard.is_active():
+            _die("offline guard is active; refusing a network operation")
+        print("NOTE: like download-model, this is an explicit, user-invoked "
+              "network operation. The benchmark run itself is fully offline.")
+        from . import longmemeval
+        longmemeval.download(args.variant)
     elif args.setup_cmd == "airgap-bundle":
         out = Path(args.out or "engram-airgap.zip")
         root = Path(__file__).resolve().parent
@@ -713,8 +724,14 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("selftest", help="seed-pack health check with latencies")
     p.set_defaults(fn=cmd_selftest)
 
-    p = sub.add_parser("bench", help="perf + RAM benchmark")
+    p = sub.add_parser("bench", help="perf + RAM benchmark; --longmemeval for "
+                                     "the retrieval accuracy benchmark")
     p.add_argument("--records", type=int, default=20000)
+    p.add_argument("--longmemeval", action="store_true",
+                   help="run LongMemEval retrieval (needs the dataset: "
+                        "engram setup download-longmemeval)")
+    p.add_argument("--variant", default="s", choices=["s", "m", "oracle"])
+    p.add_argument("--limit", type=int, help="score only the first N questions")
     p.set_defaults(fn=cmd_bench)
 
     p = sub.add_parser("reindex", help="rebuild the vector index / migrate models")
@@ -767,6 +784,11 @@ def main(argv: list[str] | None = None) -> None:
     ps_sub = ps.add_subparsers(dest="setup_cmd")
     p = ps_sub.add_parser("download-model", help="THE only network operation")
     p.add_argument("model")
+    p.set_defaults(fn=cmd_setup)
+    p = ps_sub.add_parser("download-longmemeval",
+                          help="fetch the LongMemEval benchmark dataset "
+                               "(explicit network operation)")
+    p.add_argument("--variant", default="s", choices=["s", "m", "oracle"])
     p.set_defaults(fn=cmd_setup)
     p = ps_sub.add_parser("airgap-bundle")
     p.add_argument("--out")

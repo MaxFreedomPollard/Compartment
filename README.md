@@ -165,16 +165,30 @@ app you babysit.
   is part of normal work.
 - **OpenClaw and any MCP client** - same stdio server, zero open ports,
   same tools (`memory_search`, `memory_store`, `memory_forget`, lock).
+- **A memory graph, not just a memory pile** - `memory_link` records
+  explicit relations (who works where, what belongs to what), with
+  optional validity windows; `memory_relations` answers entity,
+  predicate, and as-of queries. Deterministic storage, host-model
+  judgment - the same split as everything else in engRAM.
 - **CLI for everything else** - scripts, cron, other agents: `engram
-  store`, `engram search`, `engram forget`, `engram lock`.
+  store`, `engram search`, `engram forget`, `engram link`,
+  `engram relations`, `engram lock`.
+- **See the vault: `engram dash`** - one command opens a local page with
+  everything at a glance: how many memories of what kind, growth over
+  time, the relation graph, tags, per-agent counts, live search. Served
+  from RAM, 127.0.0.1-only behind a random URL token, read-only, zero
+  outbound requests, zero configuration.
 - **Panic lock from the agent** - `memory_lock` / `engram lock` clears
   stored credentials instantly when you need the vault closed now.
 - **One vault, many hosts** - Hermes, Claude, and the CLI can share a
   vault at once; each caller gets its own identity and namespace ACLs.
+- **One memory, no sections** - the starting memories seeded at `init`
+  live in `main` as ordinary records, editable and forgettable like
+  anything the agent stores; older vaults reorganize automatically.
 
 Day to day, the point is simple: the agent remembers *you*, your
 decisions, and your machine - encrypted, offline, and fast - without a
-cloud account or a second dashboard.
+cloud account.
 
 ## The lock model
 

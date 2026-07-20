@@ -39,11 +39,25 @@ encrypted at rest too** - embeddings can be partially inverted back toward
 their text, so treating vectors as non-sensitive (as most systems do) is a
 hole; engRAM doesn't have it.
 
-New memories land in the writing agent's namespace (e.g. `hermes`), in the
-same vault and the same searchable index as any installed pack namespaces
-- one vector space, searched together. Pack namespaces stay read-only, so
-curated content is never diluted by chat traffic, and living memory never
-has to be shipped to be shared.
+New memories land in the writing agent's namespace (e.g. `hermes` or
+`main`), in the same vault and the same searchable index - one vector
+space, searched together. The starting memories engRAM seeds at `init`
+live in `main` too, as ordinary records: searchable, taggable, editable,
+forgettable, exactly as if the agent had stored them (vaults created by
+older versions are reorganized this way automatically on open). Optional
+add-on packs are the one exception: they install read-only under
+`packs/<name>`, so separately curated content is never diluted by chat
+traffic.
+
+Alongside records, the vault keeps a **memory graph**: explicit
+subject-predicate-object relations (`memory_link` / `engram link`),
+optionally tied to the memory they came from and to a validity window,
+queryable by entity, predicate, or as-of time (`memory_relations`).
+Storage and matching are deterministic (case-insensitive entity
+normalization, idempotent re-links); the judgment of what to link belongs
+to the host model, exactly like memory curation. `engram dash` draws the
+graph and the rest of the vault's shape in the browser - served from RAM,
+loopback-only, read-only.
 
 ### Nothing embeds twice
 

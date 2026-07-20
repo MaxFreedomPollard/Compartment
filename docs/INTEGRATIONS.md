@@ -33,7 +33,10 @@ Claude Desktop (`claude_desktop_config.json`):
 ```
 
 The `memory_search` / `memory_store` / `memory_forget` / `memory_status` /
-`memory_lock` tools then appear in every session. To make Claude treat it
+`memory_lock` tools then appear in every session, plus the memory-graph
+tools `memory_link` / `memory_relations` / `memory_unlink` for relational
+mapping (who works where, what belongs to what - with optional validity
+windows and as-of queries). To make Claude treat it
 as *the* memory (the analog of selecting a provider), add one standing
 instruction to your `CLAUDE.md` / project memory:
 

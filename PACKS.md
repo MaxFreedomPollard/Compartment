@@ -49,11 +49,16 @@ pack replaces it wholesale (semver replace, never merge).
 - Facts should stand alone (one self-contained statement per record) -
   retrieval returns records, not documents.
 
-## Built-in pack (maintainer notes)
+## Built-in starter memories (maintainer notes)
 
-engRAM can ship a signed built-in pack that auto-installs at `init`.
-That path is for maintainers who edit and rebuild pack contents; it is
-not a user-facing selling point. Canonical hand-editable source:
+engRAM ships a signed starter pack whose contents are SEEDED at `init` -
+verified like any pack (signature + content hash), then stored as
+ordinary, fully editable memories in the `main` namespace. There is no
+separate read-only starter section: starting memories sit beside (and
+behave exactly like) everything the agent stores later. Vaults created
+by older versions that still have a `packs/starter` section are
+reorganized automatically the next time they open - every record moves
+to `main` untouched. Canonical hand-editable source:
 
 `tools/starter/starter_facts.jsonl` - one JSON object per line,
 
@@ -71,11 +76,18 @@ not a user-facing selling point. Canonical hand-editable source:
    ```bash
    python tools/build_starter_pack.py 1.0.1     # arg = new pack version
    ```
-3. Refresh an existing vault and verify:
+3. Refresh an existing vault and verify (seeds into `main` as ordinary
+   memories; already-present facts simply coexist - forget old ones if
+   you replaced them):
    ```bash
-   engram pack install src/engram/data/starter.mpack
+   engram import <(python - <<'PY'
+   # or simply create a fresh vault; seeding happens at init
+   PY
+   )
    engram selftest      # must stay 20/20
    ```
+   The simplest refresh is a fresh `engram init` on a new vault path,
+   then `engram import` of your exported organic memories.
 Every future `engram init` then includes your edits.
 
 The AKC-derived section can be regenerated from upstream with
