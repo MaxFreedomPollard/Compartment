@@ -40,7 +40,10 @@ def _vault() -> Vault:
         # `engram lock` clears the credential)
         try:
             pw, key = Vault.resolve_credential(_state["path"])
-            v = Vault.unlock(_state["path"], passphrase=pw, raw_key=key)
+            kf = None if key is not None else \
+                Vault.load_keyfile_hint(_state["path"])
+            v = Vault.unlock(_state["path"], passphrase=pw, raw_key=key,
+                             keyfile=kf)
             _state["vault"] = v
         except CryptoError as exc:
             raise VaultLockedError(
@@ -228,7 +231,9 @@ def main(argv: list[str] | None = None) -> None:
     _state["caller"] = args.caller
     try:
         pw, key = Vault.resolve_credential(args.vault)
-        _state["vault"] = Vault.unlock(args.vault, passphrase=pw, raw_key=key)
+        kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
+        _state["vault"] = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
+                                       keyfile=kf)
         _state["auto_lock_min"] = int(
             _state["vault"].config.settings.get("auto_lock_minutes", 30))
     except CryptoError:

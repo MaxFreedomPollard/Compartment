@@ -32,7 +32,7 @@ def test_full_lifecycle_with_sockets_blocked(offline, tmp_path):
     from conftest import PASS, seed_pack_bytes
 
     vp = str(tmp_path / "offline.vault")
-    v, words = Vault.create(vp, PASS)
+    v = Vault.create(vp, PASS)
     packs.seed_records(v, seed_pack_bytes(), caller="offline-test")
     st = selftest.run(v)
     assert st["failed"] == 0, st["failures"]

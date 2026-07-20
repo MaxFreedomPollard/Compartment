@@ -49,7 +49,7 @@ def test_kill9_crash_recovery(tmp_path):
         import os, sys
         sys.path.insert(0, {str(SRC)!r})
         from engram.vault import Vault
-        v, _ = Vault.create({vp!r}, {PASS!r})
+        v = Vault.create({vp!r}, {PASS!r})
         v.store("write one", caller="crash")
         v.store("write two", caller="crash")
         print("ACK", flush=True)
@@ -97,22 +97,23 @@ def test_export_import_roundtrip(vault, tmp_path):
     assert data.count("\n") == 2
 
     vp2 = str(tmp_path / "second.vault")
-    v2, _ = Vault.create(vp2, PASS)
+    v2 = Vault.create(vp2, PASS)
     assert v2.import_jsonl(data) == 2
     hit = v2.search("beta", caller="user")["results"][0]
     assert hit.get("quarantined") is True
 
 
 def test_rekey(vault, vault_path):
+    """rekey swaps in the USER'S new passphrase - nothing auto-generated,
+    no recovery credential of any kind is created."""
     vault.store("survives rekey", caller="test")
-    words = vault.rekey("NewHorse")
-    assert len(words) == 16
+    assert vault.rekey("NewHorse") is None
     with pytest.raises(CryptoError):
         Vault.unlock(vault_path, passphrase=PASS)  # old passphrase dead
     v2 = Vault.unlock(vault_path, passphrase="NewHorse")
     assert v2.db.count() == 1
-    v3 = Vault.unlock(vault_path, passphrase=" ".join(words))
-    assert v3.db.count() == 1
+    slot_types = [s["type"] for s in v2.header.keyslots]
+    assert slot_types == ["passphrase"]        # no recovery slot generated
 
 
 def test_signed_lock_and_verify(vault, vault_path):

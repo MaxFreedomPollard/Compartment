@@ -195,9 +195,20 @@ cloud account.
 You lock and unlock the vault yourself whenever you want. Manual control
 is always available:
 
-- **`engram unlock`** - open the vault (passphrase or recovery phrase).
+- **`engram unlock`** - open the vault with YOUR passphrase. You choose
+  it; engRAM never auto-generates a password, seed, or recovery phrase,
+  and there is no credential it knows that you don't. (Vaults made by
+  older versions that received an auto-generated recovery phrase still
+  open with it.)
 - **`engram lock`** - close it again and clear every stored credential.
   Agents can do the same via the `memory_lock` panic tool.
+- **`engram 2fa enable`** - optional two-factor unlock: your passphrase
+  (knowledge) plus a keyfile (possession - keep it on a USB stick).
+  Both factors feed Argon2id together, so needing both is enforced by
+  arithmetic, not a policy check; a stolen vault file plus your
+  passphrase still opens nothing without the keyfile. One command, zero
+  configuration: the keyfile's location is remembered, so day-to-day
+  unlocking feels exactly the same while the file is present.
 
 The default unlock mode is convenience, not a cage: after a normal
 unlock, the vault stays usable across processes, logouts, and logins -
@@ -215,8 +226,9 @@ time you can lock, unlock, lock again - on your schedule.
 ## Security, in one paragraph
 
 XChaCha20-Poly1305 AEAD on everything at rest including vectors
-(embedding-inversion resistance) · Argon2id keyslots, LUKS-style, with a
-16-word recovery phrase · per-record keys enabling `forget --shred`
+(embedding-inversion resistance) · Argon2id keyslots, LUKS-style, opened
+only by the user's own passphrase (no auto-generated credentials),
+optionally two-factor with a keyfile · per-record keys enabling `forget --shred`
 (crypto-shred: key destroyed, content mathematically unrecoverable) ·
 fsync'd sealed journal, atomic compaction, verified kill-9 crash recovery ·
 hash-chained tamper-evident audit log (`engram audit verify`) · per-caller
@@ -239,7 +251,7 @@ Ed25519 manifest the recipient can verify without any credential.
 ```bash
 engram lock
 scp ~/.engram/memory.vault other-machine:
-engram --vault memory.vault unlock     # passphrase or recovery phrase
+engram --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 ```
 
 ## Documentation

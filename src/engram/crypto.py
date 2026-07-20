@@ -104,7 +104,10 @@ def make_passphrase_slot(master_key: bytes, passphrase: str, kdf: dict | None = 
 
 
 def make_recovery_slot(master_key: bytes, kdf: dict | None = None) -> tuple[dict, list[str]]:
-    """Create a recovery keyslot; returns (slot, words). Words shown exactly once."""
+    """LEGACY (read-path only): engRAM no longer generates credentials of any
+    kind - the user's own passphrase is the only knowledge factor. This
+    function remains so vaults created by older versions, which auto-
+    generated a 16-word recovery phrase, still open with that phrase."""
     raw = secrets.token_bytes(16)  # 128 bits
     words = [WORDLIST[b] for b in raw]
     slot = make_passphrase_slot(master_key, " ".join(words), kdf)
@@ -112,22 +115,70 @@ def make_recovery_slot(master_key: bytes, kdf: dict | None = None) -> tuple[dict
     return slot, words
 
 
-def open_slot(slot: dict, secret: str) -> bytes:
-    """Unwrap the master key from a slot with a passphrase / recovery phrase."""
-    wrap_key = derive_key(
-        secret.encode("utf-8"), bytes.fromhex(slot["salt"]), slot["kdf"]
-    )
+# Domain separator between the knowledge factor (passphrase) and the
+# possession factor (keyfile bytes) before the KDF. Both factors feed
+# Argon2id, so two-factor unlock is enforced by arithmetic, not policy.
+KEYFILE_SEP = b"\x1f engram-2fa \x1f"
+KEYFILE_LEN = 32
+
+
+def make_keyfile_slot(master_key: bytes, passphrase: str, keyfile: bytes,
+                      kdf: dict | None = None) -> dict:
+    """Two-factor keyslot: master key wrapped under
+    Argon2id(passphrase ‖ SEP ‖ keyfile). Opening REQUIRES both factors."""
+    if len(keyfile) < 16:
+        raise CryptoError("Keyfile too short to be a real second factor")
+    kdf = dict(kdf or DEFAULT_KDF)
+    salt = secrets.token_bytes(16)
+    secret = passphrase.encode("utf-8") + KEYFILE_SEP + keyfile
+    wrap_key = derive_key(secret, salt, kdf)
+    return {
+        "type": "passphrase+keyfile",
+        "kdf": kdf,
+        "salt": salt.hex(),
+        "keyfile_id": sha256(keyfile)[:16],   # UX only: detect the WRONG file
+        "wrapped": seal(wrap_key, master_key, aad=b"engram-keyslot").hex(),
+    }
+
+
+def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
+    """Unwrap the master key from one slot."""
+    raw = secret.encode("utf-8")
+    if slot["type"] == "passphrase+keyfile":
+        if keyfile is None:
+            raise CryptoError("This keyslot requires a keyfile")
+        raw = raw + KEYFILE_SEP + keyfile
+    wrap_key = derive_key(raw, bytes.fromhex(slot["salt"]), slot["kdf"])
     return unseal(wrap_key, bytes.fromhex(slot["wrapped"]), aad=b"engram-keyslot")
 
 
-def unwrap_master(keyslots: list[dict], secret: str) -> bytes:
-    """Try the secret against every passphrase/recovery slot; fail loudly if none opens."""
+def unwrap_master(keyslots: list[dict], secret: str,
+                  keyfile: bytes | None = None) -> bytes:
+    """Try the credential(s) against every keyslot; fail loudly if none opens."""
+    needs_keyfile = False
     for slot in keyslots:
         if slot["type"] in ("passphrase", "recovery"):
             try:
                 return open_slot(slot, secret)
             except TamperError:
                 continue
+        elif slot["type"] == "passphrase+keyfile":
+            if keyfile is None:
+                needs_keyfile = True
+                continue
+            if sha256(keyfile)[:16] != slot.get("keyfile_id"):
+                raise CryptoError(
+                    "That is not this vault's keyfile (contents do not match "
+                    "the enrolled second factor)")
+            try:
+                return open_slot(slot, secret, keyfile)
+            except TamperError:
+                continue
+    if needs_keyfile:
+        raise CryptoError(
+            "Two-factor unlock is enabled on this vault: a keyfile is "
+            "required alongside the passphrase (engram unlock --keyfile "
+            "/path/to/engram-2fa.key)")
     raise TamperError("Wrong passphrase (no keyslot opened)")
 
 

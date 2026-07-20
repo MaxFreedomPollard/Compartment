@@ -1,7 +1,9 @@
 """The Vault: orchestrates crypto, storage, indexing, embeddings, ACLs, audit.
 
 Lifecycle:
-    Vault.create(...)          → new sealed .vault on disk (+ recovery words)
+    Vault.create(...)          → new sealed .vault on disk (user-set
+                                 passphrase is the only credential; engRAM
+                                 never auto-generates one)
     Vault.unlock(path, cred)   → decrypt payload into RAM, replay journal,
                                  rebuild the vector index in RAM
     v.store()/v.search()/...   → operate; each write is journaled + fsync'd
@@ -120,17 +122,21 @@ class Vault:
 
     @classmethod
     def create(cls, path: str, passphrase: str, creator: str = "user",
-               model_name: str = DEFAULT_MODEL) -> tuple["Vault", list[str]]:
+               model_name: str = DEFAULT_MODEL) -> "Vault":
+        """Create a sealed vault. The user's own passphrase is the ONLY
+        credential - engRAM never auto-generates a password or recovery
+        seed. (Optional second factor: Vault.twofa_enable.)"""
         if os.path.exists(path):
             raise CryptoError(f"Refusing to overwrite existing vault: {path}")
+        if not passphrase:
+            raise CryptoError("Empty passphrase refused - the user sets it")
         master = crypto.new_key()
         slot_pw = crypto.make_passphrase_slot(master, passphrase)
-        slot_rec, words = crypto.make_recovery_slot(master)
         emb = Embedder(model_name)
         header = vaultfile.VaultHeader(
             vault_id=uuid.uuid4().hex,
             created=datetime.datetime.now(datetime.UTC).isoformat(),
-            keyslots=[slot_pw, slot_rec],
+            keyslots=[slot_pw],
             payload_len=0,
             model={"name": model_name, "sha256": emb.model_sha256, "dim": emb.dim},
             extra={"creator": creator},
@@ -145,19 +151,21 @@ class Vault:
         config.save(path)
         v = cls(path, header, db, master, config)
         v._embedder = emb
-        return v, words
+        return v
 
     # ---------------------------------------------------------------- unlock
 
     @classmethod
     def unlock(cls, path: str, passphrase: str | None = None,
-               raw_key: bytes | None = None, check_model: bool = True) -> "Vault":
+               raw_key: bytes | None = None, check_model: bool = True,
+               keyfile: bytes | None = None) -> "Vault":
         loaded = vaultfile.read_vault_file(path)
         if raw_key is not None:
             master = raw_key
             # verify the key actually opens this vault (AEAD auth below)
         elif passphrase is not None:
-            master = crypto.unwrap_master(loaded.header.keyslots, passphrase)
+            master = crypto.unwrap_master(loaded.header.keyslots, passphrase,
+                                          keyfile=keyfile)
         else:
             raise CryptoError("No credential provided (passphrase or key)")
         sections = vaultfile.decrypt_payload(loaded.header, loaded.payload_ct, master)
@@ -262,6 +270,18 @@ class Vault:
             "requires one unlock). Run `engram unlock` - it then stays "
             "unlocked until the next restart or `engram lock`."
         )
+
+    @staticmethod
+    def load_keyfile_hint(path: str) -> bytes | None:
+        """If 2FA was enabled with a recorded keyfile location and that file
+        is present, return its bytes (zero-friction unlock). No secrets in
+        the config - only the path."""
+        from .acl import VaultConfig
+        hint = VaultConfig.load(path).settings.get("keyfile_path")
+        if hint and os.path.isfile(hint):
+            with open(hint, "rb") as f:
+                return f.read()
+        return None
 
     # ------------------------------------------------------------------ util
 
@@ -635,17 +655,67 @@ class Vault:
     # ---------------------------------------------------------------- rekey
 
     @_synchronized
-    def rekey(self, new_passphrase: str) -> list[str]:
-        """Replace passphrase + recovery slots; re-wrap (not re-encrypt) and save."""
+    def rekey(self, new_passphrase: str, keyfile: bytes | None = None) -> None:
+        """Replace the credential with a NEW user-chosen passphrase; re-wrap
+        (not re-encrypt) and save. No credential is ever auto-generated.
+        If two-factor unlock is enabled, the enrolled keyfile is required so
+        the new slot keeps requiring both factors."""
         self._require_open()
-        slot_pw = crypto.make_passphrase_slot(self._master, new_passphrase)
-        slot_rec, words = crypto.make_recovery_slot(self._master)
+        if not new_passphrase:
+            raise CryptoError("Empty passphrase refused - the user sets it")
+        if self.twofa_enabled():
+            if keyfile is None:
+                raise CryptoError(
+                    "Two-factor unlock is enabled: rekey needs the keyfile "
+                    "too (engram rekey --keyfile PATH), or disable it first "
+                    "with `engram 2fa disable`.")
+            slot = crypto.make_keyfile_slot(self._master, new_passphrase,
+                                            keyfile)
+        else:
+            slot = crypto.make_passphrase_slot(self._master, new_passphrase)
         keep = [s for s in self.header.keyslots
-                if s["type"] not in ("passphrase", "recovery")]
-        self.header.keyslots = [slot_pw, slot_rec] + keep
-        self._audit_and_capture("user", "rekey", "passphrase + recovery replaced")
+                if s["type"] not in ("passphrase", "recovery",
+                                     "passphrase+keyfile")]
+        self.header.keyslots = [slot] + keep
+        self._audit_and_capture("user", "rekey", "credential replaced")
         self.save()
-        return words
+
+    # ------------------------------------------------------------------ 2FA
+
+    def twofa_enabled(self) -> bool:
+        return any(s["type"] == "passphrase+keyfile"
+                   for s in self.header.keyslots)
+
+    @_synchronized
+    def twofa_enable(self, passphrase: str, keyfile: bytes) -> None:
+        """Turn on two-factor unlock: the master key is re-wrapped under
+        Argon2id(passphrase ‖ keyfile), so opening the vault by credential
+        requires BOTH the passphrase (knowledge) and the keyfile
+        (possession). Enforced by the KDF, not by a policy check."""
+        self._require_open()
+        # the passphrase must be the real one - prove it opens the vault
+        crypto.unwrap_master(self.header.keyslots, passphrase)
+        slot = crypto.make_keyfile_slot(self._master, passphrase, keyfile)
+        keep = [s for s in self.header.keyslots
+                if s["type"] not in ("passphrase", "recovery",
+                                     "passphrase+keyfile")]
+        self.header.keyslots = [slot] + keep
+        self._audit_and_capture("user", "2fa-enable",
+                                f"keyfile id {slot['keyfile_id']}")
+        self.save()
+
+    @_synchronized
+    def twofa_disable(self, passphrase: str, keyfile: bytes) -> None:
+        """Back to passphrase-only. Requires both current factors."""
+        self._require_open()
+        crypto.unwrap_master(self.header.keyslots, passphrase, keyfile=keyfile)
+        slot = crypto.make_passphrase_slot(self._master, passphrase)
+        keep = [s for s in self.header.keyslots
+                if s["type"] not in ("passphrase", "recovery",
+                                     "passphrase+keyfile")]
+        self.header.keyslots = [slot] + keep
+        self._audit_and_capture("user", "2fa-disable", "back to passphrase-only")
+        self.save()
 
     # ---------------------------------------------------------- export/import
 

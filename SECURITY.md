@@ -65,8 +65,20 @@ record id) - ciphertexts cannot be transplanted between contexts.
   name's grants. For real isolation, run one `engram serve` per host with
   its own config file and OS-level separation.
 - **Weak passphrases.** Argon2id slows attackers; it cannot save
-  "password1". The 16-word recovery phrase carries 128 bits - store it
-  offline.
+  "password1". The passphrase is user-chosen and is the ONLY credential -
+  engRAM never generates a password or recovery seed, so there is nothing
+  written down anywhere unless you write it. Losing the passphrase (and
+  the 2FA keyfile, if enrolled) makes the vault permanently
+  unrecoverable; that is the design, not a failure mode. To harden a
+  human-memorable passphrase, enable two-factor unlock: `engram 2fa
+  enable` wraps the master key under Argon2id(passphrase ‖ keyfile), so
+  both the thing you know and the file you hold are required - a
+  cryptographic requirement, not a prompt that malware can skip. (Why not
+  authenticator-app codes? A six-digit TOTP cannot cryptographically
+  protect an offline file: the verifying secret would have to live next
+  to the data it guards, so any code-based gate on a local vault is
+  theater. The keyfile is the honest second factor for this threat
+  model.)
 - **Search-audit persistence gap:** search audit entries are held in RAM
   until the next save/lock (writes are journaled immediately; reads don't
   cost an fsync). A kill -9 can lose recent *search* audit entries - never

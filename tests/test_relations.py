@@ -99,7 +99,7 @@ def test_relations_respect_acl(vault):
 
 def test_link_survives_crash_before_save(vault_path):
     """A journaled link is durable: reopening the vault replays it."""
-    v, _ = Vault.create(vault_path, PASS, creator="test")
+    v = Vault.create(vault_path, PASS, creator="test")
     v.save()
     v.link("Maya", "works at", "Acme", caller="test")   # journal appended
     # no v.save(), no v.lock(): simulate the process dying here
@@ -130,7 +130,7 @@ def test_status_counts_relations(vault):
 
 def test_old_vault_gains_relations_table_on_open(vault_path):
     """A vault image sealed WITHOUT the relations table upgrades in place."""
-    v, _ = Vault.create(vault_path, PASS, creator="test")
+    v = Vault.create(vault_path, PASS, creator="test")
     v.db.conn.execute("DROP INDEX rel_subject")
     v.db.conn.execute("DROP INDEX rel_object")
     v.db.conn.execute("DROP INDEX rel_predicate")

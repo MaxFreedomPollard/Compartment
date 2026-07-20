@@ -71,7 +71,7 @@ def test_legacy_starter_vault_merges_on_unlock(tmp_path):
     from conftest import PASS
     from engram.vault import Vault
     p = str(tmp_path / "legacy.vault")
-    v, _ = Vault.create(p, PASS, creator="legacy")
+    v = Vault.create(p, PASS, creator="legacy")
     packs.install_pack(v, (DATA / "starter.mpack").read_bytes(), caller="legacy")
     before = {
         r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])

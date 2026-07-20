@@ -30,13 +30,26 @@ def _die(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
+def _maybe_keyfile(args) -> bytes | None:
+    """Second factor, if any: explicit --keyfile wins, else the location
+    recorded when 2FA was enabled (zero-friction: it just works)."""
+    explicit = getattr(args, "keyfile", None)
+    if explicit:
+        p = Path(explicit).expanduser()
+        if not p.is_file():
+            _die(f"keyfile not found: {p}")
+        return p.read_bytes()
+    return Vault.load_keyfile_hint(args.vault)
+
+
 def _open_vault(args) -> Vault:
     try:
         pw, key = Vault.resolve_credential(args.vault)
     except CryptoError:
         pw = getpass.getpass(f"Passphrase for {args.vault}: ")
         key = None
-    return Vault.unlock(args.vault, passphrase=pw, raw_key=key)
+    kf = None if key is not None else _maybe_keyfile(args)
+    return Vault.unlock(args.vault, passphrase=pw, raw_key=key, keyfile=kf)
 
 
 def _data_dir() -> Path:
@@ -85,11 +98,12 @@ def cmd_init(args) -> None:
             _die("passphrases do not match")
     if not pw:
         _die("empty passphrase refused")
-    v, words = Vault.create(path, pw, creator=args.creator)
-    print("\n=== RECOVERY PHRASE (shown exactly once - write it down) ===")
-    for i in range(0, 16, 4):
-        print("   " + "  ".join(f"{j+1:2d}.{words[j]}" for j in range(i, i + 4)))
-    print("=" * 60)
+    v = Vault.create(path, pw, creator=args.creator)
+    print("\nYour passphrase is the ONLY key to this vault. engRAM never")
+    print("generates or stores a password, seed, or recovery phrase for you.")
+    print("If you lose the passphrase, the memories are cryptographically")
+    print("unrecoverable - write it down somewhere safe.")
+    print("(Optional second factor: `engram 2fa enable` - see README.)")
     print("\nFinishing vault setup (offline)…")
     total = 0
     for name in _starter_pack_names():
@@ -124,8 +138,9 @@ def _ask_yn(q: str) -> bool:
 
 
 def cmd_unlock(args) -> None:
-    pw = args.passphrase or getpass.getpass("Passphrase (or recovery phrase): ")
-    v = Vault.unlock(args.vault, passphrase=pw)   # verifies credential
+    pw = args.passphrase or getpass.getpass("Passphrase: ")
+    v = Vault.unlock(args.vault, passphrase=pw,
+                     keyfile=_maybe_keyfile(args))   # verifies credential(s)
     if args.keychain:
         if sys.platform != "darwin":
             _die("--keychain is only available on macOS")
@@ -276,13 +291,13 @@ def cmd_import(args) -> None:
 
 def cmd_rekey(args) -> None:
     v = _open_vault(args)
-    pw = getpass.getpass("NEW passphrase: ")
+    pw = getpass.getpass("NEW passphrase (you choose it - nothing is "
+                         "generated for you): ")
     if pw != getpass.getpass("Repeat NEW passphrase: "):
         _die("passphrases do not match")
-    words = v.rekey(pw)
-    print("\n=== NEW RECOVERY PHRASE (shown exactly once) ===")
-    for i in range(0, 16, 4):
-        print("   " + "  ".join(words[i:i + 4]))
+    v.rekey(pw, keyfile=_maybe_keyfile(args))
+    print("credential replaced. Your new passphrase is the only knowledge "
+          "factor - there is no recovery phrase.")
     keychain_clear(args.vault)
     print("keychain credential cleared (old key); run `engram unlock --keychain` "
           "to store the new one")
@@ -338,7 +353,9 @@ def cmd_reindex(args) -> None:
             pw = getpass.getpass(f"Passphrase for {args.vault}: ")
             key = None
         v = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
-                         check_model=False)
+                         check_model=False,
+                         keyfile=None if key is not None else
+                         _maybe_keyfile(args))
         n = v.reembed(model_name=args.model or DEFAULT_MODEL,
                       caller=args.caller)
         print(f"re-embedded {n} records with {v.header.model['name']} "
@@ -359,6 +376,87 @@ def cmd_serve(args) -> None:
     if args.assert_offline:
         argv.append("--assert-offline")
     server.main(argv)
+
+
+def cmd_2fa(args) -> None:
+    """Two-factor unlock: passphrase (knowledge) + keyfile (possession),
+    both fed into the KDF - enforced by arithmetic, not a policy check."""
+    if args.twofa_cmd == "status":
+        loaded = read_vault_file(args.vault)
+        slots = [s["type"] for s in loaded.header.keyslots]
+        _print({"two_factor_enabled": "passphrase+keyfile" in slots,
+                "keyslots": slots,
+                "keyfile_path": VaultConfig.load(args.vault)
+                .settings.get("keyfile_path")})
+        return
+
+    pw = args.passphrase
+    if pw is None:
+        if not sys.stdin.isatty():
+            _die("--passphrase required when not interactive")
+        pw = getpass.getpass("Vault passphrase (the knowledge factor): ")
+    try:                       # stored credential (session/keychain) if any…
+        cred_pw, key = Vault.resolve_credential(args.vault)
+    except CryptoError:        # …else the passphrase just provided
+        cred_pw, key = pw, None
+    if args.twofa_cmd == "enable":
+        # --keyfile names the NEW factor (may not exist yet); unlocking a
+        # vault that already has 2FA uses the currently recorded keyfile
+        kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
+    else:
+        kf = None if key is not None else _maybe_keyfile(args)
+    v = Vault.unlock(args.vault, passphrase=cred_pw, raw_key=key, keyfile=kf)
+
+    if args.twofa_cmd == "enable":
+        path = args.keyfile
+        if not path:
+            if not sys.stdin.isatty():
+                _die("--keyfile PATH required when not interactive")
+            print("\nThe keyfile is the POSSESSION factor - a small file of "
+                  "random bytes.\nBest home: a USB stick you keep with you, "
+                  "so a copy of the vault\nalone can never be opened. "
+                  "(Your passphrase stays exactly as you set it.)")
+            path = input(
+                "Keyfile path [" + str(Path.home() / ".engram" /
+                                       "engram-2fa.key") + "]: ").strip() \
+                or str(Path.home() / ".engram" / "engram-2fa.key")
+        p = Path(path).expanduser()
+        if p.is_file():
+            kf = p.read_bytes()
+            print(f"using the existing keyfile at {p}")
+        else:
+            import secrets as _secrets
+            from . import crypto as _crypto
+            kf = _secrets.token_bytes(_crypto.KEYFILE_LEN)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(kf)
+            os.chmod(p, 0o600)
+            print(f"keyfile written → {p}")
+            print("BACK THIS FILE UP (it is random bytes, not derived from "
+                  "anything).\nLose it and the passphrase alone will NOT "
+                  "open the vault.")
+        v.twofa_enable(pw, kf)
+        v.config.settings["keyfile_path"] = str(p)
+        v.config.save(args.vault)
+        print("\ntwo-factor unlock ENABLED. Opening this vault by credential "
+              "now requires\nthe passphrase AND this keyfile "
+              "(Argon2id over both - no policy check to bypass).")
+        if str(p).startswith(str(Path.home())):
+            print("note: the keyfile currently lives on the same disk as the "
+                  "vault. That\nstill stops anyone who exfiltrates only the "
+                  ".vault file; for stolen-disk\nprotection, move it to "
+                  "removable media and re-run `engram 2fa enable "
+                  "--keyfile <usb path>`.")
+
+    elif args.twofa_cmd == "disable":
+        kf = _maybe_keyfile(args)
+        if kf is None:
+            _die("disabling needs the current keyfile (--keyfile PATH)")
+        v.twofa_disable(pw, kf)
+        v.config.settings.pop("keyfile_path", None)
+        v.config.save(args.vault)
+        print("two-factor unlock disabled: the vault opens with the "
+              "passphrase alone. The keyfile itself was NOT deleted.")
 
 
 def cmd_dash(args) -> None:
@@ -617,6 +715,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--vault", default=DEFAULT_VAULT,
                     help=f"vault path (default {DEFAULT_VAULT})")
     ap.add_argument("--caller", default="user")
+    ap.add_argument("--keyfile",
+                    help="second-factor keyfile (only needed if `engram 2fa "
+                         "enable` was run and the recorded location moved)")
     ap.add_argument("--assert-offline", action="store_true",
                     help="abort the process if anything attempts network access")
     ap.add_argument("--version", action="version", version=__version__)
@@ -635,6 +736,9 @@ def main(argv: list[str] | None = None) -> None:
         "unlock",
         help="unlock: stays open until restart/power loss or `engram lock`")
     p.add_argument("--passphrase")
+    p.add_argument("--keyfile", default=argparse.SUPPRESS,
+                   help="second-factor keyfile (2FA vaults; auto-found at "
+                        "its recorded location)")
     p.add_argument("--keychain", action="store_true",
                    help="macOS Keychain instead: persists across reboots")
     p.add_argument("--once", action="store_true",
@@ -710,8 +814,23 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--namespace")
     p.set_defaults(fn=cmd_import)
 
-    p = sub.add_parser("rekey", help="replace passphrase + recovery phrase")
+    p = sub.add_parser("rekey", help="replace the passphrase (user-chosen; "
+                                     "nothing is generated)")
     p.set_defaults(fn=cmd_rekey)
+
+    p2 = sub.add_parser("2fa", help="two-factor unlock: passphrase + keyfile")
+    p2_sub = p2.add_subparsers(dest="twofa_cmd", required=True)
+    p = p2_sub.add_parser("enable", help="require passphrase AND a keyfile")
+    p.add_argument("--passphrase", help="non-interactive (scripting)")
+    p.add_argument("--keyfile", default=argparse.SUPPRESS,
+                   help="where the keyfile lives (created if missing)")
+    p.set_defaults(fn=cmd_2fa)
+    p = p2_sub.add_parser("disable", help="back to passphrase-only")
+    p.add_argument("--passphrase", help="non-interactive (scripting)")
+    p.add_argument("--keyfile", default=argparse.SUPPRESS)
+    p.set_defaults(fn=cmd_2fa)
+    p = p2_sub.add_parser("status", help="show whether 2FA is enabled")
+    p.set_defaults(fn=cmd_2fa)
 
     pa = sub.add_parser("audit", help="audit log operations")
     pa_sub = pa.add_subparsers(dest="audit_cmd", required=True)
