@@ -56,8 +56,10 @@ def _seed_pack_bytes() -> bytes:
 
 
 def _starter_pack_names() -> list[str]:
-    """Auto-installed at init: the single unified starter pack (general
-    facts + AKC pragmatic knowledge + macOS/Windows/Linux references)."""
+    """Seeded at init as ordinary editable memories in "main" (general
+    facts + AKC pragmatic knowledge + macOS/Windows/Linux references).
+    The .mpack is only the signed delivery container - there is no
+    separate starter section in the vault."""
     return ["starter"]
 
 
@@ -94,10 +96,12 @@ def cmd_init(args) -> None:
         blob = _pack_bytes(name)
         if blob is None:
             continue
-        out = packs.install_pack(v, blob, caller=args.creator)
+        out = packs.seed_records(v, blob, caller=args.creator)
         total += out["records"]
-        print(f"  {out['name']}@{out['version']}: {out['records']} facts")
-    print(f"  → vault ready ({total} records indexed)")
+        print(f"  {out['name']}@{out['version']}: {out['records']} starting "
+              "memories")
+    print(f"  → vault ready ({total} memories in 'main' - editable and "
+          "forgettable like anything the agent stores)")
     if args.keychain:
         if sys.platform != "darwin":
             _die("--keychain is only available on macOS")

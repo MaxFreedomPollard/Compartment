@@ -170,7 +170,8 @@ class Vault:
         entries = vaultfile.decrypt_journal(loaded.header, loaded.journal_cts, master)
         for e in entries:
             v._replay(e)
-        if entries or loaded.truncated_tail:
+        merged = v._merge_legacy_starter()
+        if entries or loaded.truncated_tail or merged:
             if loaded.truncated_tail:
                 print("notice: discarded one unacknowledged (crash-truncated) write")
             v.save()  # compact replayed journal into the payload
@@ -188,6 +189,27 @@ class Vault:
             v._embedder = None  # caller must reembed() before searching
         v._rebuild_index()
         return v
+
+    def _merge_legacy_starter(self) -> int:
+        """One-time reorganization: fold the legacy read-only packs/starter
+        section into "main", so starting memories are ordinary memories -
+        searchable, taggable, editable, forgettable like anything the agent
+        stored itself. Pure metadata move: text, vectors, tags, importance,
+        timestamps and provenance are untouched; nothing is re-embedded and
+        nothing is deleted."""
+        ns = "packs/starter"
+        n = self.db.count(ns)
+        if not n:
+            return 0
+        self.db.conn.execute(
+            "UPDATE records SET ns = 'main', pack = NULL WHERE ns = ?", (ns,))
+        registry = json.loads(self.db.get_meta("packs", "{}"))
+        registry.pop("starter", None)
+        self.db.set_meta("packs", json.dumps(registry))
+        self._audit_and_capture(
+            "system", "merge",
+            f"{ns} → main: {n} starting memories are now ordinary memories")
+        return n
 
     @_synchronized
     def reembed(self, model_name: str = DEFAULT_MODEL, caller: str = "user") -> int:
@@ -302,7 +324,7 @@ class Vault:
               tags: list[str] | None = None, importance: float = 0.5,
               quarantined: bool = False, pack: str | None = None,
               vec: np.ndarray | None = None, prov: dict | None = None,
-              _journal: bool = True) -> dict:
+              _journal: bool = True, _dedup: bool = True) -> dict:
         self._require_open()
         ns = namespace or self.config.default_namespace(caller)
         if pack is None:
@@ -312,8 +334,8 @@ class Vault:
         if vec is None:
             vec = self.embedder.embed_passages([text])[0]
         # near-duplicate check within the namespace (organic memories only -
-        # pack contents are curated and install verbatim)
-        thr = 2.0 if pack is not None else float(
+        # curated pack/seed contents install verbatim)
+        thr = 2.0 if (pack is not None or not _dedup) else float(
             self.config.settings.get("duplicate_threshold", 0.97))
         for ikey, score in self.index.search(vec, 1):
             rid = self._id_by_ikey.get(ikey)

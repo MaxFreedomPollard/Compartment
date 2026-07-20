@@ -1,12 +1,13 @@
 """Post-install health check: canned queries against the frozen core
-section of the starter pack (ids core-001..core-260).
+starting memories (ids core-001..core-260, seeded into "main" at init).
 
 Each query must place its expected record in the top 3 hybrid-search hits.
-Doubles as the relevance regression benchmark (the seed pack never changes
+Doubles as the relevance regression benchmark (the core facts never change
 within a major version).
 """
 from __future__ import annotations
 
+import json
 import time
 
 # (query, expected core-facts record id)
@@ -41,13 +42,12 @@ def run(vault, caller: str = "selftest") -> dict:
     idmap = _seed_id_map(vault)
     if not idmap:
         return {"passed": 0, "failed": len(QUERIES), "total": len(QUERIES),
-                "error": "starter pack is not installed",
-                "failures": ["starter pack missing"], "latencies_ms": []}
+                "error": "no starting memories found (run `engram init`)",
+                "failures": ["starting memories missing"], "latencies_ms": []}
     latencies, failures = [], []
     for query, want in QUERIES:
         t0 = time.perf_counter()
-        res = vault.search(query, caller=caller, namespace="packs/starter",
-                           top_k=TOP_N)
+        res = vault.search(query, caller=caller, top_k=TOP_N)
         ms = (time.perf_counter() - t0) * 1000
         latencies.append(round(ms, 1))
         got = [idmap.get(r["id"]) for r in res["results"]]
@@ -62,14 +62,13 @@ def run(vault, caller: str = "selftest") -> dict:
 
 
 def _seed_id_map(vault) -> dict[str, str]:
-    """Map vault record id → original core-facts id (stored in provenance-free
-    pack records via their tags/text? - we match on the stable text prefix)."""
+    """Map vault record id → original seed id, via the stable "id:" tag the
+    seeding path preserves. Reads the (plaintext-in-RAM) tags column
+    directly - no per-record decrypt, no audit noise."""
     out = {}
     for row in vault.db.conn.execute(
-            "SELECT id FROM records WHERE ns = 'packs/starter'"):
-        rec = vault.get(row["id"], caller="selftest")
-        # original ids were preserved in the pack records' "orig_id" tag
-        for t in rec["tags"]:
+            "SELECT id, tags FROM records WHERE tags LIKE '%id:%'"):
+        for t in json.loads(row["tags"]):
             if t.startswith("id:"):
-                out[rec["id"]] = t[3:]
+                out[row["id"]] = t[3:]
     return out

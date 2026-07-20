@@ -31,7 +31,7 @@ def seeded_vault_path(tmp_path_factory):
     from engram import packs
     p = str(tmp_path_factory.mktemp("seeded") / "seeded.vault")
     v, _ = Vault.create(p, PASS, creator="test")
-    packs.install_pack(v, seed_pack_bytes(), caller="test")
+    packs.seed_records(v, seed_pack_bytes(), caller="test")
     v.lock()
     return p
 

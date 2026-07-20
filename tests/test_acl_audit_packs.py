@@ -28,9 +28,17 @@ def test_namespace_acl_read_write(vault):
     assert {r["namespace"] for r in res["results"]} <= {"hermes", "shared"}
 
 
-def test_pack_namespaces_always_readonly(seeded_vault):
+def test_pack_namespaces_always_readonly(vault):
+    """Real packs (not the starter seed) still install as read-only sections."""
+    ident = packs.new_identity("author")
+    vec = vault.embedder.embed_passages(["curated pack fact"])
+    blob = packs.build_pack(
+        name="curated", version="1.0.0", description="", identity=ident,
+        records=[{"text": "curated pack fact"}], vectors=vec,
+        model=dict(vault.header.model))
+    packs.install_pack(vault, blob, caller="test")
     with pytest.raises(AclError):
-        seeded_vault.store("vandalism", caller="test", namespace="packs/starter")
+        vault.store("vandalism", caller="test", namespace="packs/curated")
 
 
 def test_quarantine_envelope(vault):

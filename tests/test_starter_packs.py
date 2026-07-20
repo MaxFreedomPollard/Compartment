@@ -33,13 +33,71 @@ def test_starter_source_matches_pack():
 
 
 def test_os_facts_recallable(vault):
-    packs.install_pack(vault, (DATA / "starter.mpack").read_bytes(), caller="t")
+    packs.seed_records(vault, (DATA / "starter.mpack").read_bytes(), caller="t")
     hit = vault.search("registry hive for machine-wide settings", caller="t",
-                       namespace="packs/starter", top_k=3)["results"]
+                       top_k=3)["results"]
     assert any("HKEY_LOCAL_MACHINE" in h["text"] or "HKLM" in h["text"] for h in hit)
     hit = vault.search("command to sign code on mac", caller="t",
-                       namespace="packs/starter", top_k=3)["results"]
+                       top_k=3)["results"]
     assert any("codesign" in h["text"] for h in hit)
+
+
+def test_seed_lands_in_main_fully_editable(vault):
+    """Starting memories are ordinary memories: in "main", no pack marker,
+    forgettable, and sitting in the same namespace new memories go to."""
+    out = packs.seed_records(vault, (DATA / "starter.mpack").read_bytes(),
+                             caller="t")
+    assert out["namespace"] == "main"
+    assert out["used_precomputed_vectors"] is True
+    assert vault.db.count("main") == 4808
+    assert vault.db.count("packs/starter") == 0
+    assert vault.pack_list() == []          # no separate section registered
+    row = vault.db.conn.execute(
+        "SELECT id, pack FROM records LIMIT 1").fetchone()
+    assert row["pack"] is None
+    # editable: forget one starting memory like any other memory
+    vault.forget(row["id"], caller="t")
+    assert vault.db.count("main") == 4807
+    # new memories land in the very same namespace
+    vault.store("organic memory next to the starters", caller="t")
+    assert vault.db.count("main") == 4808
+
+
+def test_legacy_starter_vault_merges_on_unlock(tmp_path):
+    """A vault built by an older engRAM (separate read-only packs/starter
+    section) is reorganized on unlock: every record moves to "main" with
+    text, tags, importance, created timestamps and provenance untouched.
+    Nothing is deleted, nothing is re-embedded."""
+    from conftest import PASS
+    from engram.vault import Vault
+    p = str(tmp_path / "legacy.vault")
+    v, _ = Vault.create(p, PASS, creator="legacy")
+    packs.install_pack(v, (DATA / "starter.mpack").read_bytes(), caller="legacy")
+    before = {
+        r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])
+        for r in v.db.conn.execute("SELECT * FROM records")}
+    assert v.db.count("packs/starter") == 4808
+    v.lock()
+
+    v2 = Vault.unlock(p, passphrase=PASS)
+    assert v2.db.count("packs/starter") == 0
+    assert v2.db.count("main") == 4808
+    assert v2.pack_list() == []
+    after = {
+        r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])
+        for r in v2.db.conn.execute("SELECT * FROM records")}
+    assert after == before                   # pure reorganization, zero edits
+    # merged memories are freely editable now
+    rid = next(iter(after))
+    v2.forget(rid, caller="legacy")
+    assert v2.db.count("main") == 4807
+    # audit trail records the reorganization
+    ops = [r["op"] for r in v2.db.conn.execute("SELECT op FROM audit")]
+    assert "merge" in ops
+    # and the merge is durable: reopen shows the merged layout
+    v2.lock()
+    v3 = Vault.unlock(p, passphrase=PASS)
+    assert v3.db.count("main") == 4807 and v3.db.count("packs/starter") == 0
 
 
 def test_pack_export_roundtrip(tmp_path):

@@ -132,6 +132,47 @@ def read_pack(blob: bytes, passphrase: str | None = None
 
 
 # ---------------------------------------------------------------------------
+# Seed (starter memories → ordinary editable records in "main")
+# ---------------------------------------------------------------------------
+
+def seed_records(vault, blob: bytes, caller: str = "user",
+                 namespace: str | None = None) -> dict:
+    """Add a pack's contents as ORDINARY memories - the starter path.
+
+    The .mpack file is only the delivery container: its signature and content
+    hash are verified before a single record is accepted, exactly like
+    install_pack. But nothing lands in a separate read-only section - every
+    record goes into the caller's normal namespace (default "main"), fully
+    editable and forgettable, as if the agent had stored it. Matching model
+    → precomputed vectors load directly (no compute)."""
+    header, records, vectors = read_pack(blob)
+    ns = namespace or vault.config.default_namespace(caller)
+    model_matches = (header["model"]["name"] == vault.header.model["name"]
+                     and header["model"]["sha256"] == vault.header.model["sha256"])
+    if not model_matches:
+        vectors = vault.embedder.embed_passages([r["text"] for r in records])
+    for r, vec in zip(records, vectors):
+        # preserve the author's stable record id as an "id:" tag
+        tags = list(r.get("tags", []))
+        if "id" in r:
+            tags.append(f"id:{r['id']}")
+        vault.store(r["text"], caller=caller, namespace=ns,
+                    tags=tags, importance=r.get("importance", 0.5),
+                    quarantined=False, vec=np.asarray(vec),
+                    prov={"host": "seed", "agent": header["creator"],
+                          "session": f"{header['name']}@{header['version']}"},
+                    _journal=False, _dedup=False)
+    vault._audit_and_capture(
+        caller, "seed",
+        f"{header['name']}@{header['version']}: {len(records)} starting "
+        f"memories → {ns}")
+    vault.save()
+    return {"name": header["name"], "version": header["version"],
+            "records": len(records), "namespace": ns,
+            "used_precomputed_vectors": model_matches}
+
+
+# ---------------------------------------------------------------------------
 # Install / remove (operate on an unlocked Vault)
 # ---------------------------------------------------------------------------
 
