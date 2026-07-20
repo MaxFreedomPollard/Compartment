@@ -357,6 +357,17 @@ def cmd_serve(args) -> None:
     server.main(argv)
 
 
+def cmd_dash(args) -> None:
+    if offline_guard.is_active():
+        _die("dash shows a local page over 127.0.0.1, which needs one loopback "
+             "socket; the offline guard blocks creating ANY inet socket. Run "
+             "dash without --assert-offline (it still makes zero outbound "
+             "connections).")
+    from . import dash
+    v = _open_vault(args)
+    dash.run(args.vault, v)
+
+
 # ------------------------------------------------------------------- packs
 
 def cmd_pack_build(args) -> None:
@@ -716,6 +727,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("serve", help="run the MCP stdio server")
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("dash", help="open the vault dashboard in your browser")
+    p.set_defaults(fn=cmd_dash)
 
     pp = sub.add_parser("pack", help="memory packs")
     pp_sub = pp.add_subparsers(dest="pack_cmd", required=True)
