@@ -202,6 +202,50 @@ def cmd_search(args) -> None:
     v.save()
 
 
+def _ts(s: str | None) -> float | None:
+    """Deterministic timestamp parse: unix float, or ISO date/datetime."""
+    if s is None:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        import datetime as _dt
+        return _dt.datetime.fromisoformat(s).timestamp()
+
+
+def cmd_link(args) -> None:
+    v = _open_vault(args)
+    out = v.link(args.subject, args.predicate, args.object, caller=args.caller,
+                 namespace=args.namespace, src_id=args.src,
+                 valid_from=_ts(getattr(args, "from")), valid_to=_ts(args.to))
+    _print(out)
+    v.save()
+
+
+def cmd_relations(args) -> None:
+    v = _open_vault(args)
+    out = v.relations(caller=args.caller, entity=args.entity,
+                      subject=args.subject, predicate=args.predicate,
+                      obj=args.object, as_of=_ts(args.as_of),
+                      namespace=args.namespace)
+    if args.json:
+        _print(out)
+    else:
+        for r in out["relations"]:
+            window = ""
+            if r["valid_from"] or r["valid_to"]:
+                window = f"  [{r['valid_from'] or '…'} → {r['valid_to'] or '…'}]"
+            print(f"{r['subject']} -[{r['predicate']}]→ {r['object']}"
+                  f"{window}  ({r['id'][:8]})")
+        print(f"-- {len(out['relations'])} relations. {out['note']}")
+    v.save()
+
+
+def cmd_unlink(args) -> None:
+    v = _open_vault(args)
+    _print(v.unlink(args.id, caller=args.caller))
+
+
 def cmd_get(args) -> None:
     v = _open_vault(args)
     _print(v.get(args.id, caller=args.caller))
@@ -600,6 +644,30 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--top-k", type=int, default=8)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser("link", help="map a relation: SUBJECT PREDICATE OBJECT")
+    p.add_argument("subject")
+    p.add_argument("predicate")
+    p.add_argument("object")
+    p.add_argument("--namespace")
+    p.add_argument("--src", help="memory record id this relation came from")
+    p.add_argument("--from", help="valid from (ISO date or unix time)")
+    p.add_argument("--to", help="valid until (ISO date or unix time)")
+    p.set_defaults(fn=cmd_link)
+
+    p = sub.add_parser("relations", help="query the memory graph")
+    p.add_argument("--entity", help="match subject OR object")
+    p.add_argument("--subject")
+    p.add_argument("--predicate")
+    p.add_argument("--object")
+    p.add_argument("--as-of", dest="as_of", help="ISO date or unix time")
+    p.add_argument("--namespace")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_relations)
+
+    p = sub.add_parser("unlink", help="remove one relation by id")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_unlink)
 
     p = sub.add_parser("get", help="fetch one memory by id")
     p.add_argument("id")

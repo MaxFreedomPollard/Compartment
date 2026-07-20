@@ -35,6 +35,24 @@ CREATE TABLE IF NOT EXISTS records (
     accessed REAL NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS relations (
+    id TEXT PRIMARY KEY,
+    subject TEXT NOT NULL,
+    subject_n TEXT NOT NULL,        -- normalized (lowercase) for matching
+    predicate TEXT NOT NULL,
+    predicate_n TEXT NOT NULL,
+    object TEXT NOT NULL,
+    object_n TEXT NOT NULL,
+    ns TEXT NOT NULL,
+    src_id TEXT,                    -- memory record this was derived from
+    valid_from REAL,                -- when the fact became true (optional)
+    valid_to REAL,                  -- when it stopped being true (optional)
+    prov TEXT NOT NULL,
+    created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rel_subject ON relations(subject_n);
+CREATE INDEX IF NOT EXISTS rel_object ON relations(object_n);
+CREATE INDEX IF NOT EXISTS rel_predicate ON relations(predicate_n);
 CREATE TABLE IF NOT EXISTS audit (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -64,6 +82,9 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         if image is not None:
             self.conn.deserialize(image)
+            # idempotent schema upgrade: vaults sealed by older versions gain
+            # any new tables (e.g. relations) the moment they are opened
+            self.conn.executescript(SCHEMA)
         else:
             self.conn.executescript(SCHEMA)
         try:
@@ -158,6 +179,100 @@ class Store:
             (safe, limit),
         ).fetchall()
         return [(r["id"], float(r["rank"])) for r in rows]
+
+    # -- relations (the memory graph) ---------------------------------------
+
+    @staticmethod
+    def _norm_entity(s: str) -> str:
+        return " ".join((s or "").split()).lower()
+
+    def insert_relation(self, *, rel_id: str | None, subject: str, predicate: str,
+                        obj: str, ns: str, src_id: str | None,
+                        valid_from: float | None, valid_to: float | None,
+                        prov: dict, created: float | None = None) -> str:
+        rid = rel_id or uuid.uuid4().hex
+        self.conn.execute(
+            "INSERT INTO relations (id, subject, subject_n, predicate, predicate_n,"
+            " object, object_n, ns, src_id, valid_from, valid_to, prov, created)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, subject.strip(), self._norm_entity(subject),
+             predicate.strip(), self._norm_entity(predicate),
+             obj.strip(), self._norm_entity(obj), ns, src_id,
+             valid_from, valid_to, json.dumps(prov), created or time.time()))
+        return rid
+
+    def find_relation(self, subject: str, predicate: str, obj: str,
+                      ns: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM relations WHERE subject_n = ? AND predicate_n = ?"
+            " AND object_n = ? AND ns = ?",
+            (self._norm_entity(subject), self._norm_entity(predicate),
+             self._norm_entity(obj), ns)).fetchone()
+
+    def get_relation(self, rel_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM relations WHERE id = ?", (rel_id,)).fetchone()
+
+    def delete_relation(self, rel_id: str) -> bool:
+        cur = self.conn.execute("DELETE FROM relations WHERE id = ?", (rel_id,))
+        return cur.rowcount > 0
+
+    def query_relations(self, *, entity: str | None = None,
+                        subject: str | None = None, predicate: str | None = None,
+                        obj: str | None = None, as_of: float | None = None,
+                        ns_in: set[str] | None = None,
+                        limit: int = 500) -> list[sqlite3.Row]:
+        """Deterministic filter over the graph; any combination of criteria.
+        `entity` matches subject OR object. `as_of` keeps relations whose
+        validity window covers that instant (open-ended windows always match).
+        """
+        where, params = [], []
+        if entity is not None:
+            where.append("(subject_n = ? OR object_n = ?)")
+            params += [self._norm_entity(entity)] * 2
+        if subject is not None:
+            where.append("subject_n = ?")
+            params.append(self._norm_entity(subject))
+        if predicate is not None:
+            where.append("predicate_n = ?")
+            params.append(self._norm_entity(predicate))
+        if obj is not None:
+            where.append("object_n = ?")
+            params.append(self._norm_entity(obj))
+        if as_of is not None:
+            where.append("(valid_from IS NULL OR valid_from <= ?)")
+            params.append(as_of)
+            where.append("(valid_to IS NULL OR valid_to >= ?)")
+            params.append(as_of)
+        if ns_in is not None:
+            if not ns_in:
+                return []
+            where.append(f"ns IN ({','.join('?' * len(ns_in))})")
+            params += sorted(ns_in)
+        sql = "SELECT * FROM relations"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created DESC, id LIMIT ?"
+        params.append(limit)
+        return self.conn.execute(sql, params).fetchall()
+
+    def relation_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM relations").fetchone()["c"]
+
+    def entity_degrees(self, ns_in: set[str] | None = None,
+                       limit: int = 200) -> list[dict]:
+        """Entities ranked by how many relations touch them (display casing =
+        most recent spelling seen)."""
+        rows = self.query_relations(ns_in=ns_in, limit=100_000)
+        seen: dict[str, dict] = {}
+        for r in rows:
+            for norm, disp in ((r["subject_n"], r["subject"]),
+                               (r["object_n"], r["object"])):
+                e = seen.setdefault(norm, {"entity": disp, "degree": 0})
+                e["degree"] += 1
+        out = sorted(seen.values(), key=lambda e: -e["degree"])
+        return out[:limit]
 
     # -- meta ---------------------------------------------------------------
 

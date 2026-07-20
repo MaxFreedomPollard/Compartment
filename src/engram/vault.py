@@ -303,6 +303,15 @@ class Vault:
                            created=r["created"])
         elif op == "forget":
             self.db.delete(e["id"], shred=e["shred"])
+        elif op == "link":
+            r = e["relation"]
+            self.db.insert_relation(
+                rel_id=r["id"], subject=r["subject"], predicate=r["predicate"],
+                obj=r["object"], ns=r["ns"], src_id=r.get("src_id"),
+                valid_from=r.get("valid_from"), valid_to=r.get("valid_to"),
+                prov=r["prov"], created=r["created"])
+        elif op == "unlink":
+            self.db.delete_relation(e["id"])
         else:
             raise TamperError(f"Unknown journal op {op!r}")
         a = e["audit"]
@@ -371,8 +380,10 @@ class Vault:
     def _readable_namespaces(self, caller: str) -> list[str]:
         out = []
         include_packs = self.config.settings.get("include_packs_in_search", True)
-        for entry in self.db.namespaces():
-            ns = entry["namespace"]
+        seen = {e["namespace"] for e in self.db.namespaces()}
+        seen |= {r["ns"] for r in
+                 self.db.conn.execute("SELECT DISTINCT ns FROM relations")}
+        for ns in sorted(seen):
             if ns.startswith("packs/") and not include_packs:
                 continue
             try:
@@ -486,6 +497,92 @@ class Vault:
             self.save()  # rewrite the payload now so the content is gone from disk
         return {"id": record_id, "shredded": shred}
 
+    # ------------------------------------------------------- relations (map)
+
+    @_synchronized
+    def link(self, subject: str, predicate: str, obj: str, caller: str,
+             namespace: str | None = None, src_id: str | None = None,
+             valid_from: float | None = None, valid_to: float | None = None,
+             _journal: bool = True) -> dict:
+        """Record one relation in the memory graph: subject -predicate→ object.
+        Deterministic storage; the judgment of WHAT to link belongs to the
+        host model (or the user), exactly like memory curation. Idempotent:
+        re-linking the same triple returns the existing relation."""
+        self._require_open()
+        ns = namespace or self.config.default_namespace(caller)
+        self.config.check(caller, ns, write=True)
+        for label, val in (("subject", subject), ("predicate", predicate),
+                           ("object", obj)):
+            if not (val or "").strip():
+                raise CryptoError(f"Refusing to link an empty {label}")
+        if src_id is not None and self.db.get_row(src_id) is None:
+            raise CryptoError(f"link: no memory record {src_id!r} to attach to")
+        dupe = self.db.find_relation(subject, predicate, obj, ns)
+        if dupe is not None:
+            return {"id": dupe["id"], "duplicate": True, "namespace": ns}
+        prov = {"host": platform.node(), "agent": caller,
+                "session": os.environ.get("ENGRAM_SESSION", "-")}
+        rid = self.db.insert_relation(
+            rel_id=None, subject=subject, predicate=predicate, obj=obj, ns=ns,
+            src_id=src_id, valid_from=valid_from, valid_to=valid_to, prov=prov)
+        row = self.db.get_relation(rid)
+        arow = self._audit_and_capture(
+            caller, "link", f"{subject.strip()} -[{predicate.strip()}]→ "
+                            f"{obj.strip()} (ns={ns})")
+        if _journal:
+            self._journal({"op": "link", "audit": arow, "relation": {
+                "id": rid, "subject": subject, "predicate": predicate,
+                "object": obj, "ns": ns, "src_id": src_id,
+                "valid_from": valid_from, "valid_to": valid_to,
+                "prov": prov, "created": row["created"],
+            }})
+        return {"id": rid, "duplicate": False, "namespace": ns}
+
+    @_synchronized
+    def unlink(self, relation_id: str, caller: str) -> dict:
+        self._require_open()
+        row = self.db.get_relation(relation_id)
+        if row is None:
+            raise CryptoError(f"No relation {relation_id!r}")
+        self.config.check(caller, row["ns"], write=True)
+        self.db.delete_relation(relation_id)
+        arow = self._audit_and_capture(caller, "unlink", f"id={relation_id}")
+        self._journal({"op": "unlink", "id": relation_id, "audit": arow})
+        return {"id": relation_id, "removed": True}
+
+    @_synchronized
+    def relations(self, caller: str, entity: str | None = None,
+                  subject: str | None = None, predicate: str | None = None,
+                  obj: str | None = None, as_of: float | None = None,
+                  namespace: str | None = None, limit: int = 500) -> dict:
+        """Query the memory graph. Any filter combination; `entity` matches
+        subject OR object (case-insensitive); `as_of` keeps relations whose
+        validity window covers that instant."""
+        self._require_open()
+        if namespace is not None:
+            self.config.grant_for(caller, namespace)
+            allowed = {namespace}
+        else:
+            allowed = set(self._readable_namespaces(caller))
+        rows = self.db.query_relations(entity=entity, subject=subject,
+                                       predicate=predicate, obj=obj,
+                                       as_of=as_of, ns_in=allowed, limit=limit)
+        out = [{"id": r["id"], "subject": r["subject"],
+                "predicate": r["predicate"], "object": r["object"],
+                "namespace": r["ns"], "src_id": r["src_id"],
+                "valid_from": r["valid_from"], "valid_to": r["valid_to"],
+                "created": r["created"], "provenance": json.loads(r["prov"])}
+               for r in rows]
+        self._audit_and_capture(caller, "relations", f"hits={len(out)}")
+        return {"relations": out, "note": DATA_NOT_INSTRUCTIONS}
+
+    @_synchronized
+    def entities(self, caller: str, limit: int = 200) -> list[dict]:
+        """Entities in the memory graph ranked by connectedness."""
+        self._require_open()
+        allowed = set(self._readable_namespaces(caller))
+        return self.db.entity_degrees(ns_in=allowed, limit=limit)
+
     # --------------------------------------------------------------- persist
 
     @_synchronized
@@ -520,6 +617,7 @@ class Vault:
             "vault_id": self.header.vault_id,
             "locked": False,
             "records": n,
+            "relations": self.db.relation_count(),
             "namespaces": self.db.namespaces(),
             "packs": self.pack_list(),
             "model": self.header.model,
