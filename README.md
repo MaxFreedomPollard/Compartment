@@ -76,7 +76,10 @@ Installs the provider plugin, wires the Hermes venv, and runs
 `hermes memory setup engram`. engRAM then appears in the
 `hermes memory setup` picker beside hindsight and mem0, the only entry
 marked **"no setup needed"**: no API key, no cloud account, no daemon.
-Verify with `hermes memory status`.
+Verify with `hermes memory status`. See everything Hermes remembers at
+any time with **`engram dash`** - one command, and the vault opens in
+your browser (memories by kind, growth, the relation graph, live
+search); Ctrl-C closes it.
 
 **OpenClaw** - macOS / Linux:
 ```bash
