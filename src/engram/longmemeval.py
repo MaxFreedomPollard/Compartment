@@ -204,13 +204,27 @@ def run(variant: str = "s", limit: int | None = None,
             cache[t] = v
     texts = sorted((t for t in texts_all if t not in cache), key=len)
     if texts:
+        def _flush_cache() -> None:
+            tmp = cache_file.with_suffix(".tmp.npz")
+            np.savez_compressed(
+                tmp,
+                hashes=np.array(list(disk.keys())),
+                vecs=np.stack(list(disk.values())).astype(np.float32))
+            tmp.replace(cache_file)
+
         print(f"  embedding {len(texts)} unique turns (bundled model, "
               "offline)…")
         t_emb = time.time()
+        since_flush = 0
         for i in range(0, len(texts), 256):
             chunk = texts[i:i + 256]
             for t, v in zip(chunk, embedder.embed_passages(chunk, batch=256)):
                 cache[t] = v
+                disk[_h(t)] = cache[t]
+            since_flush += len(chunk)
+            if since_flush >= 20_000:      # checkpoint: a kill never costs
+                _flush_cache()             # more than ~20k turns of work
+                since_flush = 0
             if (i // 256) % 20 == 0:
                 done = i + len(chunk)
                 rate = done / max(time.time() - t_emb, 1e-9)
@@ -219,12 +233,7 @@ def run(variant: str = "s", limit: int | None = None,
                       end="", flush=True)
         print(f"\r  embedded {len(texts)} turns in "
               f"{time.time() - t_emb:.0f}s" + " " * 30)
-        for t in texts:
-            disk[_h(t)] = cache[t]
-        np.savez_compressed(
-            cache_file,
-            hashes=np.array(list(disk.keys())),
-            vecs=np.stack(list(disk.values())).astype(np.float32))
+        _flush_cache()
         print(f"  cached {len(disk)} turn vectors → {cache_file.name}")
 
     scored, skipped_abs, lat = [], 0, []
