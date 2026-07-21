@@ -43,7 +43,7 @@ pack replaces it wholesale (semver replace, never merge).
   public key travels inside each pack; consumers can pin it.
 - **Stable `id` fields** let you ship regression queries against your pack
   (the ids survive install as `id:` tags - this is exactly how the
-  built-in seed pack's `selftest` works).
+  built-in starter memories' `selftest` works).
 - **Never change published content within a version.** Version bumps are
   cheap; silent mutations defeat the signature's purpose.
 - Facts should stand alone (one self-contained statement per record) -
@@ -76,19 +76,18 @@ to `main` untouched. Canonical hand-editable source:
    ```bash
    python tools/build_starter_pack.py 1.0.1     # arg = new pack version
    ```
-3. Refresh an existing vault and verify (seeds into `main` as ordinary
-   memories; already-present facts simply coexist - forget old ones if
-   you replaced them):
+3. Every future `engram init` then seeds your edited facts (into `main`,
+   as ordinary editable memories). To refresh an EXISTING vault, export
+   your organic memories, init a fresh vault (which seeds the new
+   starter), and import them back:
    ```bash
-   engram import <(python - <<'PY'
-   # or simply create a fresh vault; seeding happens at init
-   PY
-   )
-   engram selftest      # must stay 20/20
+   engram export mine.jsonl --plaintext
+   engram --vault ~/.engram/memory2.vault init
+   engram --vault ~/.engram/memory2.vault import mine.jsonl
+   engram --vault ~/.engram/memory2.vault selftest   # must stay 20/20
    ```
-   The simplest refresh is a fresh `engram init` on a new vault path,
-   then `engram import` of your exported organic memories.
-Every future `engram init` then includes your edits.
+   (Then shred `mine.jsonl` - it is plaintext.) Already-present facts
+   simply coexist; forget the ones you replaced.
 
 The AKC-derived section can be regenerated from upstream with
 `tools/build_akc_pack.py` (writes `tools/starter/akc_regenerated.jsonl`

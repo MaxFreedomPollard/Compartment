@@ -111,7 +111,7 @@ and `engram bench`.
 | Peak RSS, model + vault + index resident | 319 MB |
 | Store one memory (embed + encrypt + fsync journal) | ~40 ms |
 | Wheel size, model included | ~30 MB |
-| Test suite (crypto, tamper, crash, offline, concurrency) | 63 tests, ~25 s |
+| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 88 tests, ~40 s |
 
 A single network round-trip to a cloud memory API costs more than this
 entire pipeline. The property that makes engRAM secure (no plaintext

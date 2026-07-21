@@ -39,18 +39,28 @@ keyslot wrapping fails AEAD auth if slots are altered.
 ### KeySlot
 
 ```json
-{"type": "passphrase" | "recovery",
+{"type": "passphrase" | "recovery" | "passphrase+keyfile",
  "kdf":  {"alg": "argon2id", "time_cost": 3, "memory_kib": 65536, "parallelism": 4},
  "salt": "16-byte hex",
+ "keyfile_id": "first 16 hex chars of SHA-256(keyfile)   (passphrase+keyfile only)",
  "wrapped": "hex of AEAD_seal(key=Argon2id(secret, salt), msg=master_key,
              aad='engram-keyslot')"}
 ```
 
 `AEAD_seal(key, msg, aad)` = 24-byte random nonce ‖
-XChaCha20-Poly1305-IETF(msg, aad, nonce, key). The recovery secret is the
-16 words joined by single spaces, lowercase. The wordlist (256 words) is
-part of this spec (see `crypto.WORDLIST`); each word encodes one byte by
-index.
+XChaCha20-Poly1305-IETF(msg, aad, nonce, key).
+
+Slot secrets:
+- `passphrase` - the user's passphrase, UTF-8. Since 1.8.0 this is the
+  only slot `init`/`rekey` create; no credential is ever auto-generated.
+- `recovery` - LEGACY (1.7 and earlier auto-generated it; 1.8+ only
+  reads it): the 16 words joined by single spaces, lowercase. The
+  wordlist (256 words) is part of this spec (see `crypto.WORDLIST`);
+  each word encodes one byte by index.
+- `passphrase+keyfile` (two-factor, 1.8.0+) - secret =
+  `utf8(passphrase) ‖ b"\x1f engram-2fa \x1f" ‖ keyfile_bytes`, so both
+  factors feed the KDF; `keyfile_id` exists only to name the wrong file
+  in error messages (the keyfile is ≥16 random bytes, not guessable).
 
 ### Payload
 

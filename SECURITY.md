@@ -115,6 +115,16 @@ credentials (session + keychain). Auto-lock drops the in-RAM key after
 the next operation silently re-opens - stored credentials represent
 standing user intent, ended by `engram lock` or a reboot.
 
+**Two-factor interaction, stated honestly:** with `engram 2fa enable`,
+every *credential-based* unlock (passphrase paths 3-4 above, and any
+fresh `engram unlock`) requires the keyfile too - that is enforced by
+the KDF. The session and keychain paths store the unwrapped MASTER key,
+so after one successful two-factor unlock they re-open the vault without
+re-presenting the keyfile, exactly as they skip the passphrase. That is
+the design (they encode standing intent on an already-trusted machine);
+if you want every single open to need both factors, run `engram unlock
+--once` and don't store a credential.
+
 ## Multi-agent, one vault
 
 Several agent processes (Hermes provider, Claude via MCP, the CLI) may
