@@ -12,7 +12,7 @@ command -v "$PY" >/dev/null || { echo "python3 not found. Install from python.or
 if [ -f "$(dirname "$0")/../pyproject.toml" ]; then
   "$PY" -m pip install --user "$(cd "$(dirname "$0")/.." && pwd)"
 else
-  "$PY" -m pip install --user engram-vault
+  "$PY" -m pip install --user engram-memory-vault
 fi
 
 echo
@@ -25,7 +25,7 @@ Done. engRAM is installed and your vault is unlocked (it stays unlocked
 through logins until the next restart, then asks for your passphrase once).
 
 To use it with Hermes:
-  1. python3 -m pip install --user engram-vault    # into the Hermes venv if separate
+  1. python3 -m pip install --user engram-memory-vault    # into the Hermes venv if separate
   2. cp -r integrations/hermes/engram ~/.hermes/plugins/engram
   3. hermes memory setup      # pick "engram" in the list
 

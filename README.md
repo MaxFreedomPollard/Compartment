@@ -54,11 +54,11 @@ encrypted vault, and wires the agent.
 
 **Claude (Code + Desktop)** - macOS / Linux:
 ```bash
-pip install engram-vault && engram init && engram integrate claude
+pip install engram-memory-vault && engram init && engram integrate claude
 ```
 Windows (PowerShell):
 ```powershell
-py -m pip install engram-vault; engram init; engram integrate claude
+py -m pip install engram-memory-vault; engram init; engram integrate claude
 ```
 Registers the MCP server with the Claude Code CLI (user scope, all
 projects), prints the Claude Desktop config block, and prints the one-line
@@ -66,11 +66,11 @@ CLAUDE.md instruction that makes Claude treat engRAM as its memory.
 
 **Hermes** - macOS / Linux:
 ```bash
-pip install engram-vault && engram init && engram integrate hermes
+pip install engram-memory-vault && engram init && engram integrate hermes
 ```
 Windows (PowerShell):
 ```powershell
-py -m pip install engram-vault; engram init; engram integrate hermes
+py -m pip install engram-memory-vault; engram init; engram integrate hermes
 ```
 Installs the provider plugin, wires the Hermes venv, and runs
 `hermes memory setup engram`. engRAM then appears in the
@@ -83,11 +83,11 @@ search); Ctrl-C closes it.
 
 **OpenClaw** - macOS / Linux:
 ```bash
-pip install engram-vault && engram init && engram integrate openclaw
+pip install engram-memory-vault && engram init && engram integrate openclaw
 ```
 Windows (PowerShell):
 ```powershell
-py -m pip install engram-vault; engram init; engram integrate openclaw
+py -m pip install engram-memory-vault; engram init; engram integrate openclaw
 ```
 Writes the `mcpServers` entry into `~/.openclaw/openclaw.json` (with a
 backup), then: `openclaw gateway restart` and confirm with
@@ -95,7 +95,7 @@ backup), then: `openclaw gateway restart` and confirm with
 
 Anything else that speaks MCP gets the same server with one config block;
 see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md). Until the PyPI release,
-replace `pip install engram-vault` with a clone + `pip install .`;
+replace `pip install engram-memory-vault` with a clone + `pip install .`;
 everything else is identical.
 
 ## Measured, on an 8 GB baseline laptop

@@ -2,8 +2,8 @@
 
 Select it like any other memory provider:
 
-    1. pip install engram-vault into the Hermes venv
-       (~/.hermes/hermes-agent/venv/bin/pip install engram-vault)
+    1. pip install engram-memory-vault into the Hermes venv
+       (~/.hermes/hermes-agent/venv/bin/pip install engram-memory-vault)
     2. cp -r this directory → ~/.hermes/plugins/engram/
     3. engram init   (once; then it stays unlocked until restart)
     4. set  memory.provider: engram  in ~/.hermes/config.yaml
@@ -56,7 +56,7 @@ class engRAMMemoryProvider(MemoryProvider):
             import engram  # noqa: F401
         except ImportError:
             logger.info("engram: python package not installed in this venv "
-                        "(pip install engram-vault)")
+                        "(pip install engram-memory-vault)")
             return False
         if not os.path.exists(_vault_path()):
             logger.info("engram: no vault at %s (run `engram init`)", _vault_path())
@@ -253,9 +253,9 @@ class engRAMMemoryProvider(MemoryProvider):
         try:
             import engram  # noqa: F401
         except ImportError:
-            print("  ⚠ The 'engram-vault' package is not installed in this "
+            print("  ⚠ The 'engram-memory-vault' package is not installed in this "
                   "environment.\n    Install it, then re-run `hermes memory setup`:")
-            print("      python -m pip install engram-vault")
+            print("      python -m pip install engram-memory-vault")
             return
         vault = _vault_path()
         if not os.path.exists(vault):

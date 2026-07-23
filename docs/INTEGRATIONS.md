@@ -13,7 +13,7 @@ Claude has no memory-provider picker; registering an MCP server is how you
 give Claude a memory. One command does everything:
 
 ```bash
-pip install engram-vault && engram init && engram integrate claude
+pip install engram-memory-vault && engram init && engram integrate claude
 ```
 
 Or manually (Claude Code):
@@ -49,7 +49,7 @@ instruction to your `CLAUDE.md` / project memory:
 One command:
 
 ```bash
-pip install engram-vault && engram init && engram integrate hermes
+pip install engram-memory-vault && engram init && engram integrate hermes
 ```
 
 Hermes selects external memory through `hermes memory setup`, an arrow-key
@@ -58,7 +58,7 @@ manual steps, for reference:
 
 ```bash
 # 1. engram into the Hermes environment
-python -m pip install engram-vault
+python -m pip install engram-memory-vault
 # 2. the provider plugin (from this repo)
 cp -r integrations/hermes/engram ~/.hermes/plugins/engram
 # 3. a vault (once) - stays unlocked until reboot
@@ -91,14 +91,14 @@ turn encrypted, and exposes `engram_search` / `engram_store` /
 
 **Shipping in Hermes out of the box** (no copy step for anyone): that
 requires an upstream hermes-agent PR bundling this plugin under
-`plugins/memory/engram` with `pip_dependencies: ["engram-vault"]` -
-which in turn requires the PyPI release. Sequence: publish `engram-vault`
+`plugins/memory/engram` with `pip_dependencies: ["engram-memory-vault"]` -
+which in turn requires the PyPI release. Sequence: publish `engram-memory-vault`
 → PR → every Hermes user sees engRAM in the picker by default.
 
 ## OpenClaw - one command (MCP), plugin slot planned
 
 ```bash
-pip install engram-vault && engram init && engram integrate openclaw
+pip install engram-memory-vault && engram init && engram integrate openclaw
 ```
 
 `integrate openclaw` writes the server entry under `mcpServers` in

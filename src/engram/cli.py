@@ -568,9 +568,9 @@ def cmd_integrate(args) -> None:
         if hermes_py.exists():
             r = sp.run([str(hermes_py), "-c", "import engram"], capture_output=True)
             if r.returncode != 0:
-                print("  installing engram-vault into the Hermes venv…")
+                print("  installing engram-memory-vault into the Hermes venv…")
                 sp.run([str(hermes_py), "-m", "pip", "install", "-q",
-                        "engram-vault"], check=False)
+                        "engram-memory-vault"], check=False)
         if not os.path.exists(vault):
             print(f"! no vault at {vault} - run `engram init` first, then re-run "
                   "this command")

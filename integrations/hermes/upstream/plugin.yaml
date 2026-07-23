@@ -1,12 +1,12 @@
 # Bundled-in-hermes variant of plugin.yaml. Identical to
 # ../engram/plugin.yaml except pip_dependencies declares the engine, so
-# `hermes memory setup` auto-installs engram-vault when the user selects
+# `hermes memory setup` auto-installs engram-memory-vault when the user selects
 # engRAM in the picker. Use THIS file in the upstream PR.
 name: engram
 version: 1.5.0
 description: "engRAM: fully offline, AEAD-encrypted vector memory. No API key, no cloud. Locks itself on restart/power loss, per-caller namespaces, crypto-shred deletion, hybrid recall."
 pip_dependencies:
-  - "engram-vault>=1.5"
+  - "engram-memory-vault>=1.5"
 requires_env: []
 hooks:
   - on_session_switch

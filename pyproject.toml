@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "engram-vault"
+name = "engram-memory-vault"
 version = "1.8.0"
 description = "engRAM - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
@@ -15,7 +15,6 @@ dependencies = [
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
     "numpy>=1.26",
-    "usearch>=2.9",
     "mcp>=1.0",
 ]
 
@@ -23,7 +22,12 @@ dependencies = [
 engram = "engram.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# usearch (SIMD HNSW) is only needed ABOVE 20k records; below that engRAM
+# uses an exact brute-force index. Keeping it optional means the default
+# `pip install` compiles nothing and installs cleanly everywhere; large
+# corpora add it with `pip install engram-memory-vault[hnsw]`.
+hnsw = ["usearch>=2.9"]
+dev = ["pytest>=8", "usearch>=2.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
