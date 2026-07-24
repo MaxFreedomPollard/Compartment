@@ -26,7 +26,7 @@ def test_starter_source_matches_pack():
     match it line for line."""
     import json
     src = pathlib.Path(__file__).resolve().parents[1] / "tools" / "starter" / "starter_facts.jsonl"
-    source = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+    source = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
     _, records, _ = packs.read_pack((DATA / "starter.mpack").read_bytes())
     assert [r["id"] for r in records] == [r["id"] for r in source]
     assert [r["text"] for r in records] == [r["text"] for r in source]

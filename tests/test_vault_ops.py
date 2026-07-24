@@ -56,7 +56,9 @@ def test_kill9_crash_recovery(tmp_path):
         os.kill(os.getpid(), 9)
     """)
     p = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-    assert "ACK" in p.stdout and p.returncode == -signal.SIGKILL
+    # Windows has no SIGKILL: os.kill(pid, 9) is TerminateProcess(exit code 9).
+    killed_rc = 9 if os.name == "nt" else -signal.SIGKILL
+    assert "ACK" in p.stdout and p.returncode == killed_rc
     v = Vault.unlock(vp, passphrase=PASS)
     assert v.db.count() == 2
 
