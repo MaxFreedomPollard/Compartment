@@ -27,3 +27,8 @@ jobs:
         env:
           ENGRAM_ASSERT_OFFLINE: "1"
         run: pytest tests/ -q
+
+      - name: Dashboard tests (loopback socket; offline guard intentionally off)
+        # `engram dash` binds 127.0.0.1 by design and is never run under the
+        # offline guard, so its tests run here with the guard off.
+        run: pytest tests/test_dash.py -q

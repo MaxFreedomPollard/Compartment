@@ -7,11 +7,15 @@ Reports embed/store/search latencies (p50/p95) and peak RSS, and checks the
 from __future__ import annotations
 
 import random
-import resource
 import sys
 import time
 
 import numpy as np
+
+try:
+    import resource            # POSIX only; absent on Windows
+except ImportError:            # pragma: no cover - Windows
+    resource = None
 
 from .vindex import build_index
 
@@ -20,6 +24,8 @@ WORDS = ("report vault memory agent record office data schedule market key "
 
 
 def _rss_mb() -> float:
+    if resource is None:       # Windows: peak-RSS via getrusage is unavailable
+        return 0.0
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
 

@@ -1,11 +1,21 @@
 """The dashboard: RAM-served, loopback-only, token-gated, read-only."""
 import json
+import os
 import threading
 import urllib.request
 
 import pytest
 
 from engram import dash
+
+# `engram dash` intentionally binds a 127.0.0.1 socket and is deliberately
+# NOT run under the offline guard (cmd_dash refuses if it is active). So skip
+# these under ENGRAM_ASSERT_OFFLINE=1 - the guard blocks the loopback socket
+# by design; the dashboard is exempt from the zero-network claim. They still
+# run in every normal (non-guarded) test invocation.
+pytestmark = pytest.mark.skipif(
+    os.environ.get("ENGRAM_ASSERT_OFFLINE") == "1",
+    reason="engram dash binds a loopback socket; exempt from the offline guard")
 
 
 @pytest.fixture()
