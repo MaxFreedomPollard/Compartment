@@ -61,8 +61,11 @@ Windows (PowerShell):
 py -m pip install engram-memory-vault; engram init; engram integrate claude
 ```
 Registers the MCP server with the Claude Code CLI (user scope, all
-projects), prints the Claude Desktop config block, and prints the one-line
-CLAUDE.md instruction that makes Claude treat engRAM as its memory.
+projects) and prints the Claude Desktop config block. The server describes
+itself over the MCP handshake - it tells the model to recall before answering
+and to store durable facts, credentials, names, and decisions - so Claude
+treats engRAM as its memory with no hand-written instruction; `integrate
+claude` also writes a managed, idempotent block into your CLAUDE.md as backup.
 
 **Hermes** - macOS / Linux:
 ```bash
@@ -164,7 +167,7 @@ app you babysit.
   **"no setup needed"**. Turns sync automatically; search injects only
   what is relevant, tagged as data not instructions.
 - **Claude over MCP** - one `integrate claude` step registers the server
-  and gives you the Desktop config block plus a CLAUDE.md line so memory
+  and gives you the Desktop config block plus a managed CLAUDE.md block so memory
   is part of normal work.
 - **OpenClaw and any MCP client** - same stdio server, zero open ports,
   same tools (`memory_search`, `memory_store`, `memory_forget`, lock).

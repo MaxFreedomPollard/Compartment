@@ -36,13 +36,15 @@ The `memory_search` / `memory_store` / `memory_forget` / `memory_status` /
 `memory_lock` tools then appear in every session, plus the memory-graph
 tools `memory_link` / `memory_relations` / `memory_unlink` for relational
 mapping (who works where, what belongs to what - with optional validity
-windows and as-of queries). To make Claude treat it
-as *the* memory (the analog of selecting a provider), add one standing
-instruction to your `CLAUDE.md` / project memory:
+windows and as-of queries).
 
-> Use the engram `memory_search` tool to recall prior facts before
-> answering questions about past work, and store durable facts and user
-> decisions with `memory_store`.
+You do **not** need to hand-write a behavioral instruction: the server
+advertises its own operating manual over the MCP `initialize` handshake, so
+every host renders it in its "MCP Server Instructions" section and knows to
+recall before answering and to store durable facts, credentials, names,
+addresses, and decisions - on any machine, with no config. `engram integrate
+claude` additionally writes a managed (sentinel-fenced, idempotent) block into
+your `~/.claude/CLAUDE.md` as belt-and-suspenders for the Claude Code path.
 
 ## Hermes - native provider picker (works today)
 
