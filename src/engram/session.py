@@ -62,8 +62,20 @@ def _boot_key() -> bytes:
     return hashlib.sha256(token.encode()).digest()
 
 
+def _canon(vault_path: str) -> str:
+    """Canonical spelling of a vault path for keying the credential.
+
+    On case-insensitive filesystems (Windows) one physical vault has many
+    valid spellings - the drive letter's case differs between shells
+    (``C:\\`` vs ``c:\\``) - which would otherwise hash to different session
+    files and different AAD, so an `engram unlock` in one shell would look
+    locked in another. normcase folds those spellings; it is a no-op on POSIX,
+    so existing POSIX session files keep matching."""
+    return os.path.normcase(os.path.abspath(vault_path))
+
+
 def _file_for(vault_path: str) -> Path:
-    h = hashlib.sha256(os.path.abspath(vault_path).encode()).hexdigest()[:16]
+    h = hashlib.sha256(_canon(vault_path).encode()).hexdigest()[:16]
     return _session_dir() / f"{h}.session"
 
 
@@ -71,9 +83,9 @@ def store(vault_path: str, master_key: bytes) -> Path:
     """Persist a boot-bound unlock credential for this vault."""
     p = _file_for(vault_path)
     blob = crypto.seal(_boot_key(), master_key,
-                       aad=b"engram-session:" + os.path.abspath(vault_path).encode())
-    p.write_text(json.dumps({"vault": os.path.abspath(vault_path),
-                             "wrapped": blob.hex()}))
+                       aad=b"engram-session:" + _canon(vault_path).encode())
+    p.write_text(json.dumps({"vault": _canon(vault_path),
+                             "wrapped": blob.hex()}), encoding="utf-8")
     os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)  # 0600
     return p
 
@@ -85,10 +97,10 @@ def get(vault_path: str) -> bytes | None:
     if not p.is_file():
         return None
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         return crypto.unseal(
             _boot_key(), bytes.fromhex(data["wrapped"]),
-            aad=b"engram-session:" + os.path.abspath(vault_path).encode())
+            aad=b"engram-session:" + _canon(vault_path).encode())
     except (TamperError, CryptoError, ValueError, KeyError, OSError):
         # different boot (restart/power loss) or corrupt file → locked
         try:

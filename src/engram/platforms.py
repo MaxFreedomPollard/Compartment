@@ -7,10 +7,12 @@ these functions and never imports fcntl / msvcrt / sysctl directly.
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
 import time
+from pathlib import Path
 
 IS_WINDOWS = os.name == "nt"
 
@@ -103,17 +105,60 @@ def boot_time() -> str:
         except OSError:
             pass
     elif system == "Windows":
-        # Kernel tick count since boot at ~10 MHz resolution; the wall-clock
-        # boot instant = now - uptime, stable across the session, new each boot.
         try:
-            import ctypes
-            ticks = ctypes.windll.kernel32.GetTickCount64()  # ms since boot
-            return str(int(time.time() - ticks / 1000))
+            return _windows_boot_token()
         except Exception:
             pass
     raise RuntimeError(
         "Cannot determine boot time on this platform; use --keychain (macOS) "
         "or ENGRAM_PASSPHRASE instead of the boot-session credential")
+
+
+def _win_marker() -> Path:
+    base = Path(os.environ.get("ENGRAM_SESSION_DIR",
+                               Path.home() / ".engram" / "session"))
+    return base / ".winboot"
+
+
+def _windows_boot_token() -> str:
+    """A per-boot token, stable across processes for the life of one boot and
+    new on the next boot.
+
+    Windows has no cheap, in-process, offline kernel boot *timestamp* (WMI/CIM
+    is a slow subprocess, and this runs on every vault open). So we derive the
+    boot instant as wall_clock - uptime and PIN the first value seen this boot
+    to a marker file, reusing it while the machine is still up. Naively
+    recomputing `now - uptime` on every call silently re-keys the session
+    credential and relocks the vault mid-session in three ways this avoids:
+      1. sub-second int() truncation flapping between two processes;
+      2. wall-clock drift after NTP slew accumulating past a second boundary;
+      3. a jump of the whole sleep duration after every sleep/resume
+         (GetTickCount64 excludes sleep; time.time() does not).
+    A real reboot resets uptime and moves the boot instant far beyond the
+    tolerance below, so it is detected and the token changes, as intended."""
+    import ctypes
+    uptime_s = ctypes.windll.kernel32.GetTickCount64() / 1000.0  # excludes sleep
+    computed = time.time() - uptime_s                            # ~boot instant
+    marker = _win_marker()
+    try:
+        rec = json.loads(marker.read_text(encoding="utf-8"))
+        same_boot = (uptime_s + 2.0 >= float(rec["uptime"])       # uptime only grows within a boot
+                     and abs(computed - float(rec["boot"])) <= 300.0)  # tolerate NTP slew
+        if same_boot:
+            return str(int(float(rec["boot"])))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    # First sighting of this boot (or a detected reboot / unreadable marker):
+    # pin the freshly computed value for every later process to reuse.
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_name(marker.name + ".tmp")
+        tmp.write_text(json.dumps({"boot": computed, "uptime": uptime_s}),
+                       encoding="utf-8")
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+    return str(int(computed))
 
 
 def machine_id() -> str:

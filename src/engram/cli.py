@@ -162,11 +162,11 @@ def cmd_lock(args) -> None:
         v = _open_vault(args)
         ident_path = Path(args.identity)
         if ident_path.exists():
-            identity = json.loads(ident_path.read_text())
+            identity = json.loads(ident_path.read_text(encoding="utf-8"))
         else:
             identity = packs.new_identity(args.creator)
             ident_path.parent.mkdir(parents=True, exist_ok=True)
-            ident_path.write_text(json.dumps(identity, indent=2))
+            ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
             print(f"generated signing identity → {ident_path} (keep it private)")
         v.lock(signing_key=packs.load_signing_key(identity))
         print(f"vault sealed + signed by {identity['signer']} "
@@ -276,7 +276,7 @@ def cmd_export(args) -> None:
     data = v.export_jsonl()
     if args.plaintext:
         print("WARNING: exporting PLAINTEXT memories to disk", file=sys.stderr)
-        Path(args.out).write_text(data)
+        Path(args.out).write_text(data, encoding="utf-8")
         print(f"exported {data.count(chr(10))} records → {args.out}")
     else:
         _die("export writes plaintext; pass --plaintext to confirm you want that")
@@ -285,7 +285,7 @@ def cmd_export(args) -> None:
 
 def cmd_import(args) -> None:
     v = _open_vault(args)
-    n = v.import_jsonl(Path(args.file).read_text(), namespace=args.namespace)
+    n = v.import_jsonl(Path(args.file).read_text(encoding="utf-8"), namespace=args.namespace)
     print(f"imported {n} records")
 
 
@@ -475,15 +475,17 @@ def cmd_dash(args) -> None:
 def cmd_pack_build(args) -> None:
     src = Path(args.source)
     if src.suffix == ".jsonl":
-        records = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+        records = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
     elif src.suffix == ".csv":
         import csv
-        with open(src) as f:
+        # newline="" is required by the csv module for correct quoted-newline
+        # handling; utf-8-sig tolerates the BOM Excel writes.
+        with open(src, encoding="utf-8-sig", newline="") as f:
             records = [{"text": row["text"],
                         "tags": [t for t in row.get("tags", "").split(";") if t]}
                        for row in csv.DictReader(f)]
     elif src.is_dir():
-        records = [{"text": p.read_text().strip(), "tags": [p.stem]}
+        records = [{"text": p.read_text(encoding="utf-8").strip(), "tags": [p.stem]}
                    for p in sorted(src.glob("*.md"))]
     else:
         _die("source must be a .jsonl, .csv, or a directory of .md files")
@@ -491,10 +493,10 @@ def cmd_pack_build(args) -> None:
         _die("no records found in source")
     ident_path = Path(args.identity)
     if ident_path.exists():
-        identity = json.loads(ident_path.read_text())
+        identity = json.loads(ident_path.read_text(encoding="utf-8"))
     else:
         identity = packs.new_identity(args.creator)
-        ident_path.write_text(json.dumps(identity, indent=2))
+        ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
         print(f"generated new signing identity → {ident_path} (keep it private)")
     emb = Embedder(DEFAULT_MODEL)
     vectors = emb.embed_passages([r["text"] for r in records])
@@ -536,7 +538,7 @@ def cmd_pack_export(args) -> None:
     rebuilding with `engram pack build`)."""
     header, records, _vectors = packs.read_pack(Path(args.file).read_bytes())
     out = Path(args.out)
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n")
     print(f"exported {header['name']}@{header['version']}: {len(records)} "
@@ -571,14 +573,14 @@ def _write_managed_claude_md() -> Path:
     md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
     md.parent.mkdir(parents=True, exist_ok=True)
     block = f"{_CLAUDE_MD_BEGIN}\n{_CLAUDE_MD_BODY}\n{_CLAUDE_MD_END}"
-    text = md.read_text() if md.exists() else ""
+    text = md.read_text(encoding="utf-8") if md.exists() else ""
     if _CLAUDE_MD_BEGIN in text and _CLAUDE_MD_END in text:
         pre = text.split(_CLAUDE_MD_BEGIN)[0]
         post = text.split(_CLAUDE_MD_END, 1)[1]
         text = pre + block + post
     else:
         text = (text.rstrip() + "\n\n" + block + "\n") if text.strip() else block + "\n"
-    md.write_text(text)
+    md.write_text(text, encoding="utf-8")
     return md
 
 
@@ -626,11 +628,11 @@ def cmd_integrate(args) -> None:
         wrote = False
         if cfg_path.is_file():
             try:
-                cfg = json.loads(cfg_path.read_text())
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
                 backup = cfg_path.with_suffix(".json.bak-engram")
-                backup.write_text(cfg_path.read_text())
+                backup.write_bytes(cfg_path.read_bytes())  # byte-exact recovery copy
                 cfg.setdefault("mcpServers", {})["engram"] = entry
-                cfg_path.write_text(json.dumps(cfg, indent=2))
+                cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
                 wrote = True
                 print(f"✓ registered in {cfg_path} (backup: {backup.name})")
                 print("  restart to load:  openclaw gateway restart")
@@ -651,7 +653,8 @@ def cmd_integrate(args) -> None:
             print("  registering the engRAM MCP server with Claude Code…")
             r = sp.run([claude, "mcp", "add", "--scope", "user", "engram", "--",
                         engram_bin, "--vault", vault, "--caller", "claude-code",
-                        "serve"], capture_output=True, text=True)
+                        "serve"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
             print((r.stdout or r.stderr).strip() or "  registered.")
         else:
             print("  Claude Code CLI not found; register manually with:")
@@ -704,7 +707,7 @@ def cmd_setup(args) -> None:
         pins = {"dim": spec["dim"], "files": hashes,
                 "prefix_query": spec.get("prefix_query", ""),
                 "prefix_passage": spec.get("prefix_passage", "")}
-        (d / "HASHES.json").write_text(json.dumps(pins, indent=2))
+        (d / "HASHES.json").write_text(json.dumps(pins, indent=2), encoding="utf-8")
         print(f"installed model {name} → {d} (hashes pinned)")
     elif args.setup_cmd == "download-longmemeval":
         if offline_guard.is_active():

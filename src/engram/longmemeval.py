@@ -164,7 +164,7 @@ def run(variant: str = "s", limit: int | None = None,
         raise CryptoError(
             f"LongMemEval dataset not found at {p}. Fetch it once with: "
             f"engram setup download-longmemeval --variant {variant}")
-    instances = json.loads(p.read_text())
+    instances = json.loads(p.read_text(encoding="utf-8"))
     if limit:
         instances = instances[:limit]
 
@@ -193,8 +193,12 @@ def run(variant: str = "s", limit: int | None = None,
         f".vecs-{embedder.model_sha256[:12]}.npz")
     disk: dict[str, np.ndarray] = {}
     if cache_file.exists():
-        z = np.load(cache_file)
-        disk = dict(zip(z["hashes"], z["vecs"]))
+        # Close the NpzFile before _flush_cache() later os.replace()s over it:
+        # np.load keeps the archive open, and Windows refuses to replace a file
+        # with a live handle. Member arrays are materialized on access, so the
+        # dict is fully built inside the with-block.
+        with np.load(cache_file) as z:
+            disk = dict(zip(z["hashes"], z["vecs"]))
         print(f"  loaded {len(disk)} cached turn vectors from "
               f"{cache_file.name}")
     texts_all = list(uniq)

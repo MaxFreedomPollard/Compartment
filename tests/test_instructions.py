@@ -33,7 +33,7 @@ def test_store_tool_docstring_says_when():
 
 
 def test_hermes_plugin_prompts_when_to_store():
-    txt = (ROOT / "src" / "engram" / "data" / "hermes-plugin" / "__init__.py").read_text()
+    txt = (ROOT / "src" / "engram" / "data" / "hermes-plugin" / "__init__.py").read_text(encoding="utf-8")
     # system-prompt block names the categories and the recall-first habit
     assert "API keys" in txt and "credentials" in txt
     assert "engram_store the moment" in txt
@@ -48,18 +48,18 @@ def test_hermes_plugin_prompts_when_to_store():
 def test_managed_claude_md_is_idempotent_and_preserves_user_text(tmp_path, monkeypatch):
     from engram import cli
     md = tmp_path / "CLAUDE.md"
-    md.write_text("# My own notes\nkeep this line\n")
+    md.write_text("# My own notes\nkeep this line\n", encoding="utf-8")
     monkeypatch.setenv("CLAUDE_MD", str(md))
 
     cli._write_managed_claude_md()
-    t1 = md.read_text()
+    t1 = md.read_text(encoding="utf-8")
     assert "keep this line" in t1                 # user text untouched
     assert cli._CLAUDE_MD_BEGIN in t1 and cli._CLAUDE_MD_END in t1
     assert "memory_store" in t1 and "memory_search" in t1 and "API keys" in t1
 
     # second run updates in place, never duplicates
     cli._write_managed_claude_md()
-    t2 = md.read_text()
+    t2 = md.read_text(encoding="utf-8")
     assert t2.count(cli._CLAUDE_MD_BEGIN) == 1
     assert t2.count(cli._CLAUDE_MD_END) == 1
     assert "keep this line" in t2
@@ -70,4 +70,4 @@ def test_managed_block_created_when_no_file(tmp_path, monkeypatch):
     md = tmp_path / "sub" / "CLAUDE.md"      # parent doesn't exist yet
     monkeypatch.setenv("CLAUDE_MD", str(md))
     cli._write_managed_claude_md()
-    assert md.exists() and cli._CLAUDE_MD_BEGIN in md.read_text()
+    assert md.exists() and cli._CLAUDE_MD_BEGIN in md.read_text(encoding="utf-8")

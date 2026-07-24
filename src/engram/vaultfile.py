@@ -18,6 +18,7 @@ import io
 import json
 import os
 import struct
+import time
 from dataclasses import dataclass, field
 
 from nacl.signing import SigningKey, VerifyKey
@@ -65,6 +66,31 @@ class VaultHeader:
             manifest=d.get("manifest"),
             extra=d.get("extra", {}),
         )
+
+
+def _atomic_replace(tmp: str, path: str) -> None:
+    """os.replace, tolerant of the transient sharing violations Windows raises
+    when another process momentarily holds a handle to `path`.
+
+    Readers open the vault with a plain open() (Vault.unlock, `engram status`,
+    the dashboard's stale-reopen, the MCP/Hermes providers). CPython opens
+    files on Windows without FILE_SHARE_DELETE, so a rename-over an open target
+    raises PermissionError (WinError 5/32) - and antivirus/search-indexer
+    handles do the same. POSIX allows rename-over-open, so this is a straight
+    replace there; on Windows we retry briefly so a concurrent reader can't
+    make a save/lock/shred fail outright."""
+    if os.name != "nt":
+        os.replace(tmp, path)
+        return
+    last: OSError | None = None
+    for _ in range(20):            # ~1s worst case
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last = exc
+            time.sleep(0.05)
+    raise last if last is not None else OSError(f"could not replace {path}")
 
 
 def _payload_aad(vault_id: str) -> bytes:
@@ -202,7 +228,7 @@ def write_vault_file(
         f.write(payload_ct)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    _atomic_replace(tmp, path)
 
 
 def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, master_key: bytes) -> None:

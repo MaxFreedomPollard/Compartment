@@ -25,7 +25,7 @@ OUT = ROOT / "src" / "engram" / "data" / "starter.mpack"
 
 VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.0.0"
 
-records = [json.loads(l) for l in SRC.read_text().splitlines() if l.strip()]
+records = [json.loads(l) for l in SRC.read_text(encoding="utf-8").splitlines() if l.strip()]
 ids = [r["id"] for r in records]
 if len(set(ids)) != len(ids):
     dupes = sorted({i for i in ids if ids.count(i) > 1})
@@ -35,7 +35,7 @@ missing = [i for i, r in enumerate(records, 1) if not r.get("text", "").strip()]
 if missing:
     raise SystemExit(f"empty text at line(s) {missing[:10]} - fix before building")
 
-identity = json.loads(IDENTITY_FILE.read_text())
+identity = json.loads(IDENTITY_FILE.read_text(encoding="utf-8"))
 emb = Embedder(DEFAULT_MODEL)
 print(f"embedding {len(records)} facts (bundled model, offline)…")
 vectors = emb.embed_passages([r["text"] for r in records])

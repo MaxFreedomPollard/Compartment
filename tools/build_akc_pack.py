@@ -163,7 +163,7 @@ def load(akc_dir, key):
     if src is None:
         print(f"  (skip {key}: none of {[str(c) for c in candidates]} found)")
         return []
-    return [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+    return [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 def main():
@@ -205,7 +205,7 @@ def main():
     # The starter memory is unified now: this writes the regenerated AKC
     # section as JSONL. Merge it into tools/starter/starter_facts.jsonl
     # (replacing the akc-* lines), then run tools/build_starter_pack.py.
-    with open(OUT, "w") as f:
+    with open(OUT, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n")
     print(f"wrote {OUT} ({len(records)} records) - merge into "

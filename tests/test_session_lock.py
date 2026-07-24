@@ -61,7 +61,7 @@ def test_session_file_bound_to_vault_path(vault, vault_path, tmp_path):
 
 def test_session_wrap_is_aead_not_plaintext(vault, vault_path):
     p = session.store(vault_path, vault._master)
-    raw = p.read_text()
+    raw = p.read_text(encoding="utf-8")
     assert vault._master.hex() not in raw  # never stored in the clear
 
 

@@ -100,7 +100,7 @@ class Embedder:
             pin_file = d / "HASHES.json"
             if not pin_file.is_file():
                 raise ModelError(f"model {model_name}: HASHES.json missing (re-download)")
-            pins = json.loads(pin_file.read_text())
+            pins = json.loads(pin_file.read_text(encoding="utf-8"))
             _verify_hashes(d, pins["files"], f"model {model_name}")
             self.dim = int(pins["dim"])
             self.prefix_query = pins.get("prefix_query", "")

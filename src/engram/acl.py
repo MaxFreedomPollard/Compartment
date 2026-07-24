@@ -44,14 +44,15 @@ class VaultConfig:
         p = cls.path_for(vault_path)
         if not os.path.exists(p):
             return cls()
-        data = json.loads(open(p).read())
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
         cfg = cls()
         cfg.callers = data.get("callers", cfg.callers)
         cfg.settings = {**cfg.settings, **data.get("settings", {})}
         return cfg
 
     def save(self, vault_path: str) -> None:
-        with open(self.path_for(vault_path), "w") as f:
+        with open(self.path_for(vault_path), "w", encoding="utf-8") as f:
             json.dump({"callers": self.callers, "settings": self.settings}, f, indent=2)
 
     # -- ACL ---------------------------------------------------------------
