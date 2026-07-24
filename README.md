@@ -97,9 +97,7 @@ backup), then: `openclaw gateway restart` and confirm with
 `openclaw mcp list`.
 
 Anything else that speaks MCP gets the same server with one config block;
-see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md). Until the PyPI release,
-replace `pip install engram-memory-vault` with a clone + `pip install .`;
-everything else is identical.
+see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
 ## Measured, on an 8 GB baseline laptop
 
