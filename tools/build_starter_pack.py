@@ -43,8 +43,13 @@ blob = packs.build_pack(
     name="starter", version=VERSION,
     description="engRAM starter knowledge: general facts (the frozen selftest "
                 "corpus), pragmatic facts from the Artificial Knowledge "
-                "Collection 6.0 (compilation CC BY-SA 4.0), and OS reference "
-                "facts for macOS, Windows, and Linux.",
+                "Collection 6.0 (compilation CC BY-SA 4.0), OS reference facts "
+                "for macOS, Windows, and Linux, a hardware map of computers "
+                "(Apple/PC/single-board/console/mobile devices, CPUs/GPUs, and "
+                "I/O standards), and offline developer & practical reference "
+                "(networking, HTTP, character encodings, file signatures, "
+                "shell/OS internals, standards & time, physical constants & "
+                "units, and emergency/first-aid).",
     records=records, vectors=vectors,
     model={"name": DEFAULT_MODEL, "sha256": emb.model_sha256, "dim": emb.dim},
     identity=identity)
