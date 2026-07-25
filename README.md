@@ -293,3 +293,7 @@ engram --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 ## License
 
 MIT.
+
+---
+
+mcp-name: io.github.MaxFreedomPollard/engram
