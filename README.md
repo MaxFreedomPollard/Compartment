@@ -96,8 +96,30 @@ Writes the `mcpServers` entry into `~/.openclaw/openclaw.json` (with a
 backup), then: `openclaw gateway restart` and confirm with
 `openclaw mcp list`.
 
-Anything else that speaks MCP gets the same server with one config block;
-see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+**Any MCP client** - macOS / Linux / Windows:
+
+```bash
+pip install engram-memory-vault && engram init
+```
+
+Then add the server to your client's MCP config (stdio transport, no API
+key, no environment variables):
+
+```json
+{
+  "mcpServers": {
+    "engram": {
+      "command": "engram",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+`--vault` and `--caller` are optional (`engram --vault PATH --caller NAME
+serve`); the defaults use `~/.engram/memory.vault` with caller `user`.
+Client-by-client walkthroughs in
+[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
 ## Measured, on an 8 GB baseline laptop
 
