@@ -63,11 +63,11 @@ def test_audit_chain_verify_and_break_detection(vault):
 def test_pack_lifecycle_fast_path_and_reembed(vault):
     out = packs.install_pack(vault, seed_pack_bytes(), caller="test")
     assert out["used_precomputed_vectors"] is True
-    assert out["records"] == 6100
-    assert vault.db.count("packs/starter") == 6100
+    assert out["records"] == 6718
+    assert vault.db.count("packs/starter") == 6718
 
     n = packs.remove_pack(vault, "starter", caller="test")
-    assert n == 6100 and vault.db.count("packs/starter") == 0
+    assert n == 6718 and vault.db.count("packs/starter") == 0
     with pytest.raises(packs.PackError):
         packs.remove_pack(vault, "starter", caller="test")
 
