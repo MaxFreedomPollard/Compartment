@@ -13,16 +13,34 @@ the package, and a full search returns in under 9 ms, beating the round-trip
 a hosted memory charges you for. Every byte at rest is AEAD-encrypted, the
 embedding vectors included, and only your passphrase opens it.
 
-Unlike other agentic memory, we offer  an option to start off with memory -
+Unlike other agentic memory, we offer an option to start off with memory -
 6,718 curated facts seeded at install: the physical constants and unit
 conversions, 800+ hardware facts with real specs (Apple silicon, PCs, CPUs
 and GPUs, phones, game consoles, Raspberry Pi, storage, displays,
-connectors), operating system versions and release names, network ports and
-HTTP, file signatures, character encodings, shell and Unix internals, git,
-regex, SQL and hashing, ISO country, currency and time codes, and more so
-that an offline agent can look something up instead of guessing at it, and
-an online agent has faster recall of essential information instead of
-pulling partially or inaccurately from the internet.
+connectors) to provide a map of computer geography, operating system
+versions and release names, network ports and HTTP, file signatures,
+character encodings, shell and Unix internals, git, regex, SQL and hashing,
+ISO country, currency and time codes, and more. Allows an offline agent to
+operate better without internet, and an online agent to operate faster and
+more accurately.
+
+**More secure, by construction.** Every byte at rest is
+authenticated-encrypted, the embedding vectors included (most tools leave
+those in the clear, and vectors can be inverted back toward text). Deletion
+is cryptographic: destroy the record's key and it is gone, unrecoverable.
+Tampering is detected, history is hash-chained, and the vault locks itself
+on restart or power loss. It runs fully offline: a runtime guard aborts on
+any network attempt, and CI proves it on three operating systems.
+
+**Not one step harder.** One command installs it, creates the vault, and
+wires your agent. No API key, no cloud account, no daemon. Unlock when you
+want to use it; lock when you want it closed. By default an unlock stays
+open for weeks (until restart or you lock it), like any app you leave
+running. The security is free at the point of use because it falls out of
+the architecture, not out of your patience: keeping plaintext off disk
+forces the index into RAM, and a RAM-resident index is also the fastest one
+there is. Secure and fast are the same choice here, and neither costs you a
+configuration step.
 
 #### What sets it apart
 
@@ -89,33 +107,85 @@ pulling partially or inaccurately from the internet.
 - `compartment dash` puts the entire vault on a local page: 127.0.0.1 only,
   random token, read-only.
 
-## Why Compartment
+## The memory logic
 
-**Better recall.** Compartment does not just store chat, it decides what
-matters. A bare "OK" answering "send this reply to the client?" is
-captured as a consent decision, with its question, at the highest
-priority. What you said about yourself and your machine outranks
-background noise. Search is hybrid (meaning plus keywords) and, at
-personal scale, mathematically exact: the top result is the true top
-result, not an approximation. It learns you first, and forgets nothing.
+Full write-path, decision math, and comparisons in
+[docs/MEMORY.md](docs/MEMORY.md). The load-bearing ideas:
 
-**More secure, by construction.** Every byte at rest is authenticated-
-encrypted, the embedding vectors included (most tools leave those in the
-clear, and vectors can be inverted back toward text). Deletion is
-cryptographic: destroy the record's key and it is gone, unrecoverable.
-Tampering is detected, history is hash-chained, and the vault locks itself
-on restart or power loss. It runs fully offline: a runtime guard aborts on
-any network attempt, and CI proves it on three operating systems.
+**Nearly everything is stored; nothing important is buried.** Only empty
+turns are dropped. A bare "OK" is not noise, it is a decision: when the
+agent asks *"Want me to send this reply to the client now?"* and the user
+answers *"OK"*, Compartment resolves the question from the conversation and
+stores
+`[decision 2026-07-20] Approved (answered "OK"): Want me to send this
+reply to the client now?` at the top importance tier. Asking *"did the
+user say to email the client?"* later retrieves exactly that record.
 
-**Not one step harder.** One command installs it, creates the vault, and
-wires your agent. No API key, no cloud account, no daemon. Unlock when you
-want to use it; lock when you want it closed. By default an unlock stays
-open for weeks (until restart or you lock it), like any app you leave
-running. The security is free at the point of use because it falls out of
-the architecture, not out of your patience: keeping plaintext off disk
-forces the index into RAM, and a RAM-resident index is also the fastest
-one there is. Secure and fast are the same choice here, and neither costs
-you a configuration step.
+**Deterministic importance tiers rank recall**: decisions/consent 0.90,
+personal facts and preferences 0.80, the user's machine and configuration
+0.75, other substantive statements 0.55, pleasantries 0.20 (kept, ranked
+last). The fused score is
+`RRF(vector) + RRF(keyword) + 0.02·cosine + 0.006·importance`: cosine
+magnitude keeps the genuinely best match on top, importance settles
+near-ties in favor of what matters. The agent learns the user and the
+computer first, the world second, and forgets nothing.
+
+**One memory, not two.** Agent hosts increasingly ship a memory of their
+own - Claude Code keeps per-project Markdown files with an auto-loaded
+index. Two memories means facts land in whichever one the model happened to
+think of, and neither is complete. Compartment takes over on install: it imports
+what the file memory already holds, and both the MCP handshake and the
+managed CLAUDE.md block tell the model that compartment supersedes it - write
+every new memory here, treat the files as a read-only archive. One vault,
+encrypted, shared by every agent and project on the machine. Nothing is
+deleted; the files stay exactly where they were.
+
+**Capture that does not depend on the model.** Instructions are a request,
+and a host that declares its own memory in its system prompt outranks
+anything a tool says. So `compartment integrate claude` also installs a
+`PostToolUse` hook: when Claude Code writes a memory file, the fact lands in
+the vault whether or not the model ever thought about compartment. The hook is
+additive and idempotent (your other hooks are untouched, settings.json is
+backed up first), it exits successfully no matter what - a memory tool must
+never break your editor - and it stays quiet when the vault is locked.
+`compartment hook status | install | uninstall`, or `integrate claude --no-hooks`.
+
+<p align="center">
+  <img src="docs/images/menubar-panel.png" width="330"
+       alt="The Compartment menu bar panel.">
+</p>
+
+**A menu bar app for the Mac.** Download **Compartment.pkg** from the
+[latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
+and open it - the installer asks whether you also want the menu bar utility,
+and everything (Python included) is self-contained, so there is nothing to
+install first. From a checkout, `pip install 'compartment[menubar]'`
+then `compartment menubar` does the same thing. Either way it puts Compartment in the
+status bar: click the icon and a
+popover shows whether the vault is open, how much it has learned, the three
+settings worth changing day to day (capture hook, whether starter facts join
+searches, auto-lock), and the last five things it remembered. No dock icon,
+no window to manage, and it holds no vault in memory - state comes from the
+CLI, so an idle menu bar app costs nothing.
+
+**See what it just learned.** `compartment recent` lists the newest memories,
+newest last, hiding the thousands of seeded starting facts so the handful
+that real use produced are actually visible - and `compartment status` reports
+`organic_records` beside the total, so a vault that has learned nothing can
+never look busy. Same view over MCP as `memory_recent`.
+
+**One pinned embedding space.** The model's SHA-256 is recorded in the
+vault and enforced at open; cosine comparisons stay mathematically valid
+forever instead of silently degrading when a model changes. Migration is
+explicit: `compartment reindex --re-embed`.
+
+**No LLM inside.** Embeddings run locally (bundled 384-dim int8 ONNX
+model, <300 MB RAM). Judgment belongs to the host model you already run,
+via `memory_store` / `memory_forget`; Compartment contributes deterministic
+capture, encryption, and total recall. That split is what makes the
+offline guarantee absolute and every decision reproducible. Pair Compartment
+with an offline LLM and the whole agent stack can run usefully with no
+network at all.
 
 ## Install
 
@@ -207,93 +277,13 @@ and `compartment bench`.
 | Peak RSS, model + vault + index resident | 319 MB |
 | Store one memory (embed + encrypt + fsync journal) | ~40 ms |
 | Wheel size, model included | ~30 MB |
-| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 88 tests, ~40 s |
+| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 199 tests, ~60 s |
 
 A single network round-trip to a cloud memory API costs more than this
 entire pipeline. The property that makes Compartment secure (no plaintext
 index ever on disk, so all search is RAM-resident) is the same property
 that makes it fast: below 20k records search is exact SIMD matrix math,
 recall = 1.0 by construction; above it, SIMD HNSW at ~99% recall.
-
-## The memory logic
-
-Full write-path, decision math, and comparisons in
-[docs/MEMORY.md](docs/MEMORY.md). The load-bearing ideas:
-
-**Nearly everything is stored; nothing important is buried.** Only empty
-turns are dropped. A bare "OK" is not noise, it is a decision: when the
-agent asks *"Want me to send this reply to the client now?"* and the user
-answers *"OK"*, Compartment resolves the question from the conversation and
-stores
-`[decision 2026-07-20] Approved (answered "OK"): Want me to send this
-reply to the client now?` at the top importance tier. Asking *"did the
-user say to email the client?"* later retrieves exactly that record.
-
-**Deterministic importance tiers rank recall**: decisions/consent 0.90,
-personal facts and preferences 0.80, the user's machine and configuration
-0.75, other substantive statements 0.55, pleasantries 0.20 (kept, ranked
-last). The fused score is
-`RRF(vector) + RRF(keyword) + 0.02·cosine + 0.006·importance`: cosine
-magnitude keeps the genuinely best match on top, importance settles
-near-ties in favor of what matters. The agent learns the user and the
-computer first, the world second, and forgets nothing.
-
-**One memory, not two.** Agent hosts increasingly ship a memory of their
-own - Claude Code keeps per-project Markdown files with an auto-loaded
-index. Two memories means facts land in whichever one the model happened to
-think of, and neither is complete. Compartment takes over on install: it imports
-what the file memory already holds, and both the MCP handshake and the
-managed CLAUDE.md block tell the model that compartment supersedes it - write
-every new memory here, treat the files as a read-only archive. One vault,
-encrypted, shared by every agent and project on the machine. Nothing is
-deleted; the files stay exactly where they were.
-
-**Capture that does not depend on the model.** Instructions are a request,
-and a host that declares its own memory in its system prompt outranks
-anything a tool says. So `compartment integrate claude` also installs a
-`PostToolUse` hook: when Claude Code writes a memory file, the fact lands in
-the vault whether or not the model ever thought about compartment. The hook is
-additive and idempotent (your other hooks are untouched, settings.json is
-backed up first), it exits successfully no matter what - a memory tool must
-never break your editor - and it stays quiet when the vault is locked.
-`compartment hook status | install | uninstall`, or `integrate claude --no-hooks`.
-
-<p align="center">
-  <img src="docs/images/menubar-panel.png" width="330"
-       alt="The Compartment menu bar panel.">
-</p>
-
-**A menu bar app for the Mac.** Download **Compartment.pkg** from the
-[latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
-and open it - the installer asks whether you also want the menu bar utility,
-and everything (Python included) is self-contained, so there is nothing to
-install first. From a checkout, `pip install 'compartment[menubar]'`
-then `compartment menubar` does the same thing. Either way it puts Compartment in the
-status bar: click the icon and a
-popover shows whether the vault is open, how much it has learned, the three
-settings worth changing day to day (capture hook, whether starter facts join
-searches, auto-lock), and the last five things it remembered. No dock icon,
-no window to manage, and it holds no vault in memory - state comes from the
-CLI, so an idle menu bar app costs nothing.
-
-**See what it just learned.** `compartment recent` lists the newest memories,
-newest last, hiding the thousands of seeded starting facts so the handful
-that real use produced are actually visible - and `compartment status` reports
-`organic_records` beside the total, so a vault that has learned nothing can
-never look busy. Same view over MCP as `memory_recent`.
-
-**One pinned embedding space.** The model's SHA-256 is recorded in the
-vault and enforced at open; cosine comparisons stay mathematically valid
-forever instead of silently degrading when a model changes. Migration is
-explicit: `compartment reindex --re-embed`.
-
-**No LLM inside.** Embeddings run locally (bundled 384-dim int8 ONNX
-model, <300 MB RAM). Judgment belongs to the host model you already run,
-via `engram_store` / `engram_forget`; Compartment contributes deterministic
-capture, encryption, and total recall. That split is what makes the
-offline guarantee absolute and every decision reproducible. Pair Compartment
-with an offline LLM and the whole agent stack can run usefully with no
-network at all.
 
 ## Agent-native by design
 
@@ -413,8 +403,6 @@ compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 MIT.
 
 ---
-
-The last edition had a lot of nonsense in the Read Me. I disconnected Claude Code from Compartment as I was editing Compartment, and forgot to reconnect it. I then told Claude Code to   convert the name "engRAM" to "Compartment." As if to demonstrate exactly why Compartment is needed in the first place,   it ignored my clear instructions and instead wrote a Harry Potter novel of horseshit. When connected to Compartment, Claude Code knows not to do anything I don't tell it to do, and to never to guess my intentions. Without Compartment, it is not beholden to the user and instead does whatever it guesses an imaginary person wants. If you want your AI Agent to remember everything you tell it across sessions, and actually behave, use Compartment. I built Compartment for myself, because it's truly needed and I couldn't find anything like it anywhere.
 
 mcp-name: io.github.MaxFreedomPollard/compartment
 
