@@ -91,7 +91,7 @@ class Store:
             self.conn.execute("SELECT count(*) FROM fts")
         except sqlite3.OperationalError as exc:
             raise StoreError(
-                "This Python's SQLite lacks FTS5, which engRAM requires "
+                "This Python's SQLite lacks FTS5, which Compartment requires "
                 "for hybrid search. Install a Python built with full SQLite."
             ) from exc
 

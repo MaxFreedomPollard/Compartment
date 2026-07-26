@@ -14,7 +14,7 @@ one a single fact with YAML-ish frontmatter:
 That store is local to one project, unencrypted, and invisible to every
 other agent and host. This module moves those facts into the vault, where
 they are encrypted at rest and shared across every agent that speaks to
-engram. Nothing is deleted: the source files are read, never modified, so
+compartment. Nothing is deleted: the source files are read, never modified, so
 an import is always safe to re-run.
 
 Re-running is a no-op by design - Vault.store's near-duplicate guard
@@ -31,7 +31,7 @@ from pathlib import Path
 DEFAULT_ROOT = Path.home() / ".claude" / "projects"
 INDEX_NAME = "MEMORY.md"          # a table of contents, not a fact
 
-# Frontmatter `type` -> engRAM importance. Mirrors the vault's own tiers:
+# Frontmatter `type` -> Compartment importance. Mirrors the vault's own tiers:
 # who the user is and what they have decided outranks reference material.
 IMPORTANCE = {
     "user": 0.85,
@@ -63,7 +63,7 @@ def discover(root: Path | str | None = None) -> list[Path]:
 
 
 def _parse_frontmatter(raw: str) -> tuple[dict, str]:
-    """Return (fields, body). Hand-rolled: the frontmatter engRAM cares
+    """Return (fields, body). Hand-rolled: the frontmatter Compartment cares
     about is flat scalars plus a one-level `metadata:` block, so pulling in
     a YAML dependency (and its parser CVEs) would be a poor trade."""
     m = _FRONTMATTER.match(raw)
@@ -87,7 +87,7 @@ def _parse_frontmatter(raw: str) -> tuple[dict, str]:
 
 
 def parse(path: Path) -> dict:
-    """One memory file -> the record engRAM should store."""
+    """One memory file -> the record Compartment should store."""
     raw = path.read_text(encoding="utf-8", errors="replace")
     fields, body = _parse_frontmatter(raw)
     name = fields.get("name") or path.stem
@@ -122,7 +122,7 @@ def import_files(vault, files: list[Path], caller: str = "import-claude",
     """Store each parsed memory. Returns counts plus per-file outcomes.
 
     Duplicates are not an error: re-importing an unchanged directory stores
-    nothing new, so this is safe to run on every `engram integrate claude`.
+    nothing new, so this is safe to run on every `compartment integrate claude`.
     """
     imported = duplicates = failed = 0
     items, errors = [], []
@@ -159,7 +159,7 @@ def import_files(vault, files: list[Path], caller: str = "import-claude",
 def pending(vault, root: Path | str | None = None) -> int:
     """How many Claude Code memory files are not in the vault yet.
 
-    Cheap enough for `engram status` to call: it compares file count against
+    Cheap enough for `compartment status` to call: it compares file count against
     records already tagged `claude-memory`, no embedding involved.
     """
     files = discover(root)

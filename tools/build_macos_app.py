@@ -1,6 +1,6 @@
-"""Build engRAM.app - a self-contained macOS menu bar app - and its installer.
+"""Build Compartment.app - a self-contained macOS menu bar app - and its installer.
 
-    python tools/build_macos_app.py            # build build/engRAM.app
+    python tools/build_macos_app.py            # build build/Compartment.app
     python tools/build_macos_app.py --dmg      # …and a drag-to-install .dmg
     python tools/build_macos_app.py --pkg      # …and a .pkg with an optional
                                                #   "start at login" component
@@ -56,17 +56,17 @@ import sysconfig
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 _EMBEDDED_VER = [""]              # X.Y of the interpreter actually embedded
 BUILD = ROOT / "build"
-APP_NAME = "engRAM"
-BUNDLE_ID = "io.github.maxfreedompollard.engram"
+APP_NAME = "Compartment"
+BUNDLE_ID = "io.github.maxfreedompollard.compartment"
 # Shown under the app's name in System Settings > General > Login Items.
-DESCRIPTION = ("engRAM keeps your AI agents' memory encrypted on this Mac. "
+DESCRIPTION = ("Compartment keeps your AI agents' memory encrypted on this Mac. "
                "The menu bar item shows what it has remembered and lets you "
                "change its settings.")
 
 
 def _version() -> str:
     ns: dict = {}
-    exec((ROOT / "src" / "engram" / "__init__.py").read_text(
+    exec((ROOT / "src" / "compartment" / "__init__.py").read_text(
         encoding="utf-8").split("from .")[0], ns)
     return ns.get("__version__", "0.0.0")
 
@@ -179,7 +179,7 @@ def _unseal_hazards(contents: pathlib.Path) -> None:
     which here is `Contents/`. codesign refuses to seal a stray dotfile in the
     bundle root, so the signature comes out structurally invalid:
 
-        engRAM.app: code object is not signed at all
+        Compartment.app: code object is not signed at all
         In subcomponent: …/Contents/.gitignore
 
     An invalid signature is far worse than no signature. Gatekeeper reports
@@ -219,9 +219,9 @@ def _verify_self_contained(app: pathlib.Path) -> None:
     """
     contents = app / "Contents"
     runtime = contents / "Resources" / "runtime"
-    probe = ("import json,sys,engram;"
+    probe = ("import json,sys,compartment;"
              "print(json.dumps({'prefix': sys.prefix, 'path': sys.path,"
-             " 'engram': engram.__file__, 'version': engram.__version__}))")
+             " 'compartment': compartment.__file__, 'version': compartment.__version__}))")
     out = subprocess.run(
         [str(contents / "MacOS" / "python"), "-c", probe],
         capture_output=True, text=True,
@@ -239,11 +239,11 @@ def _verify_self_contained(app: pathlib.Path) -> None:
         raise SystemExit(
             "error: the bundle reaches outside itself - it would not start "
             "on another Mac\n  " + "\n  ".join(strays))
-    if not str(pathlib.Path(info["engram"]).resolve()).startswith(root):
-        raise SystemExit(f"error: engram loaded from {info['engram']}")
+    if not str(pathlib.Path(info["compartment"]).resolve()).startswith(root):
+        raise SystemExit(f"error: compartment loaded from {info['compartment']}")
     if not (runtime / "lib" / f"python{_EMBEDDED_VER[0]}" / "os.py").exists():
         raise SystemExit("error: no standard library inside the bundle")
-    print(f"self-contained: engram {info['version']}, "
+    print(f"self-contained: compartment {info['version']}, "
           f"{len(info['path'])} sys.path entries, all inside the bundle")
 
 
@@ -328,7 +328,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
         "PYTHONDONTWRITEBYTECODE=1\n"
         "export PYTHONDONTWRITEBYTECODE\n"
         "unset PYTHONPATH PYTHONSTARTUP\n"
-        'exec "$here/python" -m engram.cli menubar "$@"\n', encoding="utf-8")
+        'exec "$here/python" -m compartment.cli menubar "$@"\n', encoding="utf-8")
     launcher.chmod(0o755)
 
     build_icon(resources / f"{APP_NAME}.icns")
@@ -346,7 +346,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
         "LSUIElement": True,               # menu bar only, no dock icon
         "LSMinimumSystemVersion": "13.0",
         "NSHumanReadableCopyright": "MIT licensed. https://github.com/"
-                                    "MaxFreedomPollard/engRAM",
+                                    "MaxFreedomPollard/Compartment",
         "NSHumanReadableDescription": DESCRIPTION,
         "LSApplicationCategoryType": "public.app-category.productivity",
     }
@@ -444,7 +444,7 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
     # Both scripts run as root. Anything that touches the user's GUI session -
     # SMAppService, `open` - has to be pushed back into it explicitly: root has
     # no per-user launchd bootstrap, and asking it to register a login item is
-    # what produced "Could not connect to system service engram". `$USER` is
+    # what produced "Could not connect to system service compartment". `$USER` is
     # not the installing human here either, so read the console owner instead.
     preamble = (
         "#!/bin/sh\n"
@@ -463,7 +463,7 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
         "# then LaunchServices and SMAppService resolve whichever they saw\n"
         "# first - often the stale one.\n"
         'if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then\n'
-        '  /bin/rm -rf "/Users/$USER_NAME/Applications/engRAM.app" || true\n'
+        '  /bin/rm -rf "/Users/$USER_NAME/Applications/Compartment.app" || true\n'
         "fi\n"
         'LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks'
         '/LaunchServices.framework/Support/lsregister"\n'
@@ -472,10 +472,10 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
     login_scripts = _scripts("login-scripts", preamble + (
         '[ -n "$USER_UID" ] && [ "$USER_NAME" != "root" ] || exit 0\n'
         "# Register with SMAppService so System Settings > Login Items lists\n"
-        "# engRAM by name, with its icon, instead of a nameless legacy agent.\n"
+        "# Compartment by name, with its icon, instead of a nameless legacy agent.\n"
         "asuser() { /bin/launchctl asuser \"$USER_UID\" /usr/bin/sudo -u "
         '"$USER_NAME" "$@"; }\n'
-        'asuser "$APP/Contents/MacOS/engRAM" --login on || true\n'
+        'asuser "$APP/Contents/MacOS/Compartment" --login on || true\n'
         'asuser /usr/bin/open -a "$APP" || true\n'
         "exit 0\n"))
 
@@ -491,19 +491,19 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
     dist = BUILD / "distribution.xml"
     dist.write_text(f"""<?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-  <title>engRAM</title>
+  <title>Compartment</title>
   <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>
   <volume-check><allowed-os-versions><os-version min="13.0"/></allowed-os-versions></volume-check>
   <choices-outline>
     <line choice="core"/>
     <line choice="login"/>
   </choices-outline>
-  <choice id="core" title="engRAM" description="The engRAM app, its encrypted memory vault, and the `engram` command line tool."
+  <choice id="core" title="Compartment" description="The Compartment app, its encrypted memory vault, and the `compartment` command line tool."
           start_selected="true" start_enabled="false">
     <pkg-ref id="{BUNDLE_ID}"/>
   </choice>
   <choice id="login" title="Menu bar utility"
-          description="Keep engRAM in the menu bar and start it automatically when you log in. You can turn this off later in System Settings &gt; General &gt; Login Items."
+          description="Keep Compartment in the menu bar and start it automatically when you log in. You can turn this off later in System Settings &gt; General &gt; Login Items."
           start_selected="true">
     <pkg-ref id="{BUNDLE_ID}.login"/>
   </choice>
@@ -526,29 +526,29 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
     stage.mkdir(parents=True)
     _run("ditto", app, stage / app.name)
     os.symlink("/Applications", stage / "Applications")
-    # engRAM is signed ad-hoc, not with a paid Developer ID, so it cannot be
+    # Compartment is signed ad-hoc, not with a paid Developer ID, so it cannot be
     # notarised. Anything dragged out of a downloaded .dmg carries the
     # quarantine flag, and macOS refuses to launch a quarantined app it cannot
-    # attribute - silently, because engRAM has no dock icon to bounce. The
+    # attribute - silently, because Compartment has no dock icon to bounce. The
     # .pkg does not have this problem: installer payloads are not quarantined.
     (stage / "READ ME FIRST.txt").write_text(
-        "engRAM " + version + "\n"
+        "Compartment " + version + "\n"
         "=================\n\n"
-        "Easiest install: use engRAM-" + version + ".pkg from the release page\n"
+        "Easiest install: use Compartment-" + version + ".pkg from the release page\n"
         "instead of this disk image. It sets everything up in one click and\n"
         "skips the warning below entirely.\n\n"
         "If you would rather drag the app across:\n\n"
-        "  1. Drag engRAM.app onto the Applications folder here.\n"
+        "  1. Drag Compartment.app onto the Applications folder here.\n"
         "  2. The first time you open it, macOS will say it cannot check the\n"
         "     app for malicious software. That is what it always says about\n"
         "     software not signed with a $99/year Apple Developer ID.\n"
         "  3. Open System Settings > Privacy & Security, scroll down, and\n"
         "     click 'Open Anyway'. You only do this once.\n\n"
-        "engRAM has no dock icon - it lives in the menu bar. If you cannot\n"
+        "Compartment has no dock icon - it lives in the menu bar. If you cannot\n"
         "find its icon there (a full menu bar hides items behind the notch),\n"
-        "just open engRAM.app again: it will show its panel in a window.\n\n"
+        "just open Compartment.app again: it will show its panel in a window.\n\n"
         "Source, and every other way to install:\n"
-        "https://github.com/MaxFreedomPollard/engRAM\n", encoding="utf-8")
+        "https://github.com/MaxFreedomPollard/Compartment\n", encoding="utf-8")
     out = BUILD / f"{APP_NAME}-{version}.dmg"
     out.unlink(missing_ok=True)
     _run("hdiutil", "create", "-volname", f"{APP_NAME} {version}",

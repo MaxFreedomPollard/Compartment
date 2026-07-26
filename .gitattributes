@@ -1,6 +1,6 @@
 # Byte-exactness: these files are SHA-256-pinned (embed.py) or parsed as raw
 # bytes (packs); autocrlf on Windows checkouts must never rewrite them.
-src/engram/models/** -text
+src/compartment/models/** -text
 *.onnx -text
 *.mpack -text
 *.jsonl -text

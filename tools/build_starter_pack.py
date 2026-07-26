@@ -1,4 +1,4 @@
-"""Build src/engram/data/starter.mpack from tools/starter/starter_facts.jsonl.
+"""Build src/compartment/data/starter.mpack from tools/starter/starter_facts.jsonl.
 
 starter_facts.jsonl is THE canonical, hand-editable starter memory: one
 JSON fact per line ({"id", "text", "tags"}). Edit it freely (insert,
@@ -6,7 +6,7 @@ delete, reword, append), then run this script. Every line is re-embedded
 with the bundled model and the pack is re-signed, so edits become vector
 memory automatically. Line position is irrelevant to retrieval; only ids
 must stay unique (and core-001..core-260 must keep their texts, they are
-the frozen `engram selftest` corpus).
+the frozen `compartment selftest` corpus).
 
 Usage:  python tools/build_starter_pack.py [VERSION]
 """
@@ -15,13 +15,13 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from engram import packs
-from engram.embed import DEFAULT_MODEL, Embedder
+from compartment import packs
+from compartment.embed import DEFAULT_MODEL, Embedder
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 IDENTITY_FILE = ROOT / "tools" / "pack_identity.json"
 SRC = ROOT / "tools" / "starter" / "starter_facts.jsonl"
-OUT = ROOT / "src" / "engram" / "data" / "starter.mpack"
+OUT = ROOT / "src" / "compartment" / "data" / "starter.mpack"
 
 VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.0.0"
 
@@ -41,7 +41,7 @@ print(f"embedding {len(records)} facts (bundled model, offline)…")
 vectors = emb.embed_passages([r["text"] for r in records])
 blob = packs.build_pack(
     name="starter", version=VERSION,
-    description="engRAM starter knowledge: general facts (the frozen selftest "
+    description="Compartment starter knowledge: general facts (the frozen selftest "
                 "corpus), pragmatic facts from the Artificial Knowledge "
                 "Collection 6.0 (compilation CC BY-SA 4.0), OS reference facts "
                 "for macOS, Windows, and Linux, a hardware map of computers "

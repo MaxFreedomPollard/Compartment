@@ -6,16 +6,16 @@ import urllib.request
 
 import pytest
 
-from engram import dash
+from compartment import dash
 
-# `engram dash` intentionally binds a 127.0.0.1 socket and is deliberately
+# `compartment dash` intentionally binds a 127.0.0.1 socket and is deliberately
 # NOT run under the offline guard (cmd_dash refuses if it is active). So skip
-# these under ENGRAM_ASSERT_OFFLINE=1 - the guard blocks the loopback socket
+# these under COMPARTMENT_ASSERT_OFFLINE=1 - the guard blocks the loopback socket
 # by design; the dashboard is exempt from the zero-network claim. They still
 # run in every normal (non-guarded) test invocation.
 pytestmark = pytest.mark.skipif(
-    os.environ.get("ENGRAM_ASSERT_OFFLINE") == "1",
-    reason="engram dash binds a loopback socket; exempt from the offline guard")
+    os.environ.get("COMPARTMENT_ASSERT_OFFLINE") == "1",
+    reason="compartment dash binds a loopback socket; exempt from the offline guard")
 
 
 @pytest.fixture()
@@ -42,7 +42,7 @@ def _get(url: str):
 
 def test_page_and_stats(served):
     status, body, headers = _get(served)
-    assert status == 200 and b"engRAM" in body and b"<canvas" in body
+    assert status == 200 and b"Compartment" in body and b"<canvas" in body
     assert headers["Cache-Control"] == "no-store"
     assert "default-src 'none'" in headers["Content-Security-Policy"]
 

@@ -5,10 +5,10 @@ import struct
 import numpy as np
 import pytest
 
-from engram import packs
-from engram.crypto import CryptoError, TamperError
-from engram.vault import Vault
-from engram.vaultfile import VaultFormatError, read_vault_file
+from compartment import packs
+from compartment.crypto import CryptoError, TamperError
+from compartment.vault import Vault
+from compartment.vaultfile import VaultFormatError, read_vault_file
 
 from conftest import PASS
 
@@ -90,7 +90,7 @@ def test_pack_signature_and_content_tamper():
     (hlen,) = struct.unpack(">I", blob[6:10])
     header = json.loads(blob[10:10 + hlen])
     header["records"] = 999  # header tamper → signature invalid
-    import engram.crypto as c
+    import compartment.crypto as c
     hj = c.canonical_json(header)
     forged = blob[:6] + struct.pack(">I", len(hj)) + hj + blob[10 + hlen:]
     with pytest.raises(TamperError):

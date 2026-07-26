@@ -1,6 +1,6 @@
 """Deciding what to remember, and how strongly - offline, deterministic.
 
-Policy (engRAM remembers aggressively, and prioritizes the user + their
+Policy (Compartment remembers aggressively, and prioritizes the user + their
 machine over world trivia):
 
 * STORE NEARLY EVERYTHING. The only turns dropped are genuinely empty ones.
@@ -23,8 +23,8 @@ machine over world trivia):
   information, and its stored text (which includes the question) is not a
   near-duplicate anyway.
 
-engRAM still never calls an LLM - the host model curates explicitly via
-engram_store / engram_forget when it wants to distill or delete.
+Compartment still never calls an LLM - the host model curates explicitly via
+compartment_store / compartment_forget when it wants to distill or delete.
 """
 from __future__ import annotations
 

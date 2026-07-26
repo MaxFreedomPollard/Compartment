@@ -31,7 +31,7 @@ FORMAT_VERSION = 1
 
 
 class VaultFormatError(CryptoError):
-    """The file is not a valid engRAM vault (or a newer, unknown version)."""
+    """The file is not a valid Compartment vault (or a newer, unknown version)."""
 
 
 @dataclass
@@ -72,7 +72,7 @@ def _atomic_replace(tmp: str, path: str) -> None:
     """os.replace, tolerant of the transient sharing violations Windows raises
     when another process momentarily holds a handle to `path`.
 
-    Readers open the vault with a plain open() (Vault.unlock, `engram status`,
+    Readers open the vault with a plain open() (Vault.unlock, `compartment status`,
     the dashboard's stale-reopen, the MCP/Hermes providers). CPython opens
     files on Windows without FILE_SHARE_DELETE, so a rename-over an open target
     raises PermissionError (WinError 5/32) - and antivirus/search-indexer
@@ -148,7 +148,7 @@ def read_vault_file(path: str) -> LoadedVaultFile:
     with open(path, "rb") as f:
         raw = f.read()
     if len(raw) < 10 or raw[:4] != MAGIC:
-        raise VaultFormatError(f"{path} is not a engRAM vault (bad magic)")
+        raise VaultFormatError(f"{path} is not a Compartment vault (bad magic)")
     (version,) = struct.unpack(">H", raw[4:6])
     if version != FORMAT_VERSION:
         raise VaultFormatError(

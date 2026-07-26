@@ -15,7 +15,7 @@ build/
 *.vault
 *.vault.config.json
 *.vault.flock
-engram-airgap.zip
+compartment-airgap.zip
 
 # AKC raw source datasets (build-time only; the built .mpack is what ships)
 tools/akc_source/

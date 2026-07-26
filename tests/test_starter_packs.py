@@ -1,9 +1,9 @@
 """The shipped starter pack: present, signed, precomputed-vector, complete."""
 import pathlib
 
-from engram import packs
+from compartment import packs
 
-DATA = pathlib.Path(__file__).resolve().parents[1] / "src" / "engram" / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "src" / "compartment" / "data"
 
 
 def test_starter_pack_ships_and_verifies():
@@ -64,12 +64,12 @@ def test_seed_lands_in_main_fully_editable(vault):
 
 
 def test_legacy_starter_vault_merges_on_unlock(tmp_path):
-    """A vault built by an older engRAM (separate read-only packs/starter
+    """A vault built by an older Compartment (separate read-only packs/starter
     section) is reorganized on unlock: every record moves to "main" with
     text, tags, importance, created timestamps and provenance untouched.
     Nothing is deleted, nothing is re-embedded."""
     from conftest import PASS
-    from engram.vault import Vault
+    from compartment.vault import Vault
     p = str(tmp_path / "legacy.vault")
     v = Vault.create(p, PASS, creator="legacy")
     packs.install_pack(v, (DATA / "starter.mpack").read_bytes(), caller="legacy")
@@ -103,7 +103,7 @@ def test_legacy_starter_vault_merges_on_unlock(tmp_path):
 def test_pack_export_roundtrip(tmp_path):
     """export → hand-edit (insert a line mid-file) → rebuild keeps everything."""
     import json as _json
-    from engram.embed import DEFAULT_MODEL, Embedder
+    from compartment.embed import DEFAULT_MODEL, Embedder
     _, records, _ = packs.read_pack((DATA / "starter.mpack").read_bytes())
     sample = records[:40]  # keep the test fast
     lines = [_json.dumps(r, sort_keys=True) for r in sample]
@@ -125,6 +125,6 @@ def test_pack_export_roundtrip(tmp_path):
 def test_bundled_hermes_plugin_in_sync():
     root = pathlib.Path(__file__).resolve().parents[1]
     for f in ("__init__.py", "plugin.yaml"):
-        canonical = (root / "integrations" / "hermes" / "engram" / f).read_bytes()
-        shipped = (root / "src" / "engram" / "data" / "hermes-plugin" / f).read_bytes()
+        canonical = (root / "integrations" / "hermes" / "compartment" / f).read_bytes()
+        shipped = (root / "src" / "compartment" / "data" / "hermes-plugin" / f).read_bytes()
         assert canonical == shipped, f"{f} out of sync - re-copy into data/hermes-plugin"

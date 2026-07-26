@@ -1,14 +1,14 @@
 """Boot-session-bound unlock credential.
 
-The lock model engRAM ships by default:
+The lock model Compartment ships by default:
 
-- `engram unlock` once → the vault stays usable continuously - for weeks or
-  months, across logouts/logins, across every new `engram`/`serve` process.
+- `compartment unlock` once → the vault stays usable continuously - for weeks or
+  months, across logouts/logins, across every new `compartment`/`serve` process.
 - Any RESTART or POWER LOSS locks it: the credential is the master key
   wrapped by a key derived from the kernel's boot timestamp (plus uid and
   hostname). A new boot has a new timestamp, so the old wrap can never be
   opened again - the file becomes dead ciphertext and is deleted on sight.
-- `engram lock` (or the MCP panic tool) deletes it immediately.
+- `compartment lock` (or the MCP panic tool) deletes it immediately.
 
 This is deliberately a CONVENIENCE credential, weaker than the passphrase:
 an attacker who can read the session file on the RUNNING, logged-in machine
@@ -18,6 +18,7 @@ alternative but survives reboots; see SECURITY.md for the comparison.
 """
 from __future__ import annotations
 
+from .home import env, home
 import hashlib
 import json
 import os
@@ -30,8 +31,7 @@ from .platforms import boot_time, machine_id
 
 
 def _session_dir() -> Path:
-    d = Path(os.environ.get("ENGRAM_SESSION_DIR",
-                            Path.home() / ".engram" / "session"))
+    d = Path(env("SESSION_DIR", home() / "session"))
     d.mkdir(parents=True, exist_ok=True)
     os.chmod(d, 0o700)
     return d
@@ -68,7 +68,7 @@ def _canon(vault_path: str) -> str:
     On case-insensitive filesystems (Windows) one physical vault has many
     valid spellings - the drive letter's case differs between shells
     (``C:\\`` vs ``c:\\``) - which would otherwise hash to different session
-    files and different AAD, so an `engram unlock` in one shell would look
+    files and different AAD, so an `compartment unlock` in one shell would look
     locked in another. normcase folds those spellings; it is a no-op on POSIX,
     so existing POSIX session files keep matching."""
     return os.path.normcase(os.path.abspath(vault_path))

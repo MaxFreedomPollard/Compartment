@@ -1,8 +1,8 @@
-# engRAM
+# Compartment
 
 ### Superior agentic memory, encrypted at rest.
 
-engRAM is the memory your AI agents plug into. Hermes, Claude, and
+Compartment is the memory your AI agents plug into. Hermes, Claude, and
 OpenClaw each register in one command; anything that runs a subprocess
 can use the CLI. Every agent can share the same memory - even across
 different machines. Everything is local. The default install never
@@ -16,12 +16,12 @@ one lives in **RAM**: the whole index is held in memory, which is what
 makes it both the fastest place to search and the safest place to keep
 plaintext, because nothing decrypted is ever written to disk.*
 
-## Why engRAM
+## Why Compartment
 
-Most memory tools ask you to choose: powerful, or private, or easy. engRAM
+Most memory tools ask you to choose: powerful, or private, or easy. Compartment
 refuses the trade, because one design decision delivers all three.
 
-**Better recall.** engRAM does not just store chat, it decides what
+**Better recall.** Compartment does not just store chat, it decides what
 matters. A bare "OK" answering "send this reply to the client?" is
 captured as a consent decision, with its question, at the highest
 priority. What you said about yourself and your machine outranks
@@ -54,46 +54,46 @@ encrypted vault, and wires the agent.
 
 **Claude (Code + Desktop)** - macOS / Linux:
 ```bash
-pip install engram-memory-vault && engram init && engram integrate claude
+pip install compartment && compartment init && compartment integrate claude
 ```
 Windows (PowerShell):
 ```powershell
-py -m pip install engram-memory-vault; engram init; engram integrate claude
+py -m pip install compartment; compartment init; compartment integrate claude
 ```
 Registers the MCP server with the Claude Code CLI (user scope, all
 projects), **imports any memories Claude Code already wrote to its own
 file-based memory** (copy-only - the Markdown files are never modified;
-`--no-import` opts out, `engram import-claude` does it later), and prints
+`--no-import` opts out, `compartment import-claude` does it later), and prints
 the Claude Desktop config block. The server describes
 itself over the MCP handshake - it tells the model to recall before answering
 and to store durable facts, credentials, names, and decisions - so Claude
-treats engRAM as its memory with no hand-written instruction; `integrate
+treats Compartment as its memory with no hand-written instruction; `integrate
 claude` also writes a managed, idempotent block into your CLAUDE.md as backup.
 
 **Hermes** - macOS / Linux:
 ```bash
-pip install engram-memory-vault && engram init && engram integrate hermes
+pip install compartment && compartment init && compartment integrate hermes
 ```
 Windows (PowerShell):
 ```powershell
-py -m pip install engram-memory-vault; engram init; engram integrate hermes
+py -m pip install compartment; compartment init; compartment integrate hermes
 ```
 Installs the provider plugin, wires the Hermes venv, and runs
-`hermes memory setup engram`. engRAM then appears in the
+`hermes memory setup compartment`. Compartment then appears in the
 `hermes memory setup` picker beside hindsight and mem0, the only entry
 marked **"no setup needed"**: no API key, no cloud account, no daemon.
 Verify with `hermes memory status`. See everything Hermes remembers at
-any time with **`engram dash`** - one command, and the vault opens in
+any time with **`compartment dash`** - one command, and the vault opens in
 your browser (memories by kind, growth, the relation graph, live
 search); Ctrl-C closes it.
 
 **OpenClaw** - macOS / Linux:
 ```bash
-pip install engram-memory-vault && engram init && engram integrate openclaw
+pip install compartment && compartment init && compartment integrate openclaw
 ```
 Windows (PowerShell):
 ```powershell
-py -m pip install engram-memory-vault; engram init; engram integrate openclaw
+py -m pip install compartment; compartment init; compartment integrate openclaw
 ```
 Writes the `mcpServers` entry into `~/.openclaw/openclaw.json` (with a
 backup), then: `openclaw gateway restart` and confirm with
@@ -102,7 +102,7 @@ backup), then: `openclaw gateway restart` and confirm with
 **Any MCP client** - macOS / Linux / Windows:
 
 ```bash
-pip install engram-memory-vault && engram init
+pip install compartment && compartment init
 ```
 
 Then add the server to your client's MCP config (stdio transport, no API
@@ -111,23 +111,23 @@ key, no environment variables):
 ```json
 {
   "mcpServers": {
-    "engram": {
-      "command": "engram",
+    "compartment": {
+      "command": "compartment",
       "args": ["serve"]
     }
   }
 }
 ```
 
-`--vault` and `--caller` are optional (`engram --vault PATH --caller NAME
-serve`); the defaults use `~/.engram/memory.vault` with caller `user`.
+`--vault` and `--caller` are optional (`compartment --vault PATH --caller NAME
+serve`); the defaults use `~/.compartment/memory.vault` with caller `user`.
 Client-by-client walkthroughs in
 [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
 ## Measured, on an 8 GB baseline laptop
 
-Every number below is reproducible on your machine with `engram selftest`
-and `engram bench`.
+Every number below is reproducible on your machine with `compartment selftest`
+and `compartment bench`.
 
 | Metric | Measured |
 |---|---|
@@ -140,7 +140,7 @@ and `engram bench`.
 | Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 88 tests, ~40 s |
 
 A single network round-trip to a cloud memory API costs more than this
-entire pipeline. The property that makes engRAM secure (no plaintext
+entire pipeline. The property that makes Compartment secure (no plaintext
 index ever on disk, so all search is RAM-resident) is the same property
 that makes it fast: below 20k records search is exact SIMD matrix math,
 recall = 1.0 by construction; above it, SIMD HNSW at ~99% recall.
@@ -153,7 +153,7 @@ Full write-path, decision math, and comparisons in
 **Nearly everything is stored; nothing important is buried.** Only empty
 turns are dropped. A bare "OK" is not noise, it is a decision: when the
 agent asks *"Want me to send this reply to the client now?"* and the user
-answers *"OK"*, engRAM resolves the question from the conversation and
+answers *"OK"*, Compartment resolves the question from the conversation and
 stores
 `[decision 2026-07-20] Approved (answered "OK"): Want me to send this
 reply to the client now?` at the top importance tier. Asking *"did the
@@ -171,29 +171,34 @@ computer first, the world second, and forgets nothing.
 **One memory, not two.** Agent hosts increasingly ship a memory of their
 own - Claude Code keeps per-project Markdown files with an auto-loaded
 index. Two memories means facts land in whichever one the model happened to
-think of, and neither is complete. engRAM takes over on install: it imports
+think of, and neither is complete. Compartment takes over on install: it imports
 what the file memory already holds, and both the MCP handshake and the
-managed CLAUDE.md block tell the model that engram supersedes it - write
+managed CLAUDE.md block tell the model that compartment supersedes it - write
 every new memory here, treat the files as a read-only archive. One vault,
 encrypted, shared by every agent and project on the machine. Nothing is
 deleted; the files stay exactly where they were.
 
 **Capture that does not depend on the model.** Instructions are a request,
 and a host that declares its own memory in its system prompt outranks
-anything a tool says. So `engram integrate claude` also installs a
+anything a tool says. So `compartment integrate claude` also installs a
 `PostToolUse` hook: when Claude Code writes a memory file, the fact lands in
-the vault whether or not the model ever thought about engram. The hook is
+the vault whether or not the model ever thought about compartment. The hook is
 additive and idempotent (your other hooks are untouched, settings.json is
 backed up first), it exits successfully no matter what - a memory tool must
 never break your editor - and it stays quiet when the vault is locked.
-`engram hook status | install | uninstall`, or `integrate claude --no-hooks`.
+`compartment hook status | install | uninstall`, or `integrate claude --no-hooks`.
 
-**A menu bar app for the Mac.** Download **engRAM.pkg** from the
-[latest release](https://github.com/MaxFreedomPollard/engRAM/releases/latest)
+<p align="center">
+  <img src="docs/images/menubar-panel.png" width="330"
+       alt="The Compartment menu bar panel.">
+</p>
+
+**A menu bar app for the Mac.** Download **Compartment.pkg** from the
+[latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
 and open it - the installer asks whether you also want the menu bar utility,
 and everything (Python included) is self-contained, so there is nothing to
-install first. From a checkout, `pip install 'engram-memory-vault[menubar]'`
-then `engram menubar` does the same thing. Either way it puts engRAM in the
+install first. From a checkout, `pip install 'compartment[menubar]'`
+then `compartment menubar` does the same thing. Either way it puts Compartment in the
 status bar: click the icon and a
 popover shows whether the vault is open, how much it has learned, the three
 settings worth changing day to day (capture hook, whether starter facts join
@@ -201,28 +206,28 @@ searches, auto-lock), and the last five things it remembered. No dock icon,
 no window to manage, and it holds no vault in memory - state comes from the
 CLI, so an idle menu bar app costs nothing.
 
-**See what it just learned.** `engram recent` lists the newest memories,
+**See what it just learned.** `compartment recent` lists the newest memories,
 newest last, hiding the thousands of seeded starting facts so the handful
-that real use produced are actually visible - and `engram status` reports
+that real use produced are actually visible - and `compartment status` reports
 `organic_records` beside the total, so a vault that has learned nothing can
 never look busy. Same view over MCP as `memory_recent`.
 
 **One pinned embedding space.** The model's SHA-256 is recorded in the
 vault and enforced at open; cosine comparisons stay mathematically valid
 forever instead of silently degrading when a model changes. Migration is
-explicit: `engram reindex --re-embed`.
+explicit: `compartment reindex --re-embed`.
 
 **No LLM inside.** Embeddings run locally (bundled 384-dim int8 ONNX
 model, <300 MB RAM). Judgment belongs to the host model you already run,
-via `engram_store` / `engram_forget`; engRAM contributes deterministic
+via `engram_store` / `engram_forget`; Compartment contributes deterministic
 capture, encryption, and total recall. That split is what makes the
-offline guarantee absolute and every decision reproducible. Pair engRAM
+offline guarantee absolute and every decision reproducible. Pair Compartment
 with an offline LLM and the whole agent stack can run usefully with no
 network at all.
 
 ## Agent-native by design
 
-engRAM is built to sit under agents you already use, not as a separate
+Compartment is built to sit under agents you already use, not as a separate
 app you babysit.
 
 - **Hermes native provider** - shows up in `hermes memory setup` with
@@ -237,16 +242,16 @@ app you babysit.
   explicit relations (who works where, what belongs to what), with
   optional validity windows; `memory_relations` answers entity,
   predicate, and as-of queries. Deterministic storage, host-model
-  judgment - the same split as everything else in engRAM.
-- **CLI for everything else** - scripts, cron, other agents: `engram
-  store`, `engram search`, `engram recent`, `engram forget`, `engram link`,
-  `engram relations`, `engram import-claude`, `engram lock`.
-- **See the vault: `engram dash`** - one command opens a local page with
+  judgment - the same split as everything else in Compartment.
+- **CLI for everything else** - scripts, cron, other agents: `compartment
+  store`, `compartment search`, `compartment recent`, `compartment forget`, `compartment link`,
+  `compartment relations`, `compartment import-claude`, `compartment lock`.
+- **See the vault: `compartment dash`** - one command opens a local page with
   everything at a glance: how many memories of what kind, growth over
   time, the relation graph, tags, per-agent counts, live search. Served
   from RAM, 127.0.0.1-only behind a random URL token, read-only, zero
   outbound requests, zero configuration.
-- **Panic lock from the agent** - `memory_lock` / `engram lock` clears
+- **Panic lock from the agent** - `memory_lock` / `compartment lock` clears
   stored credentials instantly when you need the vault closed now.
 - **One vault, many hosts** - Hermes, Claude, and the CLI can share a
   vault at once; each caller gets its own identity and namespace ACLs.
@@ -263,14 +268,14 @@ cloud account.
 You lock and unlock the vault yourself whenever you want. Manual control
 is always available:
 
-- **`engram unlock`** - open the vault with YOUR passphrase. You choose
-  it; engRAM never auto-generates a password, seed, or recovery phrase,
+- **`compartment unlock`** - open the vault with YOUR passphrase. You choose
+  it; Compartment never auto-generates a password, seed, or recovery phrase,
   and there is no credential it knows that you don't. (Vaults made by
   older versions that received an auto-generated recovery phrase still
   open with it.)
-- **`engram lock`** - close it again and clear every stored credential.
+- **`compartment lock`** - close it again and clear every stored credential.
   Agents can do the same via the `memory_lock` panic tool.
-- **`engram 2fa enable`** - optional two-factor unlock: your passphrase
+- **`compartment 2fa enable`** - optional two-factor unlock: your passphrase
   (knowledge) plus a keyfile (possession - keep it on a USB stick).
   Both factors feed Argon2id together, so needing both is enforced by
   arithmetic, not a policy check; a stolen vault file plus your
@@ -288,7 +293,7 @@ new boot can never open the old wrap. That is arithmetic, not a policy
 check.
 
 If you prefer reboot-surviving unlock on macOS, that is an explicit
-opt-in (`engram unlock --keychain`), with the tradeoff documented. At any
+opt-in (`compartment unlock --keychain`), with the tradeoff documented. At any
 time you can lock, unlock, lock again - on your schedule.
 
 ## Security, in one paragraph
@@ -299,12 +304,12 @@ only by the user's own passphrase (no auto-generated credentials),
 optionally two-factor with a keyfile · per-record keys enabling `forget --shred`
 (crypto-shred: key destroyed, content mathematically unrecoverable) ·
 fsync'd sealed journal, atomic compaction, verified kill-9 crash recovery ·
-hash-chained tamper-evident audit log (`engram audit verify`) · per-caller
+hash-chained tamper-evident audit log (`compartment audit verify`) · per-caller
 namespace ACLs, quarantine tier for untrusted content, signed vault
 manifests · stdio MCP transport: zero open ports · runtime offline guard
 that aborts on any socket attempt; CI runs the whole suite with it active
 on Linux, macOS, and Windows · no telemetry, ever. Full honest threat
-model, including what engRAM cannot protect against, in
+model, including what Compartment cannot protect against, in
 [SECURITY.md](SECURITY.md).
 
 ## One vault, many agents
@@ -313,13 +318,13 @@ Hermes, Claude, and the CLI can share a single vault simultaneously:
 writes are serialized by an advisory file lock, every process detects
 foreign writes and reloads, and each host gets its own caller identity
 and namespace with rw/ro grants. A locked vault is one portable file,
-safe to move over any channel; `engram lock --sign` seals it with an
+safe to move over any channel; `compartment lock --sign` seals it with an
 Ed25519 manifest the recipient can verify without any credential.
 
 ```bash
-engram lock
-scp ~/.engram/memory.vault other-machine:
-engram --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
+compartment lock
+scp ~/.compartment/memory.vault other-machine:
+compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 ```
 
 ## Documentation
@@ -327,7 +332,7 @@ engram --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 | | |
 |---|---|
 | [docs/MEMORY.md](docs/MEMORY.md) | how memory is stored, what gets remembered, why the math wins |
-| [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | selecting engRAM in Hermes, OpenClaw, Claude, everything else |
+| [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | selecting Compartment in Hermes, OpenClaw, Claude, everything else |
 | [SECURITY.md](SECURITY.md) | full threat model, honest limits |
 | [FORMAT.md](FORMAT.md) | byte-level `.vault` and `.mpack` specs (language-agnostic) |
 | [PACKS.md](PACKS.md) | authoring and shipping signed memory packs |
@@ -339,4 +344,4 @@ MIT.
 
 ---
 
-mcp-name: io.github.MaxFreedomPollard/engram
+mcp-name: io.github.MaxFreedomPollard/compartment

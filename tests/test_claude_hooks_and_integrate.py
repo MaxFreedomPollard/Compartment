@@ -1,4 +1,4 @@
-"""Deterministic capture, and the full `engram integrate claude` path.
+"""Deterministic capture, and the full `compartment integrate claude` path.
 
 These run on every OS in CI, which is the point: the install flow used to be
 verified by hand on one machine, so nothing caught a platform-specific break.
@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from engram import claude_hooks, claude_memory, cli
+from compartment import claude_hooks, claude_memory, cli
 
 PASS = "CorrectHorse"
 
@@ -45,7 +45,7 @@ def home(tmp_path, monkeypatch):
 # ----------------------------------------------------------- hook install
 
 def test_install_creates_settings_with_our_hook(home):
-    out = claude_hooks.install(engram_bin="engram")
+    out = claude_hooks.install(compartment_bin="compartment")
     data = json.loads(home.settings.read_text(encoding="utf-8"))
     group = data["hooks"][claude_hooks.EVENT][0]
     assert group["matcher"] == claude_hooks.MATCHER
@@ -63,7 +63,7 @@ def test_install_preserves_other_peoples_hooks(home):
                                          "command": "someone-else.sh"}]}]}}
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text(json.dumps(existing), encoding="utf-8")
-    claude_hooks.install(engram_bin="engram")
+    claude_hooks.install(compartment_bin="compartment")
     data = json.loads(home.settings.read_text(encoding="utf-8"))
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "mine.sh"
     cmds = [h["command"] for g in data["hooks"][claude_hooks.EVENT]
@@ -73,8 +73,8 @@ def test_install_preserves_other_peoples_hooks(home):
 
 
 def test_install_is_idempotent(home):
-    claude_hooks.install(engram_bin="engram")
-    claude_hooks.install(engram_bin="engram")
+    claude_hooks.install(compartment_bin="compartment")
+    claude_hooks.install(compartment_bin="compartment")
     data = json.loads(home.settings.read_text(encoding="utf-8"))
     ours = [h for g in data["hooks"][claude_hooks.EVENT] for h in g["hooks"]
             if claude_hooks.MARKER in h["command"]]
@@ -83,11 +83,11 @@ def test_install_is_idempotent(home):
 
 def test_install_is_idempotent_with_a_pinned_vault(home):
     """Regression: with --vault pinned the command reads
-    `engram --vault ... hook capture`, so an ownership check looking for one
+    `compartment --vault ... hook capture`, so an ownership check looking for one
     literal substring stopped matching and every re-install added a duplicate.
     `integrate claude` pins the vault, so this is the DEFAULT path."""
-    claude_hooks.install(engram_bin="engram", vault="/some/where.vault")
-    claude_hooks.install(engram_bin="engram", vault="/some/where.vault")
+    claude_hooks.install(compartment_bin="compartment", vault="/some/where.vault")
+    claude_hooks.install(compartment_bin="compartment", vault="/some/where.vault")
     data = json.loads(home.settings.read_text(encoding="utf-8"))
     ours = [h for g in data["hooks"][claude_hooks.EVENT] for h in g["hooks"]
             if claude_hooks.is_ours(h["command"])]
@@ -100,7 +100,7 @@ def test_install_is_idempotent_with_a_pinned_vault(home):
 def test_install_backs_up_existing_settings(home):
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text('{"env": {"A": "1"}}', encoding="utf-8")
-    out = claude_hooks.install(engram_bin="engram")
+    out = claude_hooks.install(compartment_bin="compartment")
     assert out["backup"] and json.loads(
         open(out["backup"], encoding="utf-8").read())["env"] == {"A": "1"}
     assert json.loads(home.settings.read_text(encoding="utf-8"))["env"] == {"A": "1"}
@@ -110,7 +110,7 @@ def test_install_refuses_malformed_settings(home):
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError):
-        claude_hooks.install(engram_bin="engram")
+        claude_hooks.install(compartment_bin="compartment")
 
 
 def test_uninstall_removes_only_ours(home):
@@ -119,7 +119,7 @@ def test_uninstall_removes_only_ours(home):
         {"matcher": "Bash", "hooks": [{"type": "command",
                                        "command": "theirs.sh"}]}]}}),
         encoding="utf-8")
-    claude_hooks.install(engram_bin="engram")
+    claude_hooks.install(compartment_bin="compartment")
     assert claude_hooks.is_installed() is True
     assert claude_hooks.uninstall() is True
     assert claude_hooks.is_installed() is False
@@ -159,8 +159,8 @@ def _payload(path):
 
 
 def test_capture_stores_a_memory_write(home, vault_path, monkeypatch):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -174,8 +174,8 @@ def test_capture_stores_a_memory_write(home, vault_path, monkeypatch):
 
 
 def test_capture_ignores_non_memory_writes(home, vault_path, tmp_path):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -201,8 +201,8 @@ def test_capture_on_missing_file_is_quiet(home, vault_path):
 
 def test_capture_with_locked_vault_does_not_break_the_edit(home, vault_path):
     """A locked vault is the user's choice - the hook must stay silent."""
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     Vault.create(vault_path, PASS, creator="t").lock()
     session.clear(vault_path)
     res = claude_hooks.capture(io.StringIO(_payload(home.memfile)),
@@ -211,8 +211,8 @@ def test_capture_with_locked_vault_does_not_break_the_edit(home, vault_path):
 
 
 def test_capture_is_idempotent_on_repeated_writes(home, vault_path):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -235,7 +235,7 @@ def _integrate(home, vault_path, monkeypatch, no_import=False, no_hooks=False):
 
     def fake_which(name):
         return {"claude": "/usr/local/bin/claude",
-                "engram": "/usr/local/bin/engram"}.get(name)
+                "compartment": "/usr/local/bin/compartment"}.get(name)
 
     real_run = _sp.run
 
@@ -245,7 +245,7 @@ def _integrate(home, vault_path, monkeypatch, no_import=False, no_hooks=False):
         if not (argv and "claude" in str(argv[0])):
             return real_run(argv, **kw)
         calls.append(argv)
-        return types.SimpleNamespace(stdout="Added stdio MCP server engram",
+        return types.SimpleNamespace(stdout="Added stdio MCP server compartment",
                                      stderr="", returncode=0)
 
     monkeypatch.setattr(_sh, "which", fake_which)
@@ -257,8 +257,8 @@ def _integrate(home, vault_path, monkeypatch, no_import=False, no_hooks=False):
 
 
 def test_integrate_claude_end_to_end(home, vault_path, monkeypatch, capsys):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -271,7 +271,7 @@ def test_integrate_claude_end_to_end(home, vault_path, monkeypatch, capsys):
     assert calls, "claude mcp add was never invoked"
     argv = calls[0]
     assert argv[1:4] == ["mcp", "add", "--scope"]
-    assert "engram" in argv and "serve" in argv and vault_path in argv
+    assert "compartment" in argv and "serve" in argv and vault_path in argv
 
     # 2. CLAUDE.md: our block added, their notes untouched
     md = (home.root / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
@@ -285,8 +285,8 @@ def test_integrate_claude_end_to_end(home, vault_path, monkeypatch, capsys):
 
 
 def test_integrate_is_idempotent(home, vault_path, monkeypatch):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -302,8 +302,8 @@ def test_integrate_is_idempotent(home, vault_path, monkeypatch):
 
 
 def test_integrate_opt_outs_are_honoured(home, vault_path, monkeypatch):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -316,12 +316,12 @@ def test_integrate_survives_a_missing_claude_cli(home, vault_path, monkeypatch,
                                                  capsys):
     """No `claude` on PATH must print manual instructions, not crash."""
     import shutil as _sh
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
-    monkeypatch.setattr(_sh, "which", lambda n: None if n == "claude" else "engram")
+    monkeypatch.setattr(_sh, "which", lambda n: None if n == "claude" else "compartment")
     cli.cmd_integrate(types.SimpleNamespace(
         target="claude", vault=vault_path, no_import=False, no_hooks=False))
     out = capsys.readouterr().out
@@ -331,8 +331,8 @@ def test_integrate_survives_a_missing_claude_cli(home, vault_path, monkeypatch,
 
 def test_integrate_reports_malformed_settings_without_dying(home, vault_path,
                                                             monkeypatch, capsys):
-    from engram.vault import Vault
-    from engram import session
+    from compartment.vault import Vault
+    from compartment import session
     v = Vault.create(vault_path, PASS, creator="t")
     session.store(vault_path, v._master)
     v.lock()
@@ -340,6 +340,6 @@ def test_integrate_reports_malformed_settings_without_dying(home, vault_path,
     home.settings.write_text("{broken", encoding="utf-8")
     _integrate(home, vault_path, monkeypatch)
     out = capsys.readouterr().out
-    assert "not valid JSON" in out and "engram hook install" in out
+    assert "not valid JSON" in out and "compartment hook install" in out
     # the import still happened - one broken file cannot stop the rest
     assert Vault.unlock(vault_path, passphrase=PASS).status()["organic_records"] == 1

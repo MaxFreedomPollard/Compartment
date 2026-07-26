@@ -7,9 +7,9 @@ schema upgrade of vaults sealed before the relations table existed.
 """
 import pytest
 
-from engram.acl import AclError
-from engram.crypto import CryptoError
-from engram.vault import Vault
+from compartment.acl import AclError
+from compartment.crypto import CryptoError
+from compartment.vault import Vault
 
 from conftest import PASS
 
@@ -38,8 +38,8 @@ def test_entity_matching_is_case_insensitive(vault):
 
 
 def test_duplicate_link_is_idempotent(vault):
-    a = vault.link("Max", "owns", "engRAM", caller="test")
-    b = vault.link("max", "OWNS", "engram", caller="test")   # same, other casing
+    a = vault.link("Max", "owns", "Compartment", caller="test")
+    b = vault.link("max", "OWNS", "compartment", caller="test")   # same, other casing
     assert b["duplicate"] is True and b["id"] == a["id"]
     assert len(vault.relations(caller="test", entity="Max")["relations"]) == 1
 

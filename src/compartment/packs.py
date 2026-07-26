@@ -93,7 +93,7 @@ def read_pack(blob: bytes, passphrase: str | None = None
               ) -> tuple[dict, list[dict], np.ndarray]:
     """Verify signature + content hash, then return (header, records, vectors)."""
     if len(blob) < 10 or blob[:4] != PACK_MAGIC:
-        raise PackError("Not a engRAM memory pack (bad magic)")
+        raise PackError("Not a Compartment memory pack (bad magic)")
     (ver,) = struct.unpack(">H", blob[4:6])
     if ver != PACK_VERSION:
         raise PackError(f"Pack format version {ver} not supported")

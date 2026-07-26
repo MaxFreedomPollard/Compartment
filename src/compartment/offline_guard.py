@@ -1,6 +1,6 @@
 """Runtime offline enforcement (invariant I1).
 
-When activated (ENGRAM_ASSERT_OFFLINE=1 or --assert-offline), creating any
+When activated (COMPARTMENT_ASSERT_OFFLINE=1 or --assert-offline), creating any
 INET/INET6 socket raises OfflineViolation and the process aborts loudly.
 stdio (the MCP transport) needs no sockets, so normal operation is
 unaffected. The ONLY code allowed to bypass this is nothing: even
@@ -8,6 +8,7 @@ unaffected. The ONLY code allowed to bypass this is nothing: even
 """
 from __future__ import annotations
 
+from .home import env, home
 import os
 import socket
 
@@ -24,7 +25,7 @@ def _guarded_new(cls, family=-1, type=-1, proto=-1, fileno=None):  # noqa: A002
     if fam in (socket.AF_INET, socket.AF_INET6):
         raise OfflineViolation(
             "OFFLINE GUARD: something attempted to create a network socket. "
-            "engRAM never touches the network at runtime; aborting."
+            "Compartment never touches the network at runtime; aborting."
         )
     return _original_socket_new(cls, family, type, proto, fileno)
 
@@ -48,5 +49,5 @@ def is_active() -> bool:
 
 
 def activate_from_env() -> None:
-    if os.environ.get("ENGRAM_ASSERT_OFFLINE") == "1":
+    if env("ASSERT_OFFLINE") == "1":
         activate()

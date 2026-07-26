@@ -17,8 +17,8 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from engram import packs
-from engram.embed import DEFAULT_MODEL, Embedder
+from compartment import packs
+from compartment.embed import DEFAULT_MODEL, Embedder
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 IDENTITY_FILE = ROOT / "tools" / "pack_identity.json"

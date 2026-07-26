@@ -4,8 +4,8 @@ import urllib.request
 
 import pytest
 
-from engram import bench, offline_guard, selftest
-from engram.vindex import BruteForceIndex, UsearchIndex, build_index
+from compartment import bench, offline_guard, selftest
+from compartment.vindex import BruteForceIndex, UsearchIndex, build_index
 
 import numpy as np
 
@@ -27,8 +27,8 @@ def test_guard_blocks_network(offline):
 def test_full_lifecycle_with_sockets_blocked(offline, tmp_path):
     """The headline claim: init → seed → selftest → store → search → shred →
     lock → unlock, all with network creation blocked."""
-    from engram import packs
-    from engram.vault import Vault
+    from compartment import packs
+    from compartment.vault import Vault
     from conftest import PASS, seed_pack_bytes
 
     vp = str(tmp_path / "offline.vault")
