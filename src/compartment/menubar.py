@@ -245,6 +245,40 @@ def unlock_vault(vault: str, passphrase: str) -> tuple[bool, str]:
     return False, (out[:120] or "could not unlock")
 
 
+def change_passphrase(vault: str, new: str, repeat: str) -> tuple[bool, str]:
+    """Replace the passphrase from the panel. Returns (ok, what to show).
+
+    The vault has to be open already - `rekey` re-wraps the master key, and
+    the master key is only in hand while unlocked. So this asks for the new
+    passphrase and not the old one: whoever is looking at an unlocked vault
+    can already read every memory in it, which is strictly more than they
+    gain by changing the credential.
+
+    Both fields are compared here, where the user can see them, rather than
+    making them type it twice into a terminal they cannot review.
+    """
+    if not new:
+        return False, "enter a new passphrase"
+    if new != repeat:
+        return False, "the two entries do not match"
+    try:
+        p = subprocess.run(
+            [*_cli_argv(), "--vault", vault, "rekey", "--new-passphrase-stdin"],
+            input=new + "\n", capture_output=True, text=True,
+            timeout=180, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
+    if p.returncode == 0:
+        return True, "passphrase changed"
+    low = out.lower()
+    if "unrecognized arguments" in low or low.startswith("usage:"):
+        return False, "internal error: could not run the CLI"
+    if "locked" in low:
+        return False, "unlock the vault first"
+    return False, (out[:120] or "could not change the passphrase")
+
+
 def summarise(state: dict) -> str:
     """One line under the title. Also what --self-check prints."""
     if not state["exists"]:
@@ -444,6 +478,10 @@ def run(vault: str | None = None, show: bool = False,
             self.window = None
             self.pw_field = None      # only while the vault is locked
             self.unlock_note = None   # "wrong passphrase", and the like
+            self.changing_pw = False  # the change-passphrase fields are open
+            self.pw_new = None
+            self.pw_repeat = None
+            self.change_note = None
             return self
 
         # ---- building the popover contents -----------------------------
@@ -477,6 +515,34 @@ def run(vault: str | None = None, show: bool = False,
                                        wrap=True))
                 views.append(label("Stays unlocked until restart or Lock",
                                    10, secondary=True))
+
+            # Changing the passphrase needs the vault open, because rekey
+            # re-wraps a master key it can only hold while unlocked.
+            self.pw_new = self.pw_repeat = None
+            if st["exists"] and not st["locked"] and self.changing_pw:
+                def secure(placeholder):
+                    f = NSSecureTextField.alloc().initWithFrame_(
+                        NSMakeRect(0, 0, CONTENT_WIDTH - 92, 24))
+                    f.setPlaceholderString_(placeholder)
+                    f.setTarget_(self)
+                    f.setAction_("saveChangePw:")     # Return saves
+                    return f
+
+                self.pw_new = secure("New passphrase")
+                self.pw_repeat = secure("Repeat it")
+                save_b = NSButton.buttonWithTitle_target_action_(
+                    "Save", self, "saveChangePw:")
+                cancel_b = NSButton.buttonWithTitle_target_action_(
+                    "Cancel", self, "cancelChangePw:")
+                views.append(self.pw_new)
+                views.append(row(self.pw_repeat, save_b))
+                views.append(row(cancel_b, _spacer()))
+                if self.change_note:
+                    views.append(label(self.change_note, 11, secondary=True,
+                                       wrap=True))
+                views.append(label("There is no recovery phrase. If you forget "
+                                   "this, the memories are unrecoverable.",
+                                   10, secondary=True, wrap=True))
             views.append(divider())
 
             views.append(label("SETTINGS", 10, bold=True, secondary=True))
@@ -540,7 +606,10 @@ def run(vault: str | None = None, show: bool = False,
             if st["exists"] and not st["locked"]:
                 lock = NSButton.buttonWithTitle_target_action_("Lock", self,
                                                                "lockNow:")
+                change = NSButton.buttonWithTitle_target_action_(
+                    "Change password", self, "startChangePw:")
                 views.append(row(refresh, lock, _spacer(), quit_b))
+                views.append(row(change, _spacer()))
             else:
                 views.append(row(refresh, _spacer(), quit_b))
 
@@ -680,6 +749,30 @@ def run(vault: str | None = None, show: bool = False,
             ok, note = unlock_vault(vault_path, pw)
             self.pw_field.setStringValue_("")        # never leave it on screen
             self.unlock_note = None if ok else note
+            self.rebuild()
+
+        def startChangePw_(self, sender):
+            self.changing_pw = True
+            self.change_note = None
+            self.rebuild()
+
+        def cancelChangePw_(self, sender):
+            self.changing_pw = False
+            self.change_note = None
+            self.rebuild()
+
+        def saveChangePw_(self, sender):
+            if self.pw_new is None or self.pw_repeat is None:
+                return
+            new = str(self.pw_new.stringValue() or "")
+            rep = str(self.pw_repeat.stringValue() or "")
+            ok, note = change_passphrase(vault_path, new, rep)
+            # Clear both regardless: a passphrase must not sit in a field on
+            # screen after the attempt, successful or not.
+            self.pw_new.setStringValue_("")
+            self.pw_repeat.setStringValue_("")
+            self.changing_pw = not ok
+            self.change_note = note
             self.rebuild()
 
         def quitApp_(self, sender):

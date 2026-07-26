@@ -300,6 +300,64 @@ def test_unlock_with_no_passphrase_never_runs_anything(monkeypatch):
     assert not ok and "passphrase" in note
 
 
+# -------------------------------------------------- changing the passphrase
+
+def test_change_passphrase_never_puts_the_secret_in_argv(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        seen["input"] = kw.get("input")
+
+        class Done:
+            returncode = 0
+            stdout = "credential replaced."
+            stderr = ""
+        return Done()
+
+    monkeypatch.setattr(menubar.subprocess, "run", fake_run)
+    ok, note = menubar.change_passphrase("/v", "Locksmith", "Locksmith")
+    assert ok and note == "passphrase changed"
+    assert "Locksmith" not in " ".join(seen["argv"]), seen["argv"]
+    assert "--new-passphrase-stdin" in seen["argv"]
+    assert seen["input"] == "Locksmith\n"
+
+
+@pytest.mark.parametrize("new,repeat,expected", [
+    ("", "", "enter a new passphrase"),
+    ("Locksmith", "Locksmyth", "the two entries do not match"),
+])
+def test_change_passphrase_validates_before_shelling_out(monkeypatch, new,
+                                                         repeat, expected):
+    monkeypatch.setattr(menubar.subprocess, "run",
+                        lambda *a, **k: pytest.fail("should not shell out"))
+    ok, note = menubar.change_passphrase("/v", new, repeat)
+    assert not ok and note == expected
+
+
+def test_change_passphrase_on_a_locked_vault_says_what_to_do(monkeypatch):
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "error: vault is locked"
+
+    monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: Failed())
+    ok, note = menubar.change_passphrase("/v", "Locksmith", "Locksmith")
+    assert not ok and note == "unlock the vault first"
+
+
+def test_change_passphrase_does_not_blame_the_vault_for_a_cli_failure(
+        monkeypatch):
+    class Failed:
+        returncode = 2
+        stdout = ""
+        stderr = "usage: compartment [-h] [--keyfile KEYFILE]\ncompartment: error: unrecognized arguments: rekey"
+
+    monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: Failed())
+    ok, note = menubar.change_passphrase("/v", "Locksmith", "Locksmith")
+    assert not ok and "keyfile" not in note.lower(), note
+
+
 def test_a_broken_cli_call_is_never_blamed_on_the_vault(monkeypatch):
     """argparse prints "[--keyfile KEYFILE]" in its usage line. That once
     reached the user as "needs its 2FA keyfile" on a vault that had no 2FA,

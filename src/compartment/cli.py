@@ -439,10 +439,18 @@ def cmd_import(args) -> None:
 
 def cmd_rekey(args) -> None:
     v = _open_vault(args)
-    pw = getpass.getpass("NEW passphrase (you choose it - nothing is "
-                         "generated for you): ")
-    if pw != getpass.getpass("Repeat NEW passphrase: "):
-        _die("passphrases do not match")
+    if getattr(args, "new_passphrase_stdin", False):
+        # The apps confirm the repeat in their own dialog, where the user can
+        # see both fields, and send one line. Same reasoning as unlock: the
+        # secret goes down a pipe, never into argv.
+        pw = sys.stdin.readline().rstrip("\r\n")
+        if not pw:
+            _die("no passphrase on stdin")
+    else:
+        pw = getpass.getpass("NEW passphrase (you choose it - nothing is "
+                             "generated for you): ")
+        if pw != getpass.getpass("Repeat NEW passphrase: "):
+            _die("passphrases do not match")
     v.rekey(pw, keyfile=_maybe_keyfile(args))
     print("credential replaced. Your new passphrase is the only knowledge "
           "factor - there is no recovery phrase.")
@@ -1134,6 +1142,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("rekey", help="replace the passphrase (user-chosen; "
                                      "nothing is generated)")
+    p.add_argument("--new-passphrase-stdin", action="store_true",
+                   help="read the new passphrase from stdin, so it never "
+                        "appears in the process list (what the apps use)")
     p.set_defaults(fn=cmd_rekey)
 
     p2 = sub.add_parser("2fa", help="two-factor unlock: passphrase + keyfile")

@@ -66,6 +66,16 @@ def test_the_panel_offers_unlock_when_locked_and_lock_when_open():
     assert "unlock" not in _kinds(systray.panel_rows(_state()))
 
 
+def test_change_password_is_offered_only_on_an_open_vault():
+    """rekey re-wraps the master key, which the process only holds while the
+    vault is unlocked - so the button must not appear when it is locked."""
+    assert "change" in _kinds(systray.panel_rows(_state()))
+    assert "change" not in _kinds(systray.panel_rows(_state(locked=True,
+                                                           recent=[])))
+    assert "change" not in _kinds(systray.panel_rows(_state(exists=False,
+                                                           recent=[])))
+
+
 def test_no_vault_offers_neither():
     kinds = _kinds(systray.panel_rows(_state(exists=False, recent=[])))
     assert "unlock" not in kinds and "lock" not in kinds

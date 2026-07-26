@@ -27,8 +27,9 @@ import sys
 from pathlib import Path
 
 from .menubar import (AUTO_LOCK_CHOICES, RECENT_COUNT, auto_lock_label,
-                      claim_first_run, default_vault, fetch_state, lock_vault,
-                      self_check, set_setting, summarise, unlock_vault)
+                      change_passphrase, claim_first_run, default_vault,
+                      fetch_state, lock_vault, self_check, set_setting,
+                      summarise, unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -55,6 +56,10 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     # opening it should not mean finding a terminal.
     if state.get("exists"):
         rows.append(("unlock", "Unlock") if state["locked"] else ("lock", "Lock"))
+        # Changing the passphrase re-wraps the master key, which only exists
+        # in hand while the vault is open - so it is offered only then.
+        if not state["locked"]:
+            rows.append(("change", "Change password"))
     s = state["settings"]
     rows.append(("heading", "SETTINGS"))
     rows.append(("toggle:capture_hook",
@@ -225,6 +230,46 @@ def run(vault: str | None = None, show: bool = False,
                       wraplength=PANEL_WIDTH - 40,
                       justify="left").pack(anchor="w", pady=(4, 0))
 
+        if state["exists"] and not state["locked"] and panel.get("changing"):
+            ttk.Separator(frame).pack(fill="x", pady=10)
+            ttk.Label(frame, text="CHANGE PASSWORD",
+                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            new = ttk.Entry(frame, show="•", width=34)
+            new.pack(anchor="w", pady=(6, 0))
+            rep = ttk.Entry(frame, show="•", width=34)
+            rep.pack(anchor="w", pady=(4, 0))
+            new.focus_set()
+
+            def do_change(*_):
+                ok, note = change_passphrase(vault_path, new.get(), rep.get())
+                # Never leave a passphrase sitting in a field on screen.
+                new.delete(0, "end")
+                rep.delete(0, "end")
+                panel["changing"] = not ok
+                panel["change_note"] = note
+                refresh()
+
+            new.bind("<Return>", do_change)
+            rep.bind("<Return>", do_change)
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", pady=(6, 0))
+            ttk.Button(bar, text="Save", command=do_change).pack(side="left")
+            ttk.Button(bar, text="Cancel",
+                       command=lambda: (panel.update(changing=False,
+                                                     change_note=None),
+                                        refresh())).pack(side="left", padx=6)
+            if panel.get("change_note"):
+                ttk.Label(frame, text=panel["change_note"],
+                          wraplength=PANEL_WIDTH - 40).pack(anchor="w",
+                                                            pady=(4, 0))
+            ttk.Label(frame, text="There is no recovery phrase. If you forget "
+                                  "this, the memories are unrecoverable.",
+                      foreground="#666", wraplength=PANEL_WIDTH - 40,
+                      justify="left").pack(anchor="w", pady=(4, 0))
+        elif panel.get("change_note"):
+            ttk.Label(frame, text=panel["change_note"],
+                      wraplength=PANEL_WIDTH - 40).pack(anchor="w", pady=(8, 0))
+
         ttk.Separator(frame).pack(fill="x", pady=10)
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
@@ -232,8 +277,14 @@ def run(vault: str | None = None, show: bool = False,
         if state["exists"] and not state["locked"]:
             ttk.Button(buttons, text="Lock now",
                        command=lambda: (lock_vault(vault_path),
-                                        panel.update(note=None), refresh())
+                                        panel.update(note=None,
+                                                     changing=False), refresh())
                        ).pack(side="left", padx=6)
+            if not panel.get("changing"):
+                ttk.Button(buttons, text="Change password",
+                           command=lambda: (panel.update(changing=True,
+                                                         change_note=None),
+                                            refresh())).pack(side="left", padx=6)
         ttk.Button(buttons, text="Quit", command=quit_app).pack(side="right")
 
     def place(win) -> None:
