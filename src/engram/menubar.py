@@ -479,7 +479,12 @@ def run(vault: str | None = None, show: bool = False,
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
+    _dbg = os.environ.get("ENGRAM_MENUBAR_DEBUG")
+    def _d(*a):
+        if _dbg: print("[menubar]", *a, file=sys.stderr, flush=True)
+    _d("building controller (fetches state)…")
     ctrl = Controller.alloc().init()
+    _d("controller ready")
 
     if render_to:
         # app.run() normally does this; without it the text system is not up
@@ -496,6 +501,7 @@ def run(vault: str | None = None, show: bool = False,
               else f"error: could not write {render_to}")
         return 0 if ok else 1
     item = NSStatusBar.systemStatusBar().statusItemWithLength_(-1.0)
+    item.setAutosaveName_("engRAM")          # remember where the user puts it
     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
         "brain.head.profile", "engRAM")
     if img is None:
@@ -521,10 +527,26 @@ def run(vault: str | None = None, show: bool = False,
 
     ctrl.popover = pop
     ctrl.status_item = item
+    _d("status item created; visible=", item.isVisible(),
+       "image=", item.button().image() is not None,
+       "window=", item.button().window() is not None)
+    if _dbg:
+        from AppKit import NSScreen
+        import time as _t
+        for _ in range(20):
+            app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                0xFFFFFFFF, None, "kCFRunLoopDefaultMode", True)
+            _t.sleep(0.05)
+        w = item.button().window()
+        _d("screen:", NSScreen.mainScreen().frame().size.width,
+           "| item at:", w.frame().origin.x if w else "no window",
+           "| visible:", item.isVisible())
 
     if show:
         ctrl.togglePopover_(None)
+    _d("entering run loop")
     app.run()
+    _d("run loop exited")
     return 0
 
 
