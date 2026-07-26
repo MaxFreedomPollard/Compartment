@@ -9,6 +9,10 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # Both uploads use skip-existing, so a manual run is safe: it re-publishes
+  # nothing that is already on PyPI. Useful when a publisher was fixed after a
+  # release, or when only the tombstone still needs to go out.
+  workflow_dispatch:
 
 permissions:
   contents: read
