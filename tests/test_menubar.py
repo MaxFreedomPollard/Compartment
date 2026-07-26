@@ -136,6 +136,37 @@ def test_fetch_state_survives_a_broken_cli(vault_path, monkeypatch):
     assert st["error"] == "could not read vault status"
 
 
+def test_engram_bin_never_returns_the_app_launcher(tmp_path, monkeypatch):
+    """Regression: inside engRAM.app the interpreter sits beside a launcher
+    named `engRAM`, and macOS filesystems are case-insensitive - so looking
+    for "engram" next to it found the launcher, and the app shelled out to
+    ITSELF (relaunching the menu bar) instead of running the CLI."""
+    macos = tmp_path / "engRAM.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "engram").write_text("#!/bin/sh\n", encoding="utf-8")  # the trap
+    (macos / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(macos / "python"))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(menubar.shutil, "which", lambda n: "/usr/bin/engram")
+    assert menubar.engram_bin() == "/usr/bin/engram"
+
+
+def test_engram_bin_prefers_the_environment_console_script(tmp_path,
+                                                           monkeypatch):
+    binf = tmp_path / "bin"
+    binf.mkdir()
+    (binf / "engram").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    assert menubar.engram_bin() == str(binf / "engram")
+
+
+def test_state_runs_the_cli_through_our_own_interpreter():
+    """No dependence on finding a console script on PATH."""
+    argv = menubar._cli_argv()
+    assert argv[0] == sys.executable
+    assert argv[1:] == ["-m", "engram.cli"]
+
+
 def test_auto_lock_labels_cover_every_choice():
     labels = [menubar.auto_lock_label(m) for m in menubar.AUTO_LOCK_CHOICES]
     assert labels == ["15 min", "30 min", "60 min", "Never"]

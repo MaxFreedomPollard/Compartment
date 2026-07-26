@@ -44,11 +44,26 @@ _HORIZONTAL, _VERTICAL = 0, 1
 # --------------------------------------------------------------- data layer
 
 def engram_bin() -> str:
-    """The CLI to shell out to - prefer the one from this same install."""
-    here = Path(sys.executable).parent / "engram"
-    if here.exists():
-        return str(here)
+    """A real `engram` CLI path, for commands handed to other programs.
+
+    Inside engRAM.app the executable sits next to a launcher called `engRAM`,
+    and macOS filesystems are case-insensitive by default - so looking for
+    "engram" beside the interpreter finds the launcher and the app ends up
+    invoking *itself* instead of the CLI. Prefer the console script in the
+    environment, and never accept anything inside a bundle's MacOS folder.
+    """
+    candidates = [Path(sys.prefix) / "bin" / "engram",
+                  Path(sys.executable).parent / "engram"]
+    for c in candidates:
+        if c.is_file() and c.parent.name != "MacOS":
+            return str(c)
     return shutil.which("engram") or "engram"
+
+
+def _cli_argv() -> list[str]:
+    """How this process runs the CLI. Using our own interpreter means the app
+    never depends on finding a console script at all."""
+    return [sys.executable, "-m", "engram.cli"]
 
 
 def default_vault() -> str:
@@ -66,7 +81,7 @@ def _run(args: list[str], timeout: int = 60) -> tuple[int, str]:
 
 
 def _json_cmd(vault: str, *sub: str) -> dict | None:
-    code, out = _run([engram_bin(), "--vault", vault, *sub])
+    code, out = _run([*_cli_argv(), "--vault", vault, *sub])
     if code != 0:
         return None
     start = out.find("{")
@@ -155,7 +170,7 @@ def fetch_state(vault: str) -> dict:
 
 
 def lock_vault(vault: str) -> bool:
-    return _run([engram_bin(), "--vault", vault, "lock"])[0] == 0
+    return _run([*_cli_argv(), "--vault", vault, "lock"])[0] == 0
 
 
 def summarise(state: dict) -> str:
@@ -170,6 +185,54 @@ def summarise(state: dict) -> str:
 
 def auto_lock_label(minutes: int) -> str:
     return "Never" if not minutes else f"{minutes} min"
+
+
+# ---------------------------------------------------------------- login item
+
+LOGIN_STATUS = {0: "not registered", 1: "enabled", 2: "requires approval",
+                3: "not found"}
+
+
+def _app_service():
+    """SMAppService for this bundle, or None when we are not running from
+    engRAM.app (a loose `engram menubar` has no bundle to register)."""
+    try:
+        import objc
+        from Foundation import NSBundle
+    except ImportError:
+        return None
+    if not (NSBundle.mainBundle().bundleIdentifier() or "").strip():
+        return None
+    try:
+        objc.loadBundle(
+            "ServiceManagement", globals(),
+            bundle_path="/System/Library/Frameworks/ServiceManagement.framework")
+        return objc.lookUpClass("SMAppService").mainAppService()
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def login_status() -> str:
+    svc = _app_service()
+    if svc is None:
+        return "unavailable (not running from engRAM.app)"
+    return LOGIN_STATUS.get(svc.status(), str(svc.status()))
+
+
+def set_login(enabled: bool) -> str:
+    """Start at login, via the modern API so System Settings lists engRAM by
+    name with its icon instead of an anonymous "legacy agent" entry."""
+    svc = _app_service()
+    if svc is None:
+        return "unavailable (not running from engRAM.app)"
+    try:
+        if enabled:
+            svc.registerAndReturnError_(None)
+        else:
+            svc.unregisterAndReturnError_(None)
+    except Exception as exc:                            # noqa: BLE001
+        return f"failed: {exc}"
+    return login_status()
 
 
 # ----------------------------------------------------------------- self test
@@ -200,8 +263,11 @@ def run(vault: str | None = None, show: bool = False,
     """Start the status bar app. Returns only when the user quits.
 
     `render_to` writes the popover to a PNG and exits instead of running -
-    a way to actually look at the UI in a headless/automated check, without
-    needing screen-recording permission to photograph a live window.
+    a way to look at the UI without screen-recording permission. Run it with
+    a normal (framework) Python during development: snapshotting from the
+    interpreter embedded in engRAM.app draws the controls but not the text,
+    an artefact of the offscreen text system there. The live popover is
+    unaffected, because app.run() performs a full launch.
     """
     if sys.platform != "darwin":
         print("error: the menu bar app is macOS only", file=sys.stderr)
@@ -416,6 +482,9 @@ def run(vault: str | None = None, show: bool = False,
     ctrl = Controller.alloc().init()
 
     if render_to:
+        # app.run() normally does this; without it the text system is not up
+        # and the snapshot comes out with controls but no glyphs at all.
+        app.finishLaunching()
         body = ctrl.buildBody()
         body.layoutSubtreeIfNeeded()
         bounds = body.bounds()

@@ -235,6 +235,10 @@ def cmd_recent(args) -> None:
 def cmd_menubar(args) -> None:
     """The macOS status bar app."""
     from . import menubar
+    if args.login is not None:
+        print(menubar.set_login(args.login == "on")
+              if args.login in ("on", "off") else menubar.login_status())
+        sys.exit(0)
     if args.self_check:
         sys.exit(menubar.self_check(args.vault))
     sys.exit(menubar.run(args.vault, show=args.show,
@@ -1001,6 +1005,9 @@ def main(argv: list[str] | None = None) -> None:
                    help="print what the popover would show, no window")
     p.add_argument("--render", metavar="PNG",
                    help="write the popover to a PNG and exit (UI check)")
+    p.add_argument("--login", nargs="?", const="status",
+                   choices=["on", "off", "status"],
+                   help="start engRAM at login (on/off), or show the state")
     p.set_defaults(fn=cmd_menubar)
 
     ph = sub.add_parser("hook", help="Claude Code capture hook (deterministic "
