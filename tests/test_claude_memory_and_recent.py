@@ -1,14 +1,14 @@
 """Importing Claude Code's file memories, and the recency view.
 
-engram is only the source of truth if what the agent already learned comes
+compartment is only the source of truth if what the agent already learned comes
 with it (the import) and the user can see that memory is alive (recent).
 """
 import json
 
 import pytest
 
-from engram import claude_memory
-from engram.crypto import CryptoError
+from compartment import claude_memory
+from compartment.crypto import CryptoError
 
 MEM = """---
 name: six-forks-housing
@@ -188,16 +188,16 @@ def test_recent_requires_an_open_vault(vault):
 
 
 # --------------------------------------------- the install path itself
-# `engram integrate claude` imports on every run; that hook is the whole
-# "switch to engram on install" promise, so it is tested, not assumed.
+# `compartment integrate claude` imports on every run; that hook is the whole
+# "switch to compartment on install" promise, so it is tested, not assumed.
 
 def _prepared_vault(tmp_path, memdir, monkeypatch):
-    from engram import claude_memory as cm, session
-    from engram.vault import Vault
+    from compartment import claude_memory as cm, session
+    from compartment.vault import Vault
     monkeypatch.setattr(cm, "DEFAULT_ROOT", memdir)
     vp = str(tmp_path / "install.vault")
     v = Vault.create(vp, PASS_LOCAL, creator="test")
-    session.store(vp, v._master)          # what `engram init` leaves behind
+    session.store(vp, v._master)          # what `compartment init` leaves behind
     v.lock()
     return vp
 
@@ -207,8 +207,8 @@ PASS_LOCAL = "CorrectHorse"
 
 def test_integrate_imports_existing_memories(tmp_path, memdir, monkeypatch,
                                              capsys):
-    from engram import cli
-    from engram.vault import Vault
+    from compartment import cli
+    from compartment.vault import Vault
     vp = _prepared_vault(tmp_path, memdir, monkeypatch)
     cli._migrate_claude_memories(vp)
     assert Vault.unlock(vp, passphrase=PASS_LOCAL).status()["organic_records"] == 3
@@ -216,8 +216,8 @@ def test_integrate_imports_existing_memories(tmp_path, memdir, monkeypatch,
 
 
 def test_integrate_import_is_idempotent(tmp_path, memdir, monkeypatch):
-    from engram import cli
-    from engram.vault import Vault
+    from compartment import cli
+    from compartment.vault import Vault
     vp = _prepared_vault(tmp_path, memdir, monkeypatch)
     cli._migrate_claude_memories(vp)
     cli._migrate_claude_memories(vp)          # re-running integrate is safe
@@ -225,8 +225,8 @@ def test_integrate_import_is_idempotent(tmp_path, memdir, monkeypatch):
 
 
 def test_integrate_no_import_flag_skips(tmp_path, memdir, monkeypatch, capsys):
-    from engram import cli
-    from engram.vault import Vault
+    from compartment import cli
+    from compartment.vault import Vault
     vp = _prepared_vault(tmp_path, memdir, monkeypatch)
     cli._migrate_claude_memories(vp, skip=True)
     assert Vault.unlock(vp, passphrase=PASS_LOCAL).status()["organic_records"] == 0
@@ -235,7 +235,7 @@ def test_integrate_no_import_flag_skips(tmp_path, memdir, monkeypatch, capsys):
 
 def test_integrate_pluralises_a_single_memory(tmp_path, monkeypatch, capsys):
     """One file must read 'memory', not 'memories', in BOTH branches."""
-    from engram import cli
+    from compartment import cli
     d = tmp_path / "one" / "proj" / "memory"
     d.mkdir(parents=True)
     (d / "solo.md").write_text(NO_FRONTMATTER, encoding="utf-8")
@@ -248,7 +248,7 @@ def test_integrate_pluralises_a_single_memory(tmp_path, monkeypatch, capsys):
 
 
 def test_integrate_with_no_memories_is_silent(tmp_path, monkeypatch, capsys):
-    from engram import cli, claude_memory as cm
+    from compartment import cli, claude_memory as cm
     monkeypatch.setattr(cm, "DEFAULT_ROOT", tmp_path / "empty")
     cli._migrate_claude_memories(str(tmp_path / "nope.vault"))
     assert capsys.readouterr().out == ""
@@ -257,8 +257,8 @@ def test_integrate_with_no_memories_is_silent(tmp_path, monkeypatch, capsys):
 def test_integrate_on_locked_vault_says_so(tmp_path, memdir, monkeypatch,
                                            capsys):
     """A locked vault must fail loudly with the fix, never silently skip."""
-    from engram import cli, claude_memory as cm, session
-    from engram.vault import Vault
+    from compartment import cli, claude_memory as cm, session
+    from compartment.vault import Vault
     monkeypatch.setattr(cm, "DEFAULT_ROOT", memdir)
     vp = str(tmp_path / "locked.vault")
     Vault.create(vp, PASS_LOCAL, creator="test").lock()
@@ -268,13 +268,13 @@ def test_integrate_on_locked_vault_says_so(tmp_path, memdir, monkeypatch,
 
 
 def test_mcp_instructions_claim_precedence():
-    """The handshake must tell the model engram replaces file memory -
+    """The handshake must tell the model compartment replaces file memory -
     without it, a built-in memory declared in the host's system prompt wins."""
-    from engram.server import ENGRAM_INSTRUCTIONS as t
+    from compartment.server import COMPARTMENT_INSTRUCTIONS as t
     assert "SUPERSEDES" in t
     assert "memory_store" in t and "MEMORY.md" in t
 
 
 def test_claude_md_block_claims_precedence():
-    from engram.cli import _CLAUDE_MD_BODY as t
+    from compartment.cli import _CLAUDE_MD_BODY as t
     assert "REPLACES" in t and "do not write new memories there" in t

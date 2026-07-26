@@ -9,9 +9,9 @@ import secrets
 
 import pytest
 
-from engram import crypto
-from engram.crypto import CryptoError, TamperError
-from engram.vault import Vault
+from compartment import crypto
+from compartment.crypto import CryptoError, TamperError
+from compartment.vault import Vault
 
 from conftest import PASS
 
@@ -79,7 +79,7 @@ def test_short_keyfile_refused(vault):
 
 
 def test_keyfile_hint_roundtrip(vault, vault_path, tmp_path):
-    kf_path = tmp_path / "engram-2fa.key"
+    kf_path = tmp_path / "compartment-2fa.key"
     kf = secrets.token_bytes(32)
     kf_path.write_bytes(kf)
     vault.twofa_enable(PASS, kf)
@@ -93,7 +93,7 @@ def test_keyfile_hint_roundtrip(vault, vault_path, tmp_path):
 
 
 def test_legacy_recovery_slot_still_opens(vault_path):
-    """Vaults created by older engRAM versions carry an auto-generated
+    """Vaults created by older Compartment versions carry an auto-generated
     recovery slot; those phrases must keep working (read-path only)."""
     v = Vault.create(vault_path, PASS, creator="legacy-sim")
     slot_rec, words = crypto.make_recovery_slot(v._master)

@@ -1,4 +1,4 @@
-"""macOS menu bar app: engRAM in the status bar.
+"""macOS menu bar app: Compartment in the status bar.
 
 Click the icon and a popover shows what memory is doing - whether the vault
 is open, the three settings worth changing day to day, and the last handful
@@ -9,7 +9,7 @@ Design notes:
 * The data layer is plain functions with no AppKit in sight, so it is
   testable on every OS in CI. AppKit is imported inside `run()`, which is the
   only part that cannot run headless.
-* State is read by shelling out to the `engram` CLI rather than opening the
+* State is read by shelling out to the `compartment` CLI rather than opening the
   vault in-process. A status bar app that idles at 300 MB because it is
   holding an embedding model would be a bad neighbour; a subprocess that
   exits is not.
@@ -18,6 +18,7 @@ Design notes:
 """
 from __future__ import annotations
 
+from .home import env, home
 import json
 import os
 import shutil
@@ -46,7 +47,7 @@ _HORIZONTAL, _VERTICAL = 0, 1
 FIRST_RUN_MARKER = ".menubar-introduced"
 
 # A second launch asks the copy already running to show itself, over this.
-SHOW_NOTIFICATION = "io.github.maxfreedompollard.engram.show"
+SHOW_NOTIFICATION = "io.github.maxfreedompollard.compartment.show"
 
 
 def claim_first_run(vault: str) -> bool:
@@ -65,32 +66,31 @@ def claim_first_run(vault: str) -> bool:
 
 # --------------------------------------------------------------- data layer
 
-def engram_bin() -> str:
-    """A real `engram` CLI path, for commands handed to other programs.
+def compartment_bin() -> str:
+    """A real `compartment` CLI path, for commands handed to other programs.
 
-    Inside engRAM.app the executable sits next to a launcher called `engRAM`,
+    Inside Compartment.app the executable sits next to a launcher called `Compartment`,
     and macOS filesystems are case-insensitive by default - so looking for
-    "engram" beside the interpreter finds the launcher and the app ends up
+    "compartment" beside the interpreter finds the launcher and the app ends up
     invoking *itself* instead of the CLI. Prefer the console script in the
     environment, and never accept anything inside a bundle's MacOS folder.
     """
-    candidates = [Path(sys.prefix) / "bin" / "engram",
-                  Path(sys.executable).parent / "engram"]
+    candidates = [Path(sys.prefix) / "bin" / "compartment",
+                  Path(sys.executable).parent / "compartment"]
     for c in candidates:
         if c.is_file() and c.parent.name != "MacOS":
             return str(c)
-    return shutil.which("engram") or "engram"
+    return shutil.which("compartment") or "compartment"
 
 
 def _cli_argv() -> list[str]:
     """How this process runs the CLI. Using our own interpreter means the app
     never depends on finding a console script at all."""
-    return [sys.executable, "-m", "engram.cli"]
+    return [sys.executable, "-m", "compartment.cli"]
 
 
 def default_vault() -> str:
-    return os.environ.get("ENGRAM_VAULT",
-                          str(Path.home() / ".engram" / "memory.vault"))
+    return env("VAULT", str(home() / "memory.vault"))
 
 
 def _run(args: list[str], timeout: int = 60) -> tuple[int, str]:
@@ -140,7 +140,7 @@ def set_setting(vault: str, key: str, value) -> dict:
     if key == "capture_hook":
         from . import claude_hooks
         if value:
-            claude_hooks.install(engram_bin=engram_bin(), vault=vault)
+            claude_hooks.install(compartment_bin=compartment_bin(), vault=vault)
         else:
             claude_hooks.uninstall()
         return read_settings(vault)
@@ -168,7 +168,7 @@ def fetch_state(vault: str) -> dict:
     except Exception as exc:                            # noqa: BLE001
         state["error"] = str(exc)
     if not state["exists"]:
-        state["error"] = "no vault yet - run: engram init"
+        state["error"] = "no vault yet - run: compartment init"
         return state
 
     status = _json_cmd(vault, "status")
@@ -200,7 +200,7 @@ def summarise(state: dict) -> str:
     if not state["exists"]:
         return "no vault"
     if state["locked"]:
-        return "locked - unlock in Terminal: engram unlock"
+        return "locked - unlock in Terminal: compartment unlock"
     return (f"{state['records']:,} memories · "
             f"{state['organic']:,} stored by you")
 
@@ -217,7 +217,7 @@ LOGIN_STATUS = {0: "not registered", 1: "enabled", 2: "requires approval",
 
 def _app_service():
     """SMAppService for this bundle, or None when we are not running from
-    engRAM.app (a loose `engram menubar` has no bundle to register)."""
+    Compartment.app (a loose `compartment menubar` has no bundle to register)."""
     try:
         import objc
         from Foundation import NSBundle
@@ -237,16 +237,16 @@ def _app_service():
 def login_status() -> str:
     svc = _app_service()
     if svc is None:
-        return "unavailable (not running from engRAM.app)"
+        return "unavailable (not running from Compartment.app)"
     return LOGIN_STATUS.get(svc.status(), str(svc.status()))
 
 
 def set_login(enabled: bool) -> str:
-    """Start at login, via the modern API so System Settings lists engRAM by
+    """Start at login, via the modern API so System Settings lists Compartment by
     name with its icon instead of an anonymous "legacy agent" entry."""
     svc = _app_service()
     if svc is None:
-        return "unavailable (not running from engRAM.app)"
+        return "unavailable (not running from Compartment.app)"
     try:
         res = (svc.registerAndReturnError_(None) if enabled
                else svc.unregisterAndReturnError_(None))
@@ -297,7 +297,7 @@ def run(vault: str | None = None, show: bool = False,
     `render_to` writes the popover to a PNG and exits instead of running -
     a way to look at the UI without screen-recording permission. Run it with
     a normal (framework) Python during development: snapshotting from the
-    interpreter embedded in engRAM.app draws the controls but not the text,
+    interpreter embedded in Compartment.app draws the controls but not the text,
     an artefact of the offscreen text system there. The live popover is
     unaffected, because app.run() performs a full launch.
     """
@@ -320,7 +320,7 @@ def run(vault: str | None = None, show: bool = False,
                                 NSObject)
     except ImportError:
         print("error: the menu bar app needs PyObjC.\n"
-              "  pip install 'engram-memory-vault[menubar]'", file=sys.stderr)
+              "  pip install 'compartment[menubar]'", file=sys.stderr)
         return 1
 
     vault_path = vault or default_vault()
@@ -328,7 +328,7 @@ def run(vault: str | None = None, show: bool = False,
     # One running copy, one icon. LaunchServices normally turns a second
     # launch into a reopen event for the copy already running, but a copy
     # started straight from the executable is invisible to it - and then
-    # opening engRAM.app quietly adds a second status item next to the first
+    # opening Compartment.app quietly adds a second status item next to the first
     # instead of showing the panel. Handing off over a distributed
     # notification works whichever way each copy was started.
     if not render_to and (NSBundle.mainBundle().bundleIdentifier() or ""):
@@ -341,7 +341,7 @@ def run(vault: str | None = None, show: bool = False,
             NSDistributedNotificationCenter.defaultCenter(
             ).postNotificationName_object_userInfo_deliverImmediately_(
                 SHOW_NOTIFICATION, None, None, True)
-            print("engRAM is already running - asked it to show its panel")
+            print("Compartment is already running - asked it to show its panel")
             return 0
 
     # -- small helpers on top of AppKit's verbosity ------------------------
@@ -397,7 +397,7 @@ def run(vault: str | None = None, show: bool = False,
         def buildBody(self):
             st = self.state
             views = []
-            title = row(label("engRAM", 15, bold=True),
+            title = row(label("Compartment", 15, bold=True),
                         label("locked" if st["locked"] else "unlocked", 11,
                               secondary=True))
             views.append(title)
@@ -520,7 +520,7 @@ def run(vault: str | None = None, show: bool = False,
                 NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                 | NSWindowStyleMaskUtilityWindow,
                 NSBackingStoreBuffered, False)
-            win.setTitle_("engRAM")
+            win.setTitle_("Compartment")
             win.setReleasedWhenClosed_(False)
             win.setHidesOnDeactivate_(False)
             win.setLevel_(3)                            # NSFloatingWindowLevel
@@ -615,7 +615,7 @@ def run(vault: str | None = None, show: bool = False,
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-    _dbg = os.environ.get("ENGRAM_MENUBAR_DEBUG")
+    _dbg = env("MENUBAR_DEBUG")
     def _d(*a):
         if _dbg: print("[menubar]", *a, file=sys.stderr, flush=True)
     _d("building controller (fetches state)…")
@@ -637,20 +637,20 @@ def run(vault: str | None = None, show: bool = False,
               else f"error: could not write {render_to}")
         return 0 if ok else 1
     item = NSStatusBar.systemStatusBar().statusItemWithLength_(-1.0)
-    item.setAutosaveName_("engRAM")          # remember where the user puts it
+    item.setAutosaveName_("Compartment")          # remember where the user puts it
     # …but never remember it as hidden. An autosave name persists `visible`
     # as well as position, and a status item can be hidden by a stray
     # command-drag off the menu bar. Once that is saved the icon is gone for
     # good - every later launch restores it as hidden, the app looks like it
     # failed to start, and the only way back is to open the app. The icon
-    # belongs in the menu bar for as long as engRAM is running; Quit is what
+    # belongs in the menu bar for as long as Compartment is running; Quit is what
     # removes it.
     item.setVisible_(True)
     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-        "brain.head.profile", "engRAM")
+        "brain.head.profile", "Compartment")
     if img is None:
         img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "memorychip", "engRAM")
+            "memorychip", "Compartment")
     if img is not None:
         img.setTemplate_(True)
         item.button().setImage_(img)
@@ -686,7 +686,7 @@ def run(vault: str | None = None, show: bool = False,
            "| item at:", w.frame().origin.x if w else "no window",
            "| visible:", item.isVisible())
 
-    # Double-clicking engRAM.app while it is already running arrives here.
+    # Double-clicking Compartment.app while it is already running arrives here.
     # With no delegate macOS does nothing whatsoever, and for an app whose
     # only other surface is a status item that may be hidden behind the notch
     # that is indistinguishable from being broken. This is the way in that
@@ -702,20 +702,20 @@ def run(vault: str | None = None, show: bool = False,
     except Exception:                                   # noqa: BLE001
         _proto = []
 
-    class EngramAppDelegate(NSObject, protocols=_proto):
+    class CompartmentAppDelegate(NSObject, protocols=_proto):
         def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, vis):
             _d("reopen event -> showing the panel")
             ctrl.showFirst_(None)
             return True
 
         def applicationShouldTerminateAfterLastWindowClosed_(self, sender):
-            # Closing the panel must never quit engRAM and take the menu bar
+            # Closing the panel must never quit Compartment and take the menu bar
             # icon with it. AppKit already defaults to NO, but this app has
             # exactly one window and losing the icon by closing it would be
             # indistinguishable from the app crashing.
             return False
 
-    delegate = EngramAppDelegate.alloc().init()
+    delegate = CompartmentAppDelegate.alloc().init()
     app.setDelegate_(delegate)
     NSDistributedNotificationCenter.defaultCenter(
     ).addObserver_selector_name_object_(ctrl, "showFirst:",
@@ -730,5 +730,5 @@ def run(vault: str | None = None, show: bool = False,
 
 
 __all__ = ["run", "self_check", "fetch_state", "read_settings", "set_setting",
-           "summarise", "auto_lock_label", "default_vault", "engram_bin",
+           "summarise", "auto_lock_label", "default_vault", "compartment_bin",
            "AUTO_LOCK_CHOICES"]

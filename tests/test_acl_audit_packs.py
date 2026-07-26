@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from engram import audit, packs
-from engram.acl import AclError
-from engram.vault import QUARANTINE_WARNING
+from compartment import audit, packs
+from compartment.acl import AclError
+from compartment.vault import QUARANTINE_WARNING
 
 from conftest import seed_pack_bytes
 

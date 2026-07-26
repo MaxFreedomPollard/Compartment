@@ -1,4 +1,4 @@
-"""engRAM must tell the host WHEN to recall and WHEN to store - not just what
+"""Compartment must tell the host WHEN to recall and WHEN to store - not just what
 the tools do. Three layers: the MCP `instructions=` handshake string, the
 Hermes provider's system-prompt block, and the managed CLAUDE.md block.
 """
@@ -8,10 +8,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def test_mcp_server_advertises_instructions():
-    from engram.server import mcp, ENGRAM_INSTRUCTIONS
+    from compartment.server import mcp, COMPARTMENT_INSTRUCTIONS
     # the string rides the MCP initialize handshake
-    assert mcp.instructions == ENGRAM_INSTRUCTIONS
-    i = ENGRAM_INSTRUCTIONS.lower()
+    assert mcp.instructions == COMPARTMENT_INSTRUCTIONS
+    i = COMPARTMENT_INSTRUCTIONS.lower()
     assert "memory_search" in i and "memory_store" in i
     # tells the model WHEN, and which categories to capture
     for kw in ("recall", "store", "credential", "api key", "password",
@@ -24,7 +24,7 @@ def test_mcp_server_advertises_instructions():
 
 
 def test_store_tool_docstring_says_when():
-    from engram.server import memory_store, memory_search
+    from compartment.server import memory_store, memory_search
     ds = (memory_store.__doc__ or "").lower()
     assert "credential" in ds and ("api key" in ds or "api keys" in ds)
     assert "do not store" in ds
@@ -33,20 +33,20 @@ def test_store_tool_docstring_says_when():
 
 
 def test_hermes_plugin_prompts_when_to_store():
-    txt = (ROOT / "src" / "engram" / "data" / "hermes-plugin" / "__init__.py").read_text(encoding="utf-8")
+    txt = (ROOT / "src" / "compartment" / "data" / "hermes-plugin" / "__init__.py").read_text(encoding="utf-8")
     # system-prompt block names the categories and the recall-first habit
     assert "API keys" in txt and "credentials" in txt
-    assert "engram_store the moment" in txt
-    assert "recall explicitly" in txt or "engram_search to recall" in txt
+    assert "compartment_store the moment" in txt
+    assert "recall explicitly" in txt or "compartment_search to recall" in txt
     assert "not\n" in txt or "not instructions" in txt.replace("\n", " ")
     # both bundled copies stay byte-identical (guarded elsewhere too)
-    a = (ROOT / "integrations" / "hermes" / "engram" / "__init__.py").read_bytes()
-    b = (ROOT / "src" / "engram" / "data" / "hermes-plugin" / "__init__.py").read_bytes()
+    a = (ROOT / "integrations" / "hermes" / "compartment" / "__init__.py").read_bytes()
+    b = (ROOT / "src" / "compartment" / "data" / "hermes-plugin" / "__init__.py").read_bytes()
     assert a == b
 
 
 def test_managed_claude_md_is_idempotent_and_preserves_user_text(tmp_path, monkeypatch):
-    from engram import cli
+    from compartment import cli
     md = tmp_path / "CLAUDE.md"
     md.write_text("# My own notes\nkeep this line\n", encoding="utf-8")
     monkeypatch.setenv("CLAUDE_MD", str(md))
@@ -66,7 +66,7 @@ def test_managed_claude_md_is_idempotent_and_preserves_user_text(tmp_path, monke
 
 
 def test_managed_block_created_when_no_file(tmp_path, monkeypatch):
-    from engram import cli
+    from compartment import cli
     md = tmp_path / "sub" / "CLAUDE.md"      # parent doesn't exist yet
     monkeypatch.setenv("CLAUDE_MD", str(md))
     cli._write_managed_claude_md()

@@ -1,4 +1,4 @@
-"""Cross-platform primitives so engRAM runs natively on macOS, Linux, and
+"""Cross-platform primitives so Compartment runs natively on macOS, Linux, and
 Windows: an advisory exclusive file lock, and the boot-session identity used
 by the locked-by-default credential.
 
@@ -7,6 +7,7 @@ these functions and never imports fcntl / msvcrt / sysctl directly.
 """
 from __future__ import annotations
 
+from .home import env, home
 import json
 import os
 import platform
@@ -111,12 +112,11 @@ def boot_time() -> str:
             pass
     raise RuntimeError(
         "Cannot determine boot time on this platform; use --keychain (macOS) "
-        "or ENGRAM_PASSPHRASE instead of the boot-session credential")
+        "or COMPARTMENT_PASSPHRASE instead of the boot-session credential")
 
 
 def _win_marker() -> Path:
-    base = Path(os.environ.get("ENGRAM_SESSION_DIR",
-                               Path.home() / ".engram" / "session"))
+    base = Path(env("SESSION_DIR", home() / "session"))
     return base / ".winboot"
 
 

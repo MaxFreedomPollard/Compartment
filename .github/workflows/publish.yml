@@ -1,10 +1,10 @@
 name: Publish to PyPI
 
-# Publishes engram-memory-vault to PyPI automatically whenever a GitHub
+# Publishes compartment to PyPI automatically whenever a GitHub
 # Release is published. Uses PyPI Trusted Publishing (OIDC) - no API token
-# is stored anywhere. One-time setup on PyPI: project engram-memory-vault ->
+# is stored anywhere. One-time setup on PyPI: project compartment ->
 # Manage -> Publishing -> add a GitHub publisher (owner MaxFreedomPollard,
-# repo engRAM, workflow publish.yml, environment pypi).
+# repo Compartment, workflow publish.yml, environment pypi).
 
 on:
   release:

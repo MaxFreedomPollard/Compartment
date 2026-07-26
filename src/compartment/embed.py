@@ -3,10 +3,11 @@
 The default model ships inside the package as package data; its SHA-256 is
 pinned here and verified at load (fail-fast on any mismatch). Optional models
 live in the user model directory and carry their own pinned hashes recorded
-at download time by `engram setup download-model`.
+at download time by `compartment setup download-model`.
 """
 from __future__ import annotations
 
+from .home import env, home
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,7 @@ BUNDLED_HASHES = {
     "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
 }
 
-# Optional models fetchable by `engram setup download-model` (the ONLY
+# Optional models fetchable by `compartment setup download-model` (the ONLY
 # network-capable code path in the product lives in cli.py setup).
 OPTIONAL_MODELS = {
     "bge-small-en-v1.5-fp32": {
@@ -54,8 +55,7 @@ def bundled_model_dir() -> Path:
 
 
 def user_model_dir() -> Path:
-    return Path(os.environ.get("ENGRAM_MODEL_DIR",
-                Path.home() / ".engram" / "models"))
+    return Path(env("MODEL_DIR", home() / "models"))
 
 
 def resolve_model_dir(name: str) -> Path:
@@ -64,7 +64,7 @@ def resolve_model_dir(name: str) -> Path:
     d = user_model_dir() / name
     if not d.is_dir():
         raise ModelError(
-            f"Model {name!r} is not installed. Run: engram setup download-model {name}"
+            f"Model {name!r} is not installed. Run: compartment setup download-model {name}"
         )
     return d
 

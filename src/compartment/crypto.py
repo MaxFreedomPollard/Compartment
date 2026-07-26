@@ -1,4 +1,4 @@
-"""engRAM cryptography: XChaCha20-Poly1305 AEAD, Argon2id KDF, LUKS-style keyslots.
+"""Compartment cryptography: XChaCha20-Poly1305 AEAD, Argon2id KDF, LUKS-style keyslots.
 
 Everything at rest is sealed with AEAD (tamper-evident by construction).
 A random 256-bit vault master key is wrapped by one or more keyslots;
@@ -104,7 +104,7 @@ def make_passphrase_slot(master_key: bytes, passphrase: str, kdf: dict | None = 
 
 
 def make_recovery_slot(master_key: bytes, kdf: dict | None = None) -> tuple[dict, list[str]]:
-    """LEGACY (read-path only): engRAM no longer generates credentials of any
+    """LEGACY (read-path only): Compartment no longer generates credentials of any
     kind - the user's own passphrase is the only knowledge factor. This
     function remains so vaults created by older versions, which auto-
     generated a 16-word recovery phrase, still open with that phrase."""
@@ -177,8 +177,8 @@ def unwrap_master(keyslots: list[dict], secret: str,
     if needs_keyfile:
         raise CryptoError(
             "Two-factor unlock is enabled on this vault: a keyfile is "
-            "required alongside the passphrase (engram unlock --keyfile "
-            "/path/to/engram-2fa.key)")
+            "required alongside the passphrase (compartment unlock --keyfile "
+            "/path/to/compartment-2fa.key)")
     raise TamperError("Wrong passphrase (no keyslot opened)")
 
 

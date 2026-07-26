@@ -1,7 +1,7 @@
-"""engRAM dashboard: `engram dash` → one local page showing what the vault
+"""Compartment dashboard: `compartment dash` → one local page showing what the vault
 holds - how many memories, of what kind, growing how fast, connected how.
 
-Security posture (same invariants as the rest of engRAM):
+Security posture (same invariants as the rest of Compartment):
 - Serves ENTIRELY from RAM. Nothing decrypted is ever written to disk;
   responses carry Cache-Control: no-store so the browser keeps them out of
   its disk cache too.
@@ -220,7 +220,7 @@ def run(path: str, vault: Vault) -> None:
     import webbrowser
     ref = _VaultRef(path, vault)
     httpd, url = start(ref)
-    print(f"engRAM dashboard: {url}")
+    print(f"Compartment dashboard: {url}")
     print("  serving from RAM, 127.0.0.1 only, read-only - Ctrl-C to stop")
     try:
         webbrowser.open(url)
@@ -239,7 +239,7 @@ def run(path: str, vault: Vault) -> None:
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>engRAM</title>
+<title>Compartment</title>
 <style>
 :root{
  --bg:#0a0c11;--card:rgba(255,255,255,.028);--card2:rgba(255,255,255,.05);
@@ -548,7 +548,7 @@ function graph(g){
   `${g.nodes.length} entities · ${g.edges.length} relations`:"";
  if(!g.nodes.length){
   $("graphhint").innerHTML="no relations mapped yet - the agent adds them "+
-   "with <b>memory_link</b>, or you can: <b>engram link \"Maya\" \"works at\" \"Acme\"</b>";
+   "with <b>memory_link</b>, or you can: <b>compartment link \"Maya\" \"works at\" \"Acme\"</b>";
   return;}
  $("graphhint").innerHTML="<b>node size & warmth</b> = connectedness · hover for names";
  const maxDeg=Math.max(...g.nodes.map(n=>n.degree),1);

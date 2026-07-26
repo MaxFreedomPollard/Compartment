@@ -2,7 +2,7 @@
 
 Lifecycle:
     Vault.create(...)          → new sealed .vault on disk (user-set
-                                 passphrase is the only credential; engRAM
+                                 passphrase is the only credential; Compartment
                                  never auto-generates one)
     Vault.unlock(path, cred)   → decrypt payload into RAM, replay journal,
                                  rebuild the vector index in RAM
@@ -12,6 +12,7 @@ Lifecycle:
 """
 from __future__ import annotations
 
+from .home import env, home
 import base64
 import datetime
 import json
@@ -124,7 +125,7 @@ class Vault:
     def create(cls, path: str, passphrase: str, creator: str = "user",
                model_name: str = DEFAULT_MODEL) -> "Vault":
         """Create a sealed vault. The user's own passphrase is the ONLY
-        credential - engRAM never auto-generates a password or recovery
+        credential - Compartment never auto-generates a password or recovery
         seed. (Optional second factor: Vault.twofa_enable.)"""
         if os.path.exists(path):
             raise CryptoError(f"Refusing to overwrite existing vault: {path}")
@@ -190,7 +191,7 @@ class Vault:
                     "Embedding model on this machine does not match the model "
                     "this vault was built with. Refusing to open (would corrupt "
                     "search). Install the matching model, or migrate the vault "
-                    "with: engram reindex --re-embed"
+                    "with: compartment reindex --re-embed"
                 )
             v._embedder = emb
         else:
@@ -262,13 +263,13 @@ class Vault:
         key = keychain_get(path)
         if key is not None:
             return None, key
-        env = os.environ.get("ENGRAM_PASSPHRASE")
-        if env:
-            return env, None
+        from_env = env("PASSPHRASE")
+        if from_env:
+            return from_env, None
         raise CryptoError(
             "Vault is locked (locked-by-default: every restart or power loss "
-            "requires one unlock). Run `engram unlock` - it then stays "
-            "unlocked until the next restart or `engram lock`."
+            "requires one unlock). Run `compartment unlock` - it then stays "
+            "unlocked until the next restart or `compartment lock`."
         )
 
     @staticmethod
@@ -373,7 +374,7 @@ class Vault:
                 if row and row["ns"] == ns:
                     return {"id": rid, "duplicate": True, "score": round(score, 4)}
         prov = prov or {"host": platform.node(), "agent": caller,
-                        "session": os.environ.get("ENGRAM_SESSION", "-")}
+                        "session": env("SESSION", "-")}
         rid = self.db.insert(record_id=None, ns=ns, text=text, vec=vec,
                              tags=tags or [], importance=importance,
                              quarantined=quarantined, pack=pack, prov=prov,
@@ -595,7 +596,7 @@ class Vault:
         if dupe is not None:
             return {"id": dupe["id"], "duplicate": True, "namespace": ns}
         prov = {"host": platform.node(), "agent": caller,
-                "session": os.environ.get("ENGRAM_SESSION", "-")}
+                "session": env("SESSION", "-")}
         rid = self.db.insert_relation(
             rel_id=None, subject=subject, predicate=predicate, obj=obj, ns=ns,
             src_id=src_id, valid_from=valid_from, valid_to=valid_to, prov=prov)
@@ -730,8 +731,8 @@ class Vault:
             if keyfile is None:
                 raise CryptoError(
                     "Two-factor unlock is enabled: rekey needs the keyfile "
-                    "too (engram rekey --keyfile PATH), or disable it first "
-                    "with `engram 2fa disable`.")
+                    "too (compartment rekey --keyfile PATH), or disable it first "
+                    "with `compartment 2fa disable`.")
             slot = crypto.make_keyfile_slot(self._master, new_passphrase,
                                             keyfile)
         else:
@@ -822,6 +823,12 @@ class Vault:
 # ---------------------------------------------------------------------------
 
 def _keychain_service(path: str) -> str:
+    """Keychain identity for a vault.
+
+    Frozen at the pre-rename spelling, like the on-disk constants: this names
+    a credential macOS already stored. Renaming it does not migrate anything,
+    it just stops finding the item, and the vault reports itself locked with
+    no indication why."""
     return f"engram-vault:{os.path.abspath(path)}"
 
 

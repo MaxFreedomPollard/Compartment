@@ -1,29 +1,29 @@
-# Upstream PR: ship engRAM as a bundled memory provider
+# Upstream PR: ship Compartment as a bundled memory provider
 
-Goal: engRAM appears in `hermes memory setup` for every Hermes user by
+Goal: Compartment appears in `hermes memory setup` for every Hermes user by
 default, exactly like hindsight/mem0/byterover, with zero manual steps.
 
 ## Preconditions (in order)
 
-1. `engram-memory-vault` published to PyPI (the wheel is self-contained: 30 MB
+1. `compartment` published to PyPI (the wheel is self-contained: 30 MB
    with the embedding model inside; verified by a
    clean-venv install + offline init + selftest).
-2. Check hermes-agent's open PRs and issues for an existing engRAM or
+2. Check hermes-agent's open PRs and issues for an existing Compartment or
    equivalent offline-memory submission before opening (novelty check).
 
 ## The change (two files, no core edits)
 
-- `plugins/memory/engram/__init__.py` - copy of
-  `integrations/hermes/engram/__init__.py` from this repo, unchanged.
+- `plugins/memory/compartment/__init__.py` - copy of
+  `integrations/hermes/compartment/__init__.py` from this repo, unchanged.
   It implements the MemoryProvider ABC; is_available() degrades cleanly
   when the pip package or vault is absent, so bundling it is inert until
   a user selects it.
-- `plugins/memory/engram/plugin.yaml` - the `upstream/plugin.yaml`
-  beside this file (declares `pip_dependencies: ["engram-memory-vault>=1.5"]`
+- `plugins/memory/compartment/plugin.yaml` - the `upstream/plugin.yaml`
+  beside this file (declares `pip_dependencies: ["compartment>=1.5"]`
   so the picker's dependency step installs the engine on selection).
 
 Why no registry entry in `hermes_cli/memory_providers.py`: the picker is
-built from `discover_memory_providers()`, and engRAM has an empty
+built from `discover_memory_providers()`, and Compartment has an empty
 `get_config_schema()` (no API keys, no endpoints), so it needs no setup
 fields. `post_setup` handles selection, vault detection, and user
 guidance.
@@ -31,10 +31,10 @@ guidance.
 ## How selection behaves after the PR
 
     hermes memory setup
-      → picker lists: … hindsight … mem0 … engram ("no setup needed")
-      → selecting engram: pip installs engram-memory-vault (~30 MB, one time),
-        writes memory.provider: engram, prints `engram init` guidance
-      → engram init: creates the encrypted vault (seconds, fully offline)
+      → picker lists: … hindsight … mem0 … compartment ("no setup needed")
+      → selecting compartment: pip installs compartment (~30 MB, one time),
+        writes memory.provider: compartment, prints `compartment init` guidance
+      → compartment init: creates the encrypted vault (seconds, fully offline)
 
 ## PR text guidelines (house rules)
 

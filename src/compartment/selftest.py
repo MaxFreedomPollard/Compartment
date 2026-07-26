@@ -42,7 +42,7 @@ def run(vault, caller: str = "selftest") -> dict:
     idmap = _seed_id_map(vault)
     if not idmap:
         return {"passed": 0, "failed": len(QUERIES), "total": len(QUERIES),
-                "error": "no starting memories found (run `engram init`)",
+                "error": "no starting memories found (run `compartment init`)",
                 "failures": ["starting memories missing"], "latencies_ms": []}
     latencies, failures = [], []
     for query, want in QUERIES:

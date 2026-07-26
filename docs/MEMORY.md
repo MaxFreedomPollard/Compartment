@@ -1,6 +1,6 @@
-# How engRAM Remembers
+# How Compartment Remembers
 
-How memory is stored, how engRAM decides what becomes a memory, and why
+How memory is stored, how Compartment decides what becomes a memory, and why
 this design is mathematically stronger than the alternatives. Every claim
 in this document is enforced by code and covered by the test suite.
 
@@ -8,7 +8,7 @@ in this document is enforced by code and covered by the test suite.
 
 ## 1. How a memory is stored
 
-When an agent finishes a turn (or calls `engram_store` / `memory_store`),
+When an agent finishes a turn (or calls `compartment_store` / `memory_store`),
 the following happens **locally, in about 40 milliseconds, with zero
 network involvement**:
 
@@ -37,11 +37,11 @@ Every stored record carries: the text (encrypted under its own key), its
 provenance (host / agent / session), and timestamps. **The vector is
 encrypted at rest too** - embeddings can be partially inverted back toward
 their text, so treating vectors as non-sensitive (as most systems do) is a
-hole; engRAM doesn't have it.
+hole; Compartment doesn't have it.
 
 New memories land in the writing agent's namespace (e.g. `hermes` or
 `main`), in the same vault and the same searchable index - one vector
-space, searched together. The starting memories engRAM seeds at `init`
+space, searched together. The starting memories Compartment seeds at `init`
 live in `main` too, as ordinary records: searchable, taggable, editable,
 forgettable, exactly as if the agent had stored them (vaults created by
 older versions are reorganized this way automatically on open). Optional
@@ -50,12 +50,12 @@ add-on packs are the one exception: they install read-only under
 traffic.
 
 Alongside records, the vault keeps a **memory graph**: explicit
-subject-predicate-object relations (`memory_link` / `engram link`),
+subject-predicate-object relations (`memory_link` / `compartment link`),
 optionally tied to the memory they came from and to a validity window,
 queryable by entity, predicate, or as-of time (`memory_relations`).
 Storage and matching are deterministic (case-insensitive entity
 normalization, idempotent re-links); the judgment of what to link belongs
-to the host model, exactly like memory curation. `engram dash` draws the
+to the host model, exactly like memory curation. `compartment dash` draws the
 graph and the rest of the vault's shape in the browser - served from RAM,
 loopback-only, read-only.
 
@@ -66,9 +66,9 @@ inside the vault under the pinned model. Optional signed packs can ship
 precomputed vectors bit-exact for that model (see [PACKS.md](../PACKS.md));
 that is an authoring path, not something you configure day to day.
 
-## 2. How engRAM decides what becomes a memory
+## 2. How Compartment decides what becomes a memory
 
-engRAM never calls an LLM (that is what keeps the offline guarantee
+Compartment never calls an LLM (that is what keeps the offline guarantee
 absolute), so the write decision is a **deterministic, importance-tiered
 classifier**. Its governing principle: **remember aggressively, and
 prioritize the user and their machine over world trivia.** The user is not
@@ -79,7 +79,7 @@ information.*
 ones. A bare "yes", "no", or "OK" is not noise - it is a decision, and
 often the most important thing in the whole session. When the assistant
 asks *"Want me to send this reply to the client now?"* and the user
-replies *"OK"*, engRAM stores a self-contained consent record -
+replies *"OK"*, Compartment stores a self-contained consent record -
 `[decision <date>] Approved (answered "OK"): Want me to send this reply
 to the client now?` - by resolving the question from the preceding
 assistant turn. A later "did the user say to email the client?" retrieves
@@ -106,7 +106,7 @@ low-value - pleasantries are simply ranked last.
 nearest neighbor is ≥ 0.97 cosine (a literal repeat) and returns the
 existing id. There is deliberately **no aggressive novelty gate**: a second
 "yes" to a *different* question is new information, and because its stored
-text embeds the question it is not a near-duplicate anyway. engRAM favors
+text embeds the question it is not a near-duplicate anyway. Compartment favors
 completeness over compactness - at a few KB per memory, thousands of turns
 cost only a few MB, and importance-weighted ranking keeps recall sharp.
 
@@ -120,10 +120,10 @@ and the dark-mode preference wins on relevance; ask "did the user say to
 email the client?" and the consent decision wins.
 
 **The agent-directed path.** The host model (Hermes, Claude, anything)
-also holds `engram_store` / `engram_forget` tools, so the intelligence
+also holds `compartment_store` / `compartment_forget` tools, so the intelligence
 *you already pay for* can curate explicitly - distilling, correcting, or
-crypto-shredding memories. engRAM splits the labor: **the host model
-supplies judgment; engRAM supplies deterministic capture, encryption, and
+crypto-shredding memories. Compartment splits the labor: **the host model
+supplies judgment; Compartment supplies deterministic capture, encryption, and
 total recall.** A memory layer that runs its own LLM either phones home
 (privacy gone) or ships a second multi-gigabyte model (your RAM gone) - and
 its decisions become non-reproducible either way.
@@ -139,29 +139,29 @@ memory layers generally lack.
 ## 3. Why this is mathematically and logically stronger
 
 **Exact search at personal scale - retrieval is provably optimal.** Below
-20,000 records engRAM computes all similarities with SIMD matrix math:
+20,000 records Compartment computes all similarities with SIMD matrix math:
 the top-k result is the true top-k, recall = 1.0 by construction, in
 under a millisecond. Mainstream vector stores run approximate (ANN)
 indexes at *every* scale, accepting 95-99% recall on corpora small enough
 to search exactly - approximation error with no compensating benefit.
-engRAM only switches to HNSW (~99% recall, p95 < 15 ms at 1M) when the
+Compartment only switches to HNSW (~99% recall, p95 < 15 ms at 1M) when the
 corpus actually demands it, and `reindex` rebuilds from stored vectors at
 any time.
 
 **One pinned embedding space - cosine stays meaningful.** Similarity
-between two vectors is only defined if one model produced both. engRAM
+between two vectors is only defined if one model produced both. Compartment
 records the embedding model's SHA-256 in the vault and **refuses to open**
 with a mismatched model (explicit `reindex --re-embed` migrates instead).
 Systems that let the embedding model drift silently corrupt every
 similarity they compute afterward - the errors are invisible until
 retrieval quietly degrades.
 
-**Completeness with clean recall.** engRAM stores nearly every turn (only
+**Completeness with clean recall.** Compartment stores nearly every turn (only
 exact-duplicate writes are dropped), so nothing the user says is lost -
 but importance tiers and cosine-weighted fusion keep retrieval sharp, so a
 complete store does not mean a noisy recall. Turn-logging systems also grow
 O(turns) but rank purely by recency or raw keyword match, so their
-retrieval drowns in whatever the user discusses most; engRAM ranks by
+retrieval drowns in whatever the user discusses most; Compartment ranks by
 relevance-plus-importance, surfacing decisions and personal facts first.
 
 **The write path is crash-proof by argument, not by luck.** An
@@ -184,7 +184,7 @@ inequality about a well-studied primitive.
 network round-trip is already slower than our entire pipeline.** Cloud
 memory APIs add tens to thousands of milliseconds per recall and per
 store, on every single turn, plus an availability dependency and a
-privacy surrender. The RAM-residency that makes engRAM secure (no
+privacy surrender. The RAM-residency that makes Compartment secure (no
 plaintext index on disk) is the same property that makes it fast - in
 this design, security and speed are the same decision.
 
@@ -197,7 +197,7 @@ unlocked vault from a fully compromised OS.
 
 ## 4. The same math, in one table
 
-| Property | engRAM | Cloud memory APIs | Typical local vector DB | Raw turn-logging |
+| Property | Compartment | Cloud memory APIs | Typical local vector DB | Raw turn-logging |
 |---|---|---|---|---|
 | Recall correctness (personal scale) | exact, 1.0 | ANN ≈0.95-0.99 | ANN ≈0.95-0.99 | keyword only |
 | Store/recall latency | ~25 ms / <1 ms | 100 ms-40 s | ms | ms |

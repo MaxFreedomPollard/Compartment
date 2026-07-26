@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "engram-memory-vault"
-version = "1.14.0"
-description = "engRAM - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
+name = "compartment"
+version = "1.15.0"
+description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -19,17 +19,22 @@ dependencies = [
 ]
 
 [project.scripts]
-engram = "engram.cli:main"
+compartment = "compartment.cli:main"
+cmpt = "compartment.cli:main"
+# Compartment was engRAM until 1.15.0, and `engram` is the command sitting in
+# every existing MCP client config, shell alias and Hermes setup. Keeping it
+# means the rename costs nobody a broken agent.
+engram = "compartment.cli:main"
 
 [project.optional-dependencies]
-# usearch (SIMD HNSW) is only needed ABOVE 20k records; below that engRAM
+# usearch (SIMD HNSW) is only needed ABOVE 20k records; below that Compartment
 # uses an exact brute-force index. Keeping it optional means the default
 # `pip install` compiles nothing and installs cleanly everywhere; large
-# corpora add it with `pip install engram-memory-vault[hnsw]`.
+# corpora add it with `pip install compartment[hnsw]`.
 hnsw = ["usearch>=2.9"]
 # The macOS menu bar app. PyObjC is macOS-only and irrelevant to the CLI and
 # MCP server, so it stays out of the default install: `pip install
-# engram-memory-vault[menubar]`, then `engram menubar`.
+# compartment[menubar]`, then `compartment menubar`.
 menubar = ["pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'"]
 dev = ["pytest>=8", "usearch>=2.9"]
 
@@ -37,4 +42,4 @@ dev = ["pytest>=8", "usearch>=2.9"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-engram = ["models/**/*", "data/**/*"]
+compartment = ["models/**/*", "data/**/*"]

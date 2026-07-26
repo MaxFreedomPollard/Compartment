@@ -1,22 +1,23 @@
 """Deterministic capture: mirror Claude Code memory writes into the vault.
 
-Telling a model to prefer engram is a request, and a host that declares its
+Telling a model to prefer compartment is a request, and a host that declares its
 own memory in the system prompt outranks anything a tool says. A hook does
 not ask. When Claude Code writes a file into its memory directory, this hook
 runs and the fact lands in the vault whether or not the model ever thought
-about engram.
+about compartment.
 
 Two halves:
 
-* `install()` merges an engram entry into ~/.claude/settings.json - additive,
+* `install()` merges an compartment entry into ~/.claude/settings.json - additive,
   idempotent, and it backs the file up first. Other people's hooks are left
-  exactly as they are; only engram's own entries are replaced on re-install.
+  exactly as they are; only compartment's own entries are replaced on re-install.
 * `capture()` is what the hook command runs. It reads Claude Code's hook JSON
   on stdin, and if the written file is a memory file, stores it. It exits 0
   no matter what: a memory tool must never break the user's editor.
 """
 from __future__ import annotations
 
+from .home import env, home
 import json
 import os
 import shutil
@@ -30,7 +31,7 @@ SETTINGS = Path.home() / ".claude" / "settings.json"
 # carries `--vault ...` between them when a vault is pinned, so a single
 # substring would stop matching and re-installing would duplicate the hook.
 MARKER = "hook capture"
-_OWNER = "engram"
+_OWNER = "compartment"
 EVENT = "PostToolUse"
 MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
 TIMEOUT = 15
@@ -42,9 +43,9 @@ def _entry(command: str) -> dict:
                        "timeout": TIMEOUT}]}
 
 
-def hook_command(engram_bin: str | None = None, vault: str | None = None) -> str:
+def hook_command(compartment_bin: str | None = None, vault: str | None = None) -> str:
     """The exact shell command the hook runs."""
-    exe = engram_bin or shutil.which("engram") or "engram"
+    exe = compartment_bin or shutil.which("compartment") or "compartment"
     if " " in exe:
         exe = f'"{exe}"'
     vault_part = f' --vault "{vault}"' if vault else ""
@@ -52,7 +53,7 @@ def hook_command(engram_bin: str | None = None, vault: str | None = None) -> str
 
 
 def is_ours(command: object) -> bool:
-    """Whether a configured hook command belongs to engram."""
+    """Whether a configured hook command belongs to compartment."""
     c = str(command or "")
     return MARKER in c and _OWNER in c
 
@@ -76,14 +77,14 @@ def _read(path: Path) -> dict:
         raise ValueError(f"{path} is not valid JSON; refusing to touch it")
 
 
-def install(engram_bin: str | None = None, vault: str | None = None,
+def install(compartment_bin: str | None = None, vault: str | None = None,
             settings: Path | None = None) -> dict:
-    """Add (or refresh) engram's capture hook. Never removes anyone else's."""
+    """Add (or refresh) compartment's capture hook. Never removes anyone else's."""
     path = Path(settings) if settings else SETTINGS
     data = _read(path)                                  # raises on malformed
     backup = None
     if path.exists():
-        backup = path.with_suffix(path.suffix + ".engram-backup")
+        backup = path.with_suffix(path.suffix + ".compartment-backup")
         shutil.copy2(path, backup)
 
     hooks = data.setdefault("hooks", {})
@@ -97,7 +98,7 @@ def install(engram_bin: str | None = None, vault: str | None = None,
             kept.append({**group, "hooks": inner})
         elif not group.get("hooks"):
             kept.append(group)
-    kept.append(_entry(hook_command(engram_bin, vault)))
+    kept.append(_entry(hook_command(compartment_bin, vault)))
     hooks[EVENT] = kept
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,8 +182,7 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
 
     from .crypto import CryptoError
     from .vault import Vault
-    vp = vault_path or os.environ.get(
-        "ENGRAM_VAULT", str(Path.home() / ".engram" / "memory.vault"))
+    vp = vault_path or env("VAULT", str(home() / "memory.vault"))
     if not os.path.exists(vp):
         return {"stored": False, "reason": "no vault"}
     try:

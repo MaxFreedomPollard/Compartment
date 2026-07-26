@@ -1,8 +1,8 @@
 """The bundle has to be signable.
 
-engRAM 1.13.0 shipped an app that did nothing at all when clicked. `venv`
+Compartment 1.13.0 shipped an app that did nothing at all when clicked. `venv`
 leaves a `.gitignore` at the root of every environment it creates - here
-`engRAM.app/Contents/` - and codesign will not seal a stray dotfile in the
+`Compartment.app/Contents/` - and codesign will not seal a stray dotfile in the
 bundle root, so the signature came out structurally invalid. Gatekeeper then
 reads a quarantined copy as having "no usable signature" and the kernel
 SIGKILLs it the moment it execs: no dialog, no crash report, nothing.
@@ -70,7 +70,7 @@ def test_installer_never_registers_the_login_item_as_root():
 def test_installer_strips_quarantine_and_stale_copies():
     src = SPEC.read_text(encoding="utf-8")
     assert "xattr -dr com.apple.quarantine" in src
-    assert "Applications/engRAM.app" in src and "/bin/rm -rf" in src
+    assert "Applications/Compartment.app" in src and "/bin/rm -rf" in src
 
 
 # ------------------------------------------------- the bundle must stand alone

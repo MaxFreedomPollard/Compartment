@@ -1,4 +1,4 @@
-# engRAM On-Disk Formats (v1)
+# Compartment On-Disk Formats (v1)
 
 Language-agnostic byte-level spec. A conforming implementation in any
 language can read both formats from this document alone (invariant I5).
@@ -44,7 +44,7 @@ keyslot wrapping fails AEAD auth if slots are altered.
  "salt": "16-byte hex",
  "keyfile_id": "first 16 hex chars of SHA-256(keyfile)   (passphrase+keyfile only)",
  "wrapped": "hex of AEAD_seal(key=Argon2id(secret, salt), msg=master_key,
-             aad='engram-keyslot')"}
+             aad='compartment-keyslot')"}
 ```
 
 `AEAD_seal(key, msg, aad)` = 24-byte random nonce ‖
@@ -58,7 +58,7 @@ Slot secrets:
   wordlist (256 words) is part of this spec (see `crypto.WORDLIST`);
   each word encodes one byte by index.
 - `passphrase+keyfile` (two-factor, 1.8.0+) - secret =
-  `utf8(passphrase) ‖ b"\x1f engram-2fa \x1f" ‖ keyfile_bytes`, so both
+  `utf8(passphrase) ‖ b"\x1f compartment-2fa \x1f" ‖ keyfile_bytes`, so both
   factors feed the KDF; `keyfile_id` exists only to name the wrong file
   in error messages (the keyfile is ≥16 random bytes, not guessable).
 
@@ -67,7 +67,7 @@ Slot secrets:
 `payload_plain = TLV(sections)`; currently one section, `"sqlite"` - a
 serialized SQLite database image (schema in `store.py`; includes records,
 FTS5 index, audit chain, meta).
-`payload_ct = AEAD_seal(master_key, payload_plain, aad="engram-payload:"+vault_id)`.
+`payload_ct = AEAD_seal(master_key, payload_plain, aad="compartment-payload:"+vault_id)`.
 
 TLV container:
 ```
@@ -78,7 +78,7 @@ u32 section_count, then per section:
 ### Journal
 
 Each entry: `AEAD_seal(master_key, canonical_json(entry),
-aad="engram-journal:"+vault_id+":"+u64_be(seq))` where `seq` starts at 0
+aad="compartment-journal:"+vault_id+":"+u64_be(seq))` where `seq` starts at 0
 after each compaction and increments per entry. Entries are fsync'd on
 append (acknowledged). Ops:
 
@@ -133,7 +133,7 @@ header pins `content_sha256`, the signature covers the body transitively.
 parse.** Any failure aborts before further parsing.
 
 Body (after optional AEAD unseal with
-`aad="engram-pack:"+name`): TLV sections
+`aad="compartment-pack:"+name`): TLV sections
 `"records"` = JSONL, one `{"id"?, "text", "tags"?, "importance"?}` per line;
 `"vectors"` = `records × dim` float32 little-endian, row-major, L2-normalized,
 computed with `header.model`.

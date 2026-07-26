@@ -1,9 +1,9 @@
-"""LongMemEval retrieval harness (`engram bench --longmemeval`).
+"""LongMemEval retrieval harness (`compartment bench --longmemeval`).
 
-Measures engRAM's retrieval pipeline on LongMemEval (Wu et al., ICLR 2025):
+Measures Compartment's retrieval pipeline on LongMemEval (Wu et al., ICLR 2025):
 500 questions, each against tens of multi-turn chat sessions of history.
 For every question we embed every history turn with the bundled model and
-score with the SAME hybrid fusion engRAM uses in production - reciprocal-
+score with the SAME hybrid fusion Compartment uses in production - reciprocal-
 rank fusion over exact vector ranks and BM25 keyword ranks, plus the cosine
 magnitude term - then aggregate turns to sessions by their best turn and
 check whether the evidence sessions surface at the top.
@@ -15,12 +15,13 @@ Abstention questions (id suffix "_abs") carry no evidence and are skipped,
 as in the benchmark's own retrieval evaluation.
 
 Pure tooling: this never touches a vault and adds zero runtime cost to the
-product. The dataset is fetched once via `engram setup download-longmemeval`
+product. The dataset is fetched once via `compartment setup download-longmemeval`
 - like download-model, an explicit user-invoked network operation; the
 benchmark run itself is fully offline.
 """
 from __future__ import annotations
 
+from .home import env, home
 import hashlib
 import json
 import sqlite3
@@ -45,7 +46,7 @@ BASE_URL = "https://huggingface.co/datasets/xiaowu0162/longmemeval/resolve/main/
 
 
 def data_dir() -> Path:
-    return Path.home() / ".engram" / "benchmarks" / "longmemeval"
+    return home() / "benchmarks" / "longmemeval"
 
 
 def dataset_path(variant: str) -> Path:
@@ -80,7 +81,7 @@ def download(variant: str = "s") -> Path:
 # ---------------------------------------------------------------- retrieval
 
 def _fts_ranks(texts: list[str], query: str, limit: int) -> dict[int, int]:
-    """BM25 ranks over the turn corpus, engRAM's FTS5 quoting rules."""
+    """BM25 ranks over the turn corpus, Compartment's FTS5 quoting rules."""
     con = sqlite3.connect(":memory:")
     con.execute("CREATE VIRTUAL TABLE fts USING fts5(text)")
     con.executemany("INSERT INTO fts (rowid, text) VALUES (?, ?)",
@@ -163,7 +164,7 @@ def run(variant: str = "s", limit: int | None = None,
     if not p.exists():
         raise CryptoError(
             f"LongMemEval dataset not found at {p}. Fetch it once with: "
-            f"engram setup download-longmemeval --variant {variant}")
+            f"compartment setup download-longmemeval --variant {variant}")
     instances = json.loads(p.read_text(encoding="utf-8"))
     if limit:
         instances = instances[:limit]

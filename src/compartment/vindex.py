@@ -105,7 +105,7 @@ def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
     Above BRUTE_FORCE_LIMIT we prefer SIMD HNSW (usearch). usearch is an
     OPTIONAL dependency, so if it is not installed we fall back to the exact
     brute-force index (still correct, just slower at large scale) and hint
-    once at `pip install engram-memory-vault[hnsw]`."""
+    once at `pip install compartment[hnsw]`."""
     if force == "brute" or (force is None and len(ikeys) < BRUTE_FORCE_LIMIT):
         return BruteForceIndex.build(dim, ikeys, mat)
     try:
@@ -119,6 +119,6 @@ def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
                 "brute-force limit but usearch (HNSW) is not installed; using "
                 "exact brute-force search (correct, slower at this scale). For "
                 "faster large-corpus search: pip install "
-                "engram-memory-vault[hnsw]", file=sys.stderr)
+                "compartment[hnsw]", file=sys.stderr)
             _HNSW_WARNED = True
         return BruteForceIndex.build(dim, ikeys, mat)
