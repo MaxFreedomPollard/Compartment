@@ -120,10 +120,32 @@ jobs:
                 IntPtr h, int attr, out RECT r, int size);
           }
           "@
-          # Ask the window manager where the window is, rather than guessing at
-          # pixel boundaries after the fact.
-          $h = [NativeWin]::FindWindow($null, "Compartment")
-          if ($h -eq [IntPtr]::Zero) { Write-Error "no Compartment window"; exit 1 }
+          # The whole desktop first, so this step always produces something
+          # even if the precise capture below cannot find the window.
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "desktop: $($b.Width)x$($b.Height)"
+          $full = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g2 = [System.Drawing.Graphics]::FromImage($full)
+          $g2.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $full.Save("$PWD\tray.png", [System.Drawing.Imaging.ImageFormat]::Png)
+
+          # Ask the process for its own window rather than FindWindow: passing
+          # $null for a string parameter through P/Invoke marshals as "" in
+          # PowerShell, which then matches a window class literally named
+          # empty and finds nothing.
+          Write-Host "windows with a title:"
+          Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } |
+            ForEach-Object { Write-Host "  $($_.ProcessName): '$($_.MainWindowTitle)'" }
+          $proc = Get-Process |
+            Where-Object { $_.MainWindowHandle -ne 0 -and
+                           ($_.ProcessName -like "*compartment*" -or
+                            $_.MainWindowTitle -eq "Compartment") } |
+            Select-Object -First 1
+          if (-not $proc) {
+            Write-Warning "no Compartment window found; desktop shot only"
+            exit 0
+          }
+          $h = $proc.MainWindowHandle
           [void][NativeWin]::SetForegroundWindow($h)
           Start-Sleep -Milliseconds 900
           $r = New-Object NativeWin+RECT
@@ -131,7 +153,10 @@ jobs:
           # invisible resize border a plain GetWindowRect includes.
           [void][NativeWin]::DwmGetWindowAttribute($h, 9, [ref]$r, 16)
           $w = $r.Right - $r.Left; $ht = $r.Bottom - $r.Top
-          if ($w -lt 50 -or $ht -lt 50) { Write-Error "bad window rect"; exit 1 }
+          if ($w -lt 50 -or $ht -lt 50) {
+            Write-Warning "implausible window rect ${w}x${ht}; desktop shot only"
+            exit 0
+          }
           $bmp = New-Object System.Drawing.Bitmap $w, $ht
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($r.Left, $r.Top, 0, 0,
@@ -139,15 +164,6 @@ jobs:
           $bmp.Save("$PWD\compartment-windows-panel.png",
                     [System.Drawing.Imaging.ImageFormat]::Png)
           Write-Host "panel: ${w}x${ht}"
-
-          # The whole desktop too, for context and as a fallback if the window
-          # capture above ever regresses.
-          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $full = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-          $g2 = [System.Drawing.Graphics]::FromImage($full)
-          $g2.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-          $full.Save("$PWD\tray.png", [System.Drawing.Imaging.ImageFormat]::Png)
-          Write-Host "desktop: $($b.Width)x$($b.Height)"
 
       - uses: actions/upload-artifact@v4
         with:
