@@ -26,6 +26,27 @@ from .vaultfile import read_vault_file, verify_manifest
 DEFAULT_VAULT = env("VAULT", str(home() / "memory.vault"))
 
 
+def _utf8_console() -> None:
+    """Make console output encoding-proof before anything is printed.
+
+    A Windows console defaults to a legacy code page (cp1252 on most
+    installs), which cannot encode the arrows and check marks this CLI
+    prints - `compartment init` died on a single U+2192 with
+    UnicodeEncodeError, after the vault was already created. It cannot
+    encode arbitrary memory text either, so `search` and `recent` would
+    fail on any memory holding an emoji or an accented name.
+
+    `errors="replace"` is the load-bearing half: a memory tool must never
+    die formatting its own output. Guarded because stdout is not always a
+    real console - pytest capture and redirects replace it, which is also
+    why the test suite never caught this."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _die(msg: str, code: int = 1) -> None:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -952,6 +973,7 @@ def cmd_setup(args) -> None:
 # -------------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> None:
+    _utf8_console()
     offline_guard.activate_from_env()
     ap = argparse.ArgumentParser(
         prog="compartment",

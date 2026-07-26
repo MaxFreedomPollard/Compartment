@@ -40,6 +40,11 @@ jobs:
     # really be drawn here - the screenshot is uploaded so a human can look at
     # the panel without owning a Windows machine.
     runs-on: windows-latest
+    # Nothing here should take twenty minutes. Without a cap, one command
+    # waiting on a passphrase prompt that no one can answer held a runner
+    # for 2h40m: init crashed on a non-ASCII character, left the vault
+    # locked, and the next command sat asking for input.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
