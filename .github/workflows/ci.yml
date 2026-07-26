@@ -63,6 +63,7 @@ jobs:
           compartment store "Staging runs Postgres 16 behind pgbouncer on port 6432."
           compartment store "Prefers spaces over tabs everywhere except Go."
           compartment store "This laptop has 16 GB, so keep parallel jobs at 4."
+          python -c "from compartment import menubar as m; m.set_setting(m.default_vault(), 'capture_hook', True)"
 
       - name: The panel, without a window (what it would say)
         run: compartment tray --self-check
@@ -91,6 +92,8 @@ jobs:
           Start-Sleep -Seconds 3
 
       - name: Start the tray app and prove it is still alive
+        # At the DEFAULT scale, which is what nearly everyone runs. The
+        # high-DPI path below must not be the only one exercised.
         shell: pwsh
         run: |
           $p = Start-Process -PassThru -FilePath compartment -ArgumentList 'tray','--show'
@@ -100,6 +103,24 @@ jobs:
             exit 1
           }
           Write-Host "still running after 25s (pid $($p.Id))"
+          Stop-Process -Id $p.Id -Force
+          Start-Sleep -Seconds 2
+
+      - name: Start it again at 2x, the way a high-DPI laptop draws it
+        # The runner's display is 96 DPI, so this is the only way to see the
+        # scaled path render here - and it is what produces a screenshot
+        # sharp enough to sit beside the Retina macOS one.
+        shell: pwsh
+        env:
+          COMPARTMENT_UI_SCALE: "2"
+        run: |
+          $p = Start-Process -PassThru -FilePath compartment -ArgumentList 'tray','--show'
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) {
+            Write-Error "the tray app exited at 2x scale with $($p.ExitCode)"
+            exit 1
+          }
+          Write-Host "still running at 2x after 25s (pid $($p.Id))"
 
       - name: Screenshot the panel, cropped by Windows itself
         shell: pwsh

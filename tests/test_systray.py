@@ -95,6 +95,26 @@ def test_settings_toggles_are_exactly_the_three_the_mac_panel_has():
     assert keys == set(menubar.fetch_state("/does/not/exist")["settings"])
 
 
+def test_ui_scale_defaults_to_one_off_windows():
+    """The ordinary case must be untouched: 1.0 means the panel is drawn
+    exactly as it always was."""
+    assert systray.ui_scale() == 1.0
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2", 2.0), ("1.5", 1.5), ("0.5", 0.5), ("4", 4.0),
+    ("0", 1.0),            # below the floor - ignored
+    ("9", 1.0),            # above the ceiling - ignored
+    ("huge", 1.0),         # not a number - ignored, never raises
+    ("", 1.0),
+])
+def test_ui_scale_override_is_bounded_and_never_raises(monkeypatch, value,
+                                                       expected):
+    """A bad value in the environment must not stop the app from starting."""
+    monkeypatch.setenv(systray.SCALE_ENV, value)
+    assert systray.ui_scale() == expected
+
+
 def test_tray_icon_ships_with_the_package():
     assert systray.icon_path().is_file(), "tools/make_icon.py must be run"
     Image = pytest.importorskip("PIL.Image")

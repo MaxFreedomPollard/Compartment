@@ -36,6 +36,40 @@ PANEL_MAX_HEIGHT = 640
 TASKBAR_MARGIN = 56          # room for the taskbar the panel sits above
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "Compartment"
+SCALE_ENV = "COMPARTMENT_UI_SCALE"
+
+
+def ui_scale() -> float:
+    """How many pixels to a logical unit.
+
+    A process that does not declare DPI awareness gets bitmap-stretched by
+    Windows on a high-DPI display: correctly sized and visibly blurry. Asking
+    the system for its DPI and scaling the panel to match draws it sharp
+    instead, at the same physical size.
+
+    Returns 1.0 off Windows and on ordinary 96 DPI screens, so the common
+    case is unchanged. COMPARTMENT_UI_SCALE overrides, for anyone who wants
+    the panel bigger or smaller than their display asks for.
+    """
+    override = os.environ.get(SCALE_ENV)
+    if override:
+        try:
+            v = float(override)
+        except ValueError:
+            v = 0.0
+        if 0.5 <= v <= 4.0:
+            return v
+    try:
+        import ctypes
+        # Declaring awareness must happen before the first window exists.
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)   # system-DPI aware
+        except Exception:                                    # noqa: BLE001
+            ctypes.windll.user32.SetProcessDPIAware()        # pre-8.1 fallback
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+        return max(1.0, round(dpi / 96.0, 2))
+    except Exception:                                        # noqa: BLE001
+        return 1.0                                           # not Windows
 
 
 def icon_path() -> Path:
@@ -143,7 +177,18 @@ def run(vault: str | None = None, show: bool = False,
               "  pip install 'compartment[tray]'", file=sys.stderr)
         return 3
 
+    # Read the DPI (and declare awareness) before the first window exists.
+    S = ui_scale()
+    PW = int(PANEL_WIDTH * S)
+    WRAP = PW - int(40 * S)
+    PMH = int(PANEL_MAX_HEIGHT * S)
+    TBM = int(TASKBAR_MARGIN * S)
+
     root = tk.Tk()
+    if S != 1.0:
+        # Tk sizes fonts in points; this is what turns a point into a pixel.
+        # 1.3333 is the 96-DPI baseline Tk already assumes on Windows.
+        root.tk.call("tk", "scaling", 1.3333 * S)
     root.withdraw()                                   # no stray empty window
     panel: dict = {"win": None, "note": None}
 
@@ -155,11 +200,11 @@ def run(vault: str | None = None, show: bool = False,
         frame.pack(fill="both", expand=True)
         s = state["settings"]
 
-        ttk.Label(frame, text=summarise(state), wraplength=PANEL_WIDTH - 40,
+        ttk.Label(frame, text=summarise(state), wraplength=WRAP,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
         if state.get("error"):
             ttk.Label(frame, text=str(state["error"]), foreground="#b00020",
-                      wraplength=PANEL_WIDTH - 40).pack(anchor="w", pady=(4, 0))
+                      wraplength=WRAP).pack(anchor="w", pady=(4, 0))
 
         if state["exists"] and state["locked"]:
             unlock_row = ttk.Frame(frame)
@@ -179,7 +224,7 @@ def run(vault: str | None = None, show: bool = False,
                        command=do_unlock).pack(side="right")
             if panel.get("note"):
                 ttk.Label(frame, text=panel["note"], foreground="#b00020",
-                          wraplength=PANEL_WIDTH - 40).pack(anchor="w",
+                          wraplength=WRAP).pack(anchor="w",
                                                             pady=(4, 0))
             ttk.Label(frame, text="Stays unlocked until restart or Lock",
                       foreground="#666").pack(anchor="w")
@@ -227,7 +272,7 @@ def run(vault: str | None = None, show: bool = False,
                       foreground="#666").pack(anchor="w", pady=(4, 0))
         for r in recent:
             ttk.Label(frame, text=(r.get("text") or "").strip(),
-                      wraplength=PANEL_WIDTH - 40,
+                      wraplength=WRAP,
                       justify="left").pack(anchor="w", pady=(4, 0))
 
         if state["exists"] and not state["locked"] and panel.get("changing"):
@@ -260,15 +305,15 @@ def run(vault: str | None = None, show: bool = False,
                                         refresh())).pack(side="left", padx=6)
             if panel.get("change_note"):
                 ttk.Label(frame, text=panel["change_note"],
-                          wraplength=PANEL_WIDTH - 40).pack(anchor="w",
+                          wraplength=WRAP).pack(anchor="w",
                                                             pady=(4, 0))
             ttk.Label(frame, text="There is no recovery phrase. If you forget "
                                   "this, the memories are unrecoverable.",
-                      foreground="#666", wraplength=PANEL_WIDTH - 40,
+                      foreground="#666", wraplength=WRAP,
                       justify="left").pack(anchor="w", pady=(4, 0))
         elif panel.get("change_note"):
             ttk.Label(frame, text=panel["change_note"],
-                      wraplength=PANEL_WIDTH - 40).pack(anchor="w", pady=(8, 0))
+                      wraplength=WRAP).pack(anchor="w", pady=(8, 0))
 
         ttk.Separator(frame).pack(fill="x", pady=10)
         buttons = ttk.Frame(frame)
@@ -290,10 +335,10 @@ def run(vault: str | None = None, show: bool = False,
     def place(win) -> None:
         """Bottom right, above the taskbar, where the tray icon is."""
         win.update_idletasks()
-        w = PANEL_WIDTH
-        h = min(win.winfo_reqheight(), PANEL_MAX_HEIGHT)
+        w = PW
+        h = min(win.winfo_reqheight(), PMH)
         x = win.winfo_screenwidth() - w - 12
-        y = win.winfo_screenheight() - h - TASKBAR_MARGIN
+        y = win.winfo_screenheight() - h - TBM
         win.geometry(f"{w}x{h}+{max(x, 0)}+{max(y, 0)}")
 
     def show_panel() -> None:
