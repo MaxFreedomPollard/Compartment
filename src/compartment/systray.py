@@ -28,7 +28,7 @@ from pathlib import Path
 
 from .menubar import (AUTO_LOCK_CHOICES, RECENT_COUNT, auto_lock_label,
                       claim_first_run, default_vault, fetch_state, lock_vault,
-                      self_check, set_setting, summarise)
+                      self_check, set_setting, summarise, unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -51,6 +51,10 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = [("state", summarise(state))]
     if state.get("error"):
         rows.append(("error", str(state["error"])))
+    # Locking and unlocking belong in the panel. The vault is the product, and
+    # opening it should not mean finding a terminal.
+    if state.get("exists"):
+        rows.append(("unlock", "Unlock") if state["locked"] else ("lock", "Lock"))
     s = state["settings"]
     rows.append(("heading", "SETTINGS"))
     rows.append(("toggle:capture_hook",
@@ -136,7 +140,7 @@ def run(vault: str | None = None, show: bool = False,
 
     root = tk.Tk()
     root.withdraw()                                   # no stray empty window
-    panel: dict = {"win": None}
+    panel: dict = {"win": None, "note": None}
 
     def build(win) -> None:
         for child in win.winfo_children():
@@ -151,6 +155,29 @@ def run(vault: str | None = None, show: bool = False,
         if state.get("error"):
             ttk.Label(frame, text=str(state["error"]), foreground="#b00020",
                       wraplength=PANEL_WIDTH - 40).pack(anchor="w", pady=(4, 0))
+
+        if state["exists"] and state["locked"]:
+            unlock_row = ttk.Frame(frame)
+            unlock_row.pack(fill="x", pady=(8, 0))
+            entry = ttk.Entry(unlock_row, show="\u2022", width=26)
+            entry.pack(side="left")
+            entry.focus_set()
+
+            def do_unlock(*_):
+                ok, note = unlock_vault(vault_path, entry.get())
+                entry.delete(0, "end")        # never leave it on screen
+                panel["note"] = None if ok else note
+                refresh()
+
+            entry.bind("<Return>", do_unlock)
+            ttk.Button(unlock_row, text="Unlock",
+                       command=do_unlock).pack(side="right")
+            if panel.get("note"):
+                ttk.Label(frame, text=panel["note"], foreground="#b00020",
+                          wraplength=PANEL_WIDTH - 40).pack(anchor="w",
+                                                            pady=(4, 0))
+            ttk.Label(frame, text="Stays unlocked until restart or Lock",
+                      foreground="#666").pack(anchor="w")
 
         ttk.Separator(frame).pack(fill="x", pady=10)
         ttk.Label(frame, text="SETTINGS",
@@ -202,9 +229,11 @@ def run(vault: str | None = None, show: bool = False,
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Refresh", command=refresh).pack(side="left")
-        ttk.Button(buttons, text="Lock now",
-                   command=lambda: (lock_vault(vault_path), refresh())
-                   ).pack(side="left", padx=6)
+        if state["exists"] and not state["locked"]:
+            ttk.Button(buttons, text="Lock now",
+                       command=lambda: (lock_vault(vault_path),
+                                        panel.update(note=None), refresh())
+                       ).pack(side="left", padx=6)
         ttk.Button(buttons, text="Quit", command=quit_app).pack(side="right")
 
     def place(win) -> None:
@@ -262,6 +291,7 @@ def run(vault: str | None = None, show: bool = False,
                              default=True),
             pystray.MenuItem("Lock now",
                              from_tray(lambda: (lock_vault(vault_path),
+                                                panel.update(note=None),
                                                 refresh()))),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", from_tray(quit_app)),

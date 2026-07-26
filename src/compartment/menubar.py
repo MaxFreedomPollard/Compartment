@@ -198,6 +198,33 @@ def lock_vault(vault: str) -> bool:
     return _run([*_cli_argv(), "--vault", vault, "lock"])[0] == 0
 
 
+def unlock_vault(vault: str, passphrase: str) -> tuple[bool, str]:
+    """Unlock from the panel. Returns (ok, what to show the user).
+
+    The passphrase goes down the child's stdin, never into argv: a command
+    line is readable by every process on the machine. Argon2id deliberately
+    takes its time, hence the generous timeout - a slow unlock is the point.
+    """
+    if not passphrase:
+        return False, "enter your passphrase"
+    try:
+        p = subprocess.run(
+            [*_cli_argv(), "--vault", vault, "unlock", "--passphrase-stdin"],
+            input=passphrase + "\n", capture_output=True, text=True,
+            timeout=180, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
+    if p.returncode == 0:
+        return True, "unlocked"
+    low = out.lower()
+    if "wrong passphrase" in low or "no keyslot" in low:
+        return False, "wrong passphrase"
+    if "keyfile" in low:
+        return False, "needs its 2FA keyfile - plug it in and try again"
+    return False, (out[:120] or "could not unlock")
+
+
 def summarise(state: dict) -> str:
     """One line under the title. Also what --self-check prints."""
     if not state["exists"]:
@@ -315,7 +342,8 @@ def run(vault: str | None = None, show: bool = False,
                             NSRunningApplication,
                             NSFont, NSImage, NSMakeRect, NSMenu, NSMenuItem,
                             NSPanel, NSPopover, NSScreen, NSSegmentedControl,
-                            NSStackView, NSStatusBar, NSSwitch, NSTextField,
+                            NSSecureTextField, NSStackView, NSStatusBar,
+                            NSSwitch, NSTextField,
                             NSButton, NSView, NSViewController,
                             NSWindowStyleMaskClosable, NSWindowStyleMaskTitled,
                             NSWindowStyleMaskUtilityWindow)
@@ -394,6 +422,8 @@ def run(vault: str | None = None, show: bool = False,
             self.status_item = None
             self.body = None
             self.window = None
+            self.pw_field = None      # only while the vault is locked
+            self.unlock_note = None   # "wrong passphrase", and the like
             return self
 
         # ---- building the popover contents -----------------------------
@@ -407,6 +437,26 @@ def run(vault: str | None = None, show: bool = False,
             views.append(label(summarise(st), 11, secondary=True))
             if st["error"]:
                 views.append(label(st["error"], 11, secondary=True, wrap=True))
+
+            # Locking and unlocking belong here. The vault is the product, and
+            # opening it should not mean finding a terminal.
+            self.pw_field = None
+            if st["exists"] and st["locked"]:
+                field = NSSecureTextField.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, CONTENT_WIDTH - 92, 24))
+                field.setPlaceholderString_("Passphrase")
+                field.setTarget_(self)
+                field.setAction_("unlockNow:")        # Return unlocks too
+                self.pw_field = field
+                unlock_b = NSButton.buttonWithTitle_target_action_(
+                    "Unlock", self, "unlockNow:")
+                unlock_b.setKeyEquivalent_("\r")
+                views.append(row(field, unlock_b))
+                if self.unlock_note:
+                    views.append(label(self.unlock_note, 11, secondary=True,
+                                       wrap=True))
+                views.append(label("Stays unlocked until restart or Lock",
+                                   10, secondary=True))
             views.append(divider())
 
             views.append(label("SETTINGS", 10, bold=True, secondary=True))
@@ -465,11 +515,14 @@ def run(vault: str | None = None, show: bool = False,
 
             refresh = NSButton.buttonWithTitle_target_action_("Refresh", self,
                                                              "refresh:")
-            lock = NSButton.buttonWithTitle_target_action_("Lock", self,
-                                                           "lockNow:")
             quit_b = NSButton.buttonWithTitle_target_action_("Quit", self,
                                                             "quitApp:")
-            views.append(row(refresh, lock, _spacer(), quit_b))
+            if st["exists"] and not st["locked"]:
+                lock = NSButton.buttonWithTitle_target_action_("Lock", self,
+                                                               "lockNow:")
+                views.append(row(refresh, lock, _spacer(), quit_b))
+            else:
+                views.append(row(refresh, _spacer(), quit_b))
 
             stack = NSStackView.stackViewWithViews_(views)
             stack.setOrientation_(_VERTICAL)
@@ -597,6 +650,16 @@ def run(vault: str | None = None, show: bool = False,
 
         def lockNow_(self, sender):
             lock_vault(vault_path)
+            self.unlock_note = None
+            self.rebuild()
+
+        def unlockNow_(self, sender):
+            if self.pw_field is None:
+                return
+            pw = str(self.pw_field.stringValue() or "")
+            ok, note = unlock_vault(vault_path, pw)
+            self.pw_field.setStringValue_("")        # never leave it on screen
+            self.unlock_note = None if ok else note
             self.rebuild()
 
         def quitApp_(self, sender):

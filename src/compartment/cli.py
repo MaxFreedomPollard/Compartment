@@ -138,8 +138,24 @@ def _ask_yn(q: str) -> bool:
     return input(f"{q} [y/N] ").strip().lower().startswith("y")
 
 
+def _read_passphrase(args, prompt: str = "Passphrase: ") -> str:
+    """Get the passphrase without ever putting it in argv.
+
+    `--passphrase` stays for scripts that already hold the secret, but a
+    command line is readable by every process on the machine through `ps`.
+    The menu bar and tray apps therefore pass `--passphrase-stdin` and write
+    the secret down a pipe, where nothing else can see it.
+    """
+    if getattr(args, "passphrase_stdin", False):
+        pw = sys.stdin.readline().rstrip("\r\n")
+        if not pw:
+            _die("no passphrase on stdin")
+        return pw
+    return args.passphrase or getpass.getpass(prompt)
+
+
 def cmd_unlock(args) -> None:
-    pw = args.passphrase or getpass.getpass("Passphrase: ")
+    pw = _read_passphrase(args)
     v = Vault.unlock(args.vault, passphrase=pw,
                      keyfile=_maybe_keyfile(args))   # verifies credential(s)
     if args.keychain:
@@ -964,6 +980,9 @@ def main(argv: list[str] | None = None) -> None:
         "unlock",
         help="unlock: stays open until restart/power loss or `compartment lock`")
     p.add_argument("--passphrase")
+    p.add_argument("--passphrase-stdin", action="store_true",
+                   help="read the passphrase from stdin, so it never appears "
+                        "in the process list (what the apps use)")
     p.add_argument("--keyfile", default=argparse.SUPPRESS,
                    help="second-factor keyfile (2FA vaults; auto-found at "
                         "its recorded location)")

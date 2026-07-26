@@ -57,6 +57,20 @@ def test_locked_vault_says_so_and_lists_nothing():
     assert "memory" not in _kinds(rows)
 
 
+def test_the_panel_offers_unlock_when_locked_and_lock_when_open():
+    """Opening the vault is the thing people do most, and it should not send
+    them to a terminal to do it."""
+    assert "unlock" in _kinds(systray.panel_rows(_state(locked=True, recent=[])))
+    assert "lock" not in _kinds(systray.panel_rows(_state(locked=True, recent=[])))
+    assert "lock" in _kinds(systray.panel_rows(_state()))
+    assert "unlock" not in _kinds(systray.panel_rows(_state()))
+
+
+def test_no_vault_offers_neither():
+    kinds = _kinds(systray.panel_rows(_state(exists=False, recent=[])))
+    assert "unlock" not in kinds and "lock" not in kinds
+
+
 def test_missing_vault_and_errors_are_shown_not_raised():
     rows = systray.panel_rows(_state(exists=False, recent=[],
                                      error="no vault yet - run: compartment init"))

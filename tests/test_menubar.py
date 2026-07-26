@@ -243,3 +243,51 @@ def test_set_login_tolerates_a_bare_bool(monkeypatch):
     """Older PyObjC hands back just the BOOL rather than a tuple."""
     monkeypatch.setattr(menubar, "_app_service", lambda: _Svc(True))
     assert menubar.set_login(True) == "enabled"
+
+
+# ------------------------------------------------------- unlocking from the UI
+
+def test_unlock_never_puts_the_passphrase_in_argv(monkeypatch):
+    """A command line is readable by every process on the machine. The panel
+    writes the secret down the child's stdin instead."""
+    seen = {}
+
+    class Done:
+        returncode = 0
+        stdout = "unlocked: stays unlocked"
+        stderr = ""
+
+    def fake_run(args, **kw):
+        seen["argv"] = args
+        seen["input"] = kw.get("input")
+        return Done()
+
+    monkeypatch.setattr(menubar.subprocess, "run", fake_run)
+    ok, note = menubar.unlock_vault("/v", "correct horse")
+    assert ok and note == "unlocked"
+    assert "correct horse" not in " ".join(seen["argv"])
+    assert "--passphrase-stdin" in seen["argv"]
+    assert seen["input"] == "correct horse\n"
+
+
+@pytest.mark.parametrize("out,expected", [
+    ("error: Wrong passphrase (no keyslot opened)", "wrong passphrase"),
+    ("error: keyfile not found at /Volumes/stick/key", 
+     "needs its 2FA keyfile - plug it in and try again"),
+])
+def test_unlock_failures_are_explained_not_dumped(monkeypatch, out, expected):
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = out
+
+    monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: Failed())
+    ok, note = menubar.unlock_vault("/v", "nope")
+    assert not ok and note == expected
+
+
+def test_unlock_with_no_passphrase_never_runs_anything(monkeypatch):
+    monkeypatch.setattr(menubar.subprocess, "run",
+                        lambda *a, **k: pytest.fail("should not shell out"))
+    ok, note = menubar.unlock_vault("/v", "")
+    assert not ok and "passphrase" in note

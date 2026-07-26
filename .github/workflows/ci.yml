@@ -49,9 +49,15 @@ jobs:
         run: pip install -e .[tray]
 
       - name: A vault to look at
+        # Five ordinary-looking memories, so the screenshot shows the panel
+        # doing its job instead of an empty list.
         run: |
           compartment init --passphrase ci-only-not-a-secret
-          compartment store "a memory made by CI, so the panel has a row"
+          compartment store "Deploys go out Tuesday and Thursday mornings, never on a Friday."
+          compartment store "Approved (answered OK): send the release notes to the team now?"
+          compartment store "Staging runs Postgres 16 behind pgbouncer on port 6432."
+          compartment store "Prefers spaces over tabs everywhere except Go."
+          compartment store "This laptop has 16 GB, so keep parallel jobs at 4."
 
       - name: The panel, without a window (what it would say)
         run: compartment tray --self-check
