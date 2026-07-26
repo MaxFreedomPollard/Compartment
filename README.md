@@ -2,24 +2,94 @@
 
 ### Superior agentic memory, encrypted at rest.
 
-Compartment is the memory your AI agents plug into. Hermes, Claude, and
-OpenClaw each register in one command; anything that runs a subprocess
-can use the CLI. Every agent can share the same memory - even across
-different machines. Everything is local. The default install never
-touches the network: the embedding model ships inside the package, so
-recall works as soon as the vault is open. Every byte at rest is
-AEAD-encrypted, the vectors included. The vault locks itself on restart
-or power loss and unlocks once per boot.
+Your AI agent forgets you the moment the session ends. Compartment ends
+that. With Compartment, your AI agent gets better with experience: it keeps
+every decision, preference and detail you give it, permanently, encrypted,
+on your own computer. Hermes, Claude,  OpenClaw and other AI Agents can
+install in one command. One fully-transferable memory store is shared
+simultaneously by all agents on the computer. 100% offline: no network, no
+API key, no cloud account, no telemetry. The embedding model ships inside
+the package, and a full search returns in under 9 ms, beating the round-trip
+a hosted memory charges you for. Every byte at rest is AEAD-encrypted, the
+embedding vectors included, and only your passphrase opens it.
 
-*An **engram** is the physical trace a memory leaves in the brain. This
-one lives in **RAM**: the whole index is held in memory, which is what
-makes it both the fastest place to search and the safest place to keep
-plaintext, because nothing decrypted is ever written to disk.*
+Unlike other agentic memory, we offer  an option to start off with memory -
+6,718 curated facts seeded at install: the physical constants and unit
+conversions, 800+ hardware facts with real specs (Apple silicon, PCs, CPUs
+and GPUs, phones, game consoles, Raspberry Pi, storage, displays,
+connectors), operating system versions and release names, network ports and
+HTTP, file signatures, character encodings, shell and Unix internals, git,
+regex, SQL and hashing, ISO country, currency and time codes, and more so
+that an offline agent can look something up instead of guessing at it, and
+an online agent has faster recall of essential information instead of
+pulling partially or inaccurately from the internet.
+
+#### What sets it apart
+
+**Install it in one step**
+
+- One command installs it, creates the vault, and wires your agent. No API
+  key, no cloud account, no daemon.
+- On the Mac, open one `.pkg` and you are done. Python, the embedding model
+  and every dependency are inside it.
+- A menu bar app runs the whole thing without a terminal: vault state,
+  unlock, lock, and the last five memories it saved.
+- Every feature toggles in that panel instead of a config file:
+  model-independent capture, starter facts in search, auto-lock.
+- Your vault ships full. The 6,718 seeded facts are ordinary memories,
+  editable and forgettable, and one switch keeps them out of search.
+- Runs under what you already use: Hermes ("no setup needed"), Claude Code
+  and Desktop over MCP, OpenClaw, every MCP client, plus a CLI for scripts
+  and cron.
+
+**Remembers the right things**
+
+- "OK" is a decision, and Compartment files it as one, with the question it
+  answered. That is the record you need later.
+- Decisions beat preferences, preferences beat machine details, machine
+  details beat chatter. A fixed ranking, not a model's mood.
+- It forgets nothing. Small talk is kept and ranked last.
+- It replaces your host's built-in memory instead of fighting it: imports
+  what Claude Code already wrote, then supersedes it.
+- It captures even when the model does not cooperate. A hook writes the fact
+  whether or not the model calls the tool.
+- A graph, not a pile. Explicit relations with validity windows answer who
+  worked where, and when.
+
+**Search that beats a network call**
+
+- 0.68 ms vector search. 8.8 ms for the full hybrid pipeline. A cloud memory
+  spends longer than that saying hello.
+- Exact below 20k records: recall = 1.0 by construction, not an
+  approximation.
+- Hybrid always: meaning and keywords, fused.
+- One pinned embedding space, enforced every time the vault opens, so your
+  comparisons stay valid forever.
+
+**Encrypted, offline, and yours**
+
+- Every byte at rest is AEAD-encrypted, embedding vectors included. Most
+  tools leave vectors in the clear, and vectors invert back toward text.
+- Only your passphrase opens it. Compartment generates no password, no seed,
+  no recovery phrase, and holds no credential you do not.
+- Add a keyfile and unlock takes two factors. Both feed Argon2id together,
+  so it is arithmetic, not a policy check.
+- `forget --shred` destroys the record's key. The content is mathematically
+  unrecoverable, not marked deleted.
+- Restart or power loss locks it, and the agent has a panic lock that clears
+  every credential instantly.
+- 100% offline. A runtime guard aborts on any network attempt, and CI proves
+  it on Linux, macOS and Windows. Zero open ports. No telemetry, ever.
+- No LLM inside. Embeddings run locally in under 300 MB, and judgment stays
+  with the model you already pay for.
+- Tamper-evident: hash-chained audit log, sealed journal, verified kill-9
+  crash recovery.
+- One portable file. Move a locked vault anywhere, and `lock --sign` seals
+  it with an Ed25519 manifest anyone can verify without a credential.
+- `compartment dash` puts the entire vault on a local page: 127.0.0.1 only,
+  random token, read-only.
 
 ## Why Compartment
-
-Most memory tools ask you to choose: powerful, or private, or easy. Compartment
-refuses the trade, because one design decision delivers all three.
 
 **Better recall.** Compartment does not just store chat, it decides what
 matters. A bare "OK" answering "send this reply to the client?" is
