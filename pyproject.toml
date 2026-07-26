@@ -36,6 +36,12 @@ hnsw = ["usearch>=2.9"]
 # MCP server, so it stays out of the default install: `pip install
 # compartment[menubar]`, then `compartment menubar`.
 menubar = ["pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'"]
+# The Windows tray app. tkinter draws the panel and comes with Python itself;
+# pystray owns the notification-area icon and is pure Python, so a Windows
+# install still compiles nothing: `pip install compartment[tray]`, then
+# `compartment tray`.
+tray = ["pystray>=0.19; sys_platform == 'win32'",
+        "pillow>=10; sys_platform == 'win32'"]
 dev = ["pytest>=8", "usearch>=2.9"]
 
 [tool.setuptools.packages.find]

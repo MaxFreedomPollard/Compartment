@@ -58,6 +58,7 @@ _EMBEDDED_VER = [""]              # X.Y of the interpreter actually embedded
 BUILD = ROOT / "build"
 APP_NAME = "Compartment"
 BUNDLE_ID = "io.github.maxfreedompollard.compartment"
+MIN_MACOS = "13.0"                # also LSMinimumSystemVersion, below
 # Shown under the app's name in System Settings > General > Login Items.
 DESCRIPTION = ("Compartment keeps your AI agents' memory encrypted on this Mac. "
                "The menu bar item shows what it has remembered and lets you "
@@ -210,6 +211,40 @@ def _verify_signature(app: pathlib.Path) -> None:
     print(f"signature verifies: {app.name}")
 
 
+def _dylib_deps(binary: pathlib.Path) -> list[str]:
+    out = subprocess.run(["otool", "-L", str(binary)],
+                         capture_output=True, text=True, check=True)
+    return [ln.strip().split(" (")[0]
+            for ln in out.stdout.splitlines()[1:] if ln.strip()]
+
+
+def _rewrite_dylib_refs(binary: pathlib.Path, name: str) -> None:
+    """Point an absolute link at the copy inside the bundle.
+
+    `cc -L<dir> -l<name>` records whatever install name the dylib carries, and
+    a python-build-standalone libpython carries the absolute path it was built
+    at - here, inside the build machine's uv directory. Left alone that is the
+    every-app-only-runs-on-its-author's-Mac bug again, in a load command
+    instead of a pyvenv.cfg.
+    """
+    for dep in _dylib_deps(binary):
+        if dep.endswith("/" + name) and not dep.startswith("@"):
+            _run("install_name_tool", "-change", dep, f"@rpath/{name}",
+                 str(binary))
+
+
+def _verify_no_external_dylibs(binary: pathlib.Path) -> None:
+    """Nothing may be loaded from outside the bundle except the OS itself."""
+    strays = [d for d in _dylib_deps(binary)
+              if not d.startswith(("@", "/usr/lib/", "/System/"))]
+    if strays:
+        raise SystemExit(
+            f"error: {binary.name} would load libraries from outside the "
+            "bundle - it could not start on another Mac\n  "
+            + "\n  ".join(strays))
+    print(f"links nothing outside the bundle: {binary.name}")
+
+
 def _verify_self_contained(app: pathlib.Path) -> None:
     """Prove the bundle needs nothing from outside itself.
 
@@ -223,7 +258,7 @@ def _verify_self_contained(app: pathlib.Path) -> None:
              "print(json.dumps({'prefix': sys.prefix, 'path': sys.path,"
              " 'compartment': compartment.__file__, 'version': compartment.__version__}))")
     out = subprocess.run(
-        [str(contents / "MacOS" / "python"), "-c", probe],
+        [str(runtime / "bin" / f"python{_EMBEDDED_VER[0]}"), "-c", probe],
         capture_output=True, text=True,
         env={"PYTHONHOME": str(runtime), "PATH": "/usr/bin:/bin",
              "HOME": os.environ.get("HOME", "/tmp")})
@@ -309,27 +344,22 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
 
     _unseal_hazards(contents)
 
-    # 2. the interpreter must ALSO live in Contents/MacOS: macOS reads a
-    #    process's identity from where its executable sits, and a bundle whose
-    #    running image is elsewhere has no identifier, name, or icon.
-    shutil.copy2(rt_python, macos / "python")
-    (macos / "python").chmod(0o755)
-
-    # 3. the executable named by Info.plist. PYTHONHOME is what ties the
-    #    interpreter in MacOS/ to the runtime in Resources/; without it
-    #    CPython would infer a prefix of `Contents` and find no stdlib.
+    # 2. the executable named by Info.plist, compiled from tools/launcher.c.
+    #    It embeds the interpreter with Py_BytesMain instead of exec'ing one,
+    #    so the running image stays Contents/MacOS/Compartment for the life of
+    #    the process. A shell launcher that exec's Contents/MacOS/python looks
+    #    identical from inside - the status item reports itself visible, with
+    #    an image and a window - but the menu bar never gives it a slot, and
+    #    the icon simply never appears. See tools/launcher.c.
     launcher = macos / APP_NAME
-    launcher.write_text(
-        "#!/bin/sh\n"
-        "# Keep the running image inside the bundle - see build_macos_app.py\n"
-        'here="$(cd "$(dirname "$0")" && pwd)"\n'
-        'PYTHONHOME="$(cd "$here/../Resources/runtime" && pwd)"\n'
-        "export PYTHONHOME\n"
-        "PYTHONDONTWRITEBYTECODE=1\n"
-        "export PYTHONDONTWRITEBYTECODE\n"
-        "unset PYTHONPATH PYTHONSTARTUP\n"
-        'exec "$here/python" -m compartment.cli menubar "$@"\n', encoding="utf-8")
+    _run("cc", "-O2", f"-mmacosx-version-min={MIN_MACOS}",
+         "-o", str(launcher), str(pathlib.Path(__file__).with_name("launcher.c")),
+         f"-I{runtime / 'include' / f'python{ver}'}",
+         f"-L{runtime / 'lib'}", f"-lpython{ver}",
+         "-Wl,-rpath,@executable_path/../Resources/runtime/lib")
     launcher.chmod(0o755)
+    _rewrite_dylib_refs(launcher, f"libpython{ver}.dylib")
+    _verify_no_external_dylibs(launcher)
 
     build_icon(resources / f"{APP_NAME}.icns")
 
@@ -344,7 +374,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
         "CFBundleVersion": version,
         "CFBundleInfoDictionaryVersion": "6.0",
         "LSUIElement": True,               # menu bar only, no dock icon
-        "LSMinimumSystemVersion": "13.0",
+        "LSMinimumSystemVersion": MIN_MACOS,
         "NSHumanReadableCopyright": "MIT licensed. https://github.com/"
                                     "MaxFreedomPollard/Compartment",
         "NSHumanReadableDescription": DESCRIPTION,

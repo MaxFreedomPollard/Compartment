@@ -649,10 +649,10 @@ def run(vault: str | None = None, show: bool = False,
     # belongs in the menu bar for as long as Compartment is running; Quit is what
     # removes it.
     item.setVisible_(True)
-    # Compartment's own mark - Phoenician heth, the enclosure - drawn by
-    # tools/make_icon.py and shipped as package data. Marked as a template so
-    # macOS tints it for the light or dark bar and inverts it on click, the
-    # way every other status item behaves.
+    # Compartment's own mark - three nested squares, each turned further than
+    # the one outside it - drawn by tools/make_icon.py and shipped as package
+    # data. Marked as a template so macOS tints it for the light or dark bar
+    # and inverts it on click, the way every other status item behaves.
     img = None
     mark = Path(__file__).resolve().parent / "data" / "menubar@2x.png"
     if mark.is_file():
@@ -667,7 +667,7 @@ def run(vault: str | None = None, show: bool = False,
         item.button().setImage_(img)
         item.button().setToolTip_("Compartment")
     else:
-        item.button().setTitle_("Ħ")
+        item.button().setTitle_("▣")   # nested squares, if the asset is missing
     item.button().setTarget_(ctrl)
     item.button().setAction_("togglePopover:")
 

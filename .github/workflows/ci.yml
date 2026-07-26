@@ -32,3 +32,53 @@ jobs:
         # `compartment dash` binds 127.0.0.1 by design and is never run under the
         # offline guard, so its tests run here with the guard off.
         run: pytest tests/test_dash.py -q
+
+  windows-tray:
+    # The tray app has to actually start on Windows, and "it starts" is the
+    # failure the unit tests cannot see: the macOS app once launched, ran, and
+    # showed nothing at all. The runner has a desktop session, so the app can
+    # really be drawn here - the screenshot is uploaded so a human can look at
+    # the panel without owning a Windows machine.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with the tray extra
+        run: pip install -e .[tray]
+
+      - name: A vault to look at
+        run: |
+          compartment init --passphrase ci-only-not-a-secret
+          compartment store "a memory made by CI, so the panel has a row"
+
+      - name: The panel, without a window (what it would say)
+        run: compartment tray --self-check
+
+      - name: Start the tray app and prove it is still alive
+        shell: pwsh
+        run: |
+          $p = Start-Process -PassThru -FilePath compartment -ArgumentList 'tray','--show'
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) {
+            Write-Error "the tray app exited on its own with $($p.ExitCode)"
+            exit 1
+          }
+          Write-Host "still running after 25s (pid $($p.Id))"
+
+      - name: Screenshot the desktop
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$PWD\tray.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          Write-Host "wrote tray.png ($((Get-Item tray.png).Length) bytes)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-tray-screenshot
+          path: tray.png

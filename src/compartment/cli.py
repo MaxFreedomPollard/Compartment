@@ -232,17 +232,27 @@ def cmd_recent(args) -> None:
     v.save()
 
 
-def cmd_menubar(args) -> None:
-    """The macOS status bar app."""
+def _tray_app():
+    """The platform's front end: the macOS menu bar item, or the Windows tray
+    icon. Both are thin shells over the same data layer in `menubar`, so the
+    command is the same everywhere and only the widgets differ."""
+    if sys.platform == "win32":
+        from . import systray
+        return systray
     from . import menubar
+    return menubar
+
+
+def cmd_menubar(args) -> None:
+    """The status bar / tray app."""
+    app = _tray_app()
     if args.login is not None:
-        print(menubar.set_login(args.login == "on")
-              if args.login in ("on", "off") else menubar.login_status())
+        print(app.set_login(args.login == "on")
+              if args.login in ("on", "off") else app.login_status())
         sys.exit(0)
     if args.self_check:
-        sys.exit(menubar.self_check(args.vault))
-    sys.exit(menubar.run(args.vault, show=args.show,
-                         render_to=args.render))
+        sys.exit(app.self_check(args.vault))
+    sys.exit(app.run(args.vault, show=args.show, render_to=args.render))
 
 
 def cmd_hook(args) -> None:
@@ -997,17 +1007,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_recent)
 
-    p = sub.add_parser("menubar", help="macOS menu bar app (settings + recent "
-                                       "memories)")
+    p = sub.add_parser("menubar", aliases=["tray"],
+                       help="menu bar app on macOS, tray app on Windows "
+                            "(settings + recent memories)")
     p.add_argument("--show", action="store_true",
                    help="open the popover immediately on launch")
     p.add_argument("--self-check", action="store_true",
                    help="print what the popover would show, no window")
     p.add_argument("--render", metavar="PNG",
-                   help="write the popover to a PNG and exit (UI check)")
+                   help="write the popover to a PNG and exit (macOS, UI check)")
     p.add_argument("--login", nargs="?", const="status",
                    choices=["on", "off", "status"],
-                   help="start Compartment at login (on/off), or show the state")
+                   help="start Compartment at login or sign-in (on/off), or "
+                        "show the state")
     p.set_defaults(fn=cmd_menubar)
 
     ph = sub.add_parser("hook", help="Claude Code capture hook (deterministic "

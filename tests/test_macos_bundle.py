@@ -17,6 +17,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = ROOT / "tools" / "build_macos_app.py"
+LAUNCHER = ROOT / "tools" / "launcher.c"
 
 
 def _builder():
@@ -88,9 +89,54 @@ def test_no_venv_the_app_must_carry_its_own_stdlib():
 def test_launcher_freezes_the_bundle_at_runtime():
     """Bytecode written into the bundle after signing breaks its own seal,
     and a broken seal is a silent SIGKILL for any quarantined copy."""
+    assert 'setenv("PYTHONDONTWRITEBYTECODE", "1", 1)' in LAUNCHER.read_text(
+        encoding="utf-8")
     src = SPEC.read_text(encoding="utf-8")
-    assert "PYTHONDONTWRITEBYTECODE=1" in src
     assert "compileall" in src and "unchecked-hash" in src
+
+
+# --------------------------------------------- the icon has to reach the bar
+
+def test_the_launcher_runs_python_in_process_and_never_execs_another_binary():
+    """The bug this replaced: a shell launcher that exec'd Contents/MacOS/python
+    left the running image no longer matching CFBundleExecutable. From inside
+    the process everything looked right - the status item reported itself
+    visible, with an image and a window - but the menu bar never gave it a
+    slot, so the icon simply never appeared. Launching the same bundle from a
+    shell worked, which is what made it so slow to find."""
+    c = LAUNCHER.read_text(encoding="utf-8")
+    assert "Py_BytesMain" in c, "the interpreter must run inside this process"
+    assert "exec" not in c.split("*/")[-1], "no exec of a second binary"
+    src = SPEC.read_text(encoding="utf-8")
+    assert 'macos / "python"' not in src, "nothing but the launcher in MacOS/"
+    assert '"cc", "-O2"' in src, "the launcher is compiled, not written as sh"
+    assert 'exec "$here/python"' not in src
+
+
+def test_the_launcher_forwards_its_arguments():
+    """--render, --login and --show all arrive through the bundle executable;
+    the pkg's postinstall calls it with --login on."""
+    c = LAUNCHER.read_text(encoding="utf-8")
+    assert "for (int i = 1; i < argc; i++)" in c
+    assert "-psn_" in c, "LaunchServices' process serial number is not ours"
+
+
+def test_the_launcher_links_nothing_from_the_build_machine(tmp_path):
+    """cc records whatever install name a dylib carries, and a standalone
+    libpython carries the absolute path it was built at - inside the build
+    machine's home. That is the app-only-runs-for-its-author bug again, in a
+    load command instead of a pyvenv.cfg."""
+    b = _builder()
+    fake = tmp_path / "Compartment"
+    fake.write_bytes(b"")
+    b._dylib_deps = lambda _p: ["/usr/lib/libSystem.B.dylib",
+                                "@rpath/libpython3.13.dylib"]
+    b._verify_no_external_dylibs(fake)                     # must not raise
+    b._dylib_deps = lambda _p: [
+        "/Users/someone/.local/share/uv/python/x/lib/libpython3.13.dylib"]
+    with pytest.raises(SystemExit) as e:
+        b._verify_no_external_dylibs(fake)
+    assert "outside the bundle" in str(e.value)
 
 
 def test_bundle_copies_use_ditto():
