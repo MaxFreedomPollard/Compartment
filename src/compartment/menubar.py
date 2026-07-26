@@ -46,6 +46,9 @@ _HORIZONTAL, _VERTICAL = 0, 1
 # menu bar icon they have never seen before.
 FIRST_RUN_MARKER = ".menubar-introduced"
 
+# Menu bar icons are 18pt tall by convention; the asset is drawn at @2x.
+MENUBAR_POINTS = 18
+
 # A second launch asks the copy already running to show itself, over this.
 SHOW_NOTIFICATION = "io.github.maxfreedompollard.compartment.show"
 
@@ -646,16 +649,25 @@ def run(vault: str | None = None, show: bool = False,
     # belongs in the menu bar for as long as Compartment is running; Quit is what
     # removes it.
     item.setVisible_(True)
-    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-        "brain.head.profile", "Compartment")
-    if img is None:
+    # Compartment's own mark - Phoenician heth, the enclosure - drawn by
+    # tools/make_icon.py and shipped as package data. Marked as a template so
+    # macOS tints it for the light or dark bar and inverts it on click, the
+    # way every other status item behaves.
+    img = None
+    mark = Path(__file__).resolve().parent / "data" / "menubar@2x.png"
+    if mark.is_file():
+        img = NSImage.alloc().initWithContentsOfFile_(str(mark))
+        if img is not None:
+            img.setSize_((MENUBAR_POINTS, MENUBAR_POINTS))
+    if img is None:                       # a source checkout without the asset
         img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "memorychip", "Compartment")
+            "square.split.2x2", "Compartment")
     if img is not None:
         img.setTemplate_(True)
         item.button().setImage_(img)
+        item.button().setToolTip_("Compartment")
     else:
-        item.button().setTitle_("eR")
+        item.button().setTitle_("Ħ")
     item.button().setTarget_(ctrl)
     item.button().setAction_("togglePopover:")
 
