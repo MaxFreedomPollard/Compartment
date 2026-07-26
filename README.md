@@ -398,10 +398,6 @@ compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 | [PACKS.md](PACKS.md) | authoring and shipping signed memory packs |
 | [RELEASING.md](RELEASING.md) | cutting a release: every download, every time |
 
-## License
-
-MIT.
-
 ---
 
 mcp-name: io.github.MaxFreedomPollard/compartment

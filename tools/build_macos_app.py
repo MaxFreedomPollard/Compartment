@@ -375,7 +375,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
         "CFBundleInfoDictionaryVersion": "6.0",
         "LSUIElement": True,               # menu bar only, no dock icon
         "LSMinimumSystemVersion": MIN_MACOS,
-        "NSHumanReadableCopyright": "MIT licensed. https://github.com/"
+        "NSHumanReadableCopyright": "https://github.com/"
                                     "MaxFreedomPollard/Compartment",
         "NSHumanReadableDescription": DESCRIPTION,
         "LSApplicationCategoryType": "public.app-category.productivity",

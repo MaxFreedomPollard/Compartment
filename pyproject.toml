@@ -8,7 +8,6 @@ version = "1.15.2"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
 dependencies = [
     "pynacl>=1.5",
     "argon2-cffi>=23.1",
