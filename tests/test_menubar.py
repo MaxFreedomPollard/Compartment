@@ -184,3 +184,62 @@ def test_self_check_runs_without_a_window(vault_path, monkeypatch, capsys):
 def test_run_refuses_politely_off_macos(capsys):
     assert menubar.run() == 1
     assert "macOS only" in capsys.readouterr().err
+
+
+# --------------------------------------------------- first launch, login item
+
+def test_first_run_is_claimed_exactly_once(tmp_path):
+    """The first launch opens the panel by itself. The second must not."""
+    vault = tmp_path / "memory.vault"
+    assert menubar.claim_first_run(str(vault)) is True
+    assert menubar.claim_first_run(str(vault)) is False
+    assert (tmp_path / menubar.FIRST_RUN_MARKER).exists()
+
+
+def test_first_run_survives_an_unwritable_home(tmp_path):
+    """A read-only home costs the intro, never the app."""
+    blocked = tmp_path / "nope"
+    blocked.write_text("i am a file, not a directory")
+    assert menubar.claim_first_run(str(blocked / "sub" / "memory.vault")) is False
+
+
+class _Svc:
+    """Stand-in for SMAppService.mainAppService()."""
+
+    def __init__(self, result, status=1):
+        self._result, self._status = result, status
+
+    def registerAndReturnError_(self, _):
+        return self._result
+
+    def unregisterAndReturnError_(self, _):
+        return self._result
+
+    def status(self):
+        return self._status
+
+
+class _Err:
+    @staticmethod
+    def localizedDescription():
+        return "Could not connect to system service"
+
+
+def test_set_login_reports_a_refusal_instead_of_claiming_success(monkeypatch):
+    """The NSError out-parameter used to be dropped, so registering from a
+    root installer script - which macOS refuses - looked like it worked."""
+    monkeypatch.setattr(menubar, "_app_service", lambda: _Svc((False, _Err())))
+    out = menubar.set_login(True)
+    assert out.startswith("failed:")
+    assert "Could not connect to system service" in out
+
+
+def test_set_login_reports_success(monkeypatch):
+    monkeypatch.setattr(menubar, "_app_service", lambda: _Svc((True, None)))
+    assert menubar.set_login(True) == "enabled"
+
+
+def test_set_login_tolerates_a_bare_bool(monkeypatch):
+    """Older PyObjC hands back just the BOOL rather than a tuple."""
+    monkeypatch.setattr(menubar, "_app_service", lambda: _Svc(True))
+    assert menubar.set_login(True) == "enabled"

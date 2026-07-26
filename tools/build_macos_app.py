@@ -15,10 +15,32 @@ Such a process is treated as anonymous - it sorts last in the menu bar and is
 the first thing hidden behind the notch, which looks exactly like "the app
 does not work". It is also why it would show up nameless in System Settings.
 
-So the interpreter is copied *inside* the bundle. One wrinkle: CPython infers
-a venv's root by assuming the executable sits in `<root>/bin`, so with the
-binary at `Contents/MacOS/python` the root is `Contents` - which is where
-`pyvenv.cfg` and `lib/pythonX.Y/site-packages` must go, not `Contents/MacOS`.
+Why a venv is the wrong way to do that
+--------------------------------------
+This script used to build the bundle as a venv rooted at `Contents/`, and it
+was wrong twice over.
+
+A venv does not contain a standard library. It contains a `pyvenv.cfg` whose
+`home` key points at the interpreter it was made from - here, a uv-managed
+Python under the *build machine's* home directory. The resulting app ran
+perfectly for whoever built it and could not start on any other Mac, because
+`/Users/<someone-else>/.local/share/uv/...` does not exist there. That is not
+a packaging nicety; the app was simply broken for everyone but its author.
+
+`pyvenv.cfg` also lands as a stray file in the bundle root, and codesign's
+default rules treat any loose file there as *nested code*. A non-Mach-O file
+cannot carry an embedded signature, so its signature goes into
+`com.apple.cs.*` extended attributes instead - which `hdiutil`, zip, and
+plain `cp` all silently drop. The app then reads as "code object is not
+signed at all", Gatekeeper calls that `no usable signature`, and a quarantined
+copy is SIGKILLed the instant it execs: no dialog, no crash log, no dock
+bounce. Clicking the app does nothing whatsoever.
+
+So: the interpreter's whole runtime is copied into `Contents/Resources/`,
+which codesign seals as ordinary resources with no extended attributes, and
+the launcher points `PYTHONHOME` at it. Nothing sits in the bundle root, and
+nothing outside the bundle is needed at runtime. `_verify_self_contained`
+enforces both at build time.
 """
 from __future__ import annotations
 
@@ -32,6 +54,7 @@ import sys
 import sysconfig
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+_EMBEDDED_VER = [""]              # X.Y of the interpreter actually embedded
 BUILD = ROOT / "build"
 APP_NAME = "engRAM"
 BUNDLE_ID = "io.github.maxfreedompollard.engram"
@@ -68,12 +91,28 @@ def find_standalone_python() -> str:
     builds (uv's python-build-standalone) have no such indirection.
     """
     def ok(exe: str) -> bool:
+        """Non-framework, not a system interpreter, and carrying its own
+        standard library. The whole prefix is copied into the bundle, so a
+        system Python would mean copying /usr - and a prefix with no stdlib
+        of its own is what produced an app that only ran on the build
+        machine."""
         try:
             out = subprocess.run(
                 [exe, "-c", "import sys,sysconfig;"
-                 "print(sysconfig.get_config_var('PYTHONFRAMEWORK') or '')"],
+                 "print(sysconfig.get_config_var('PYTHONFRAMEWORK') or '');"
+                 "print(sys.prefix);"
+                 "print('%d.%d' % sys.version_info[:2])"],
                 capture_output=True, text=True, timeout=30)
-            return out.returncode == 0 and not out.stdout.strip()
+            if out.returncode != 0:
+                return False
+            lines = (out.stdout.splitlines() + ["", "", ""])[:3]
+            framework, prefix, ver = lines
+            if framework.strip() or not prefix.strip():
+                return False
+            p = pathlib.Path(prefix)
+            if str(p).startswith(("/usr", "/System", "/Library")):
+                return False
+            return (p / "lib" / f"python{ver}" / "os.py").is_file()
         except (OSError, subprocess.SubprocessError):
             return False
 
@@ -97,7 +136,16 @@ def find_standalone_python() -> str:
         "  or pass --python /path/to/standalone/python")
 
 
-def _strip(contents: pathlib.Path) -> None:
+def _python_version(exe: str) -> str:
+    """The X.Y of the interpreter being embedded - which is not necessarily
+    the X.Y of the interpreter running this script."""
+    out = subprocess.run(
+        [exe, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+        capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def _strip(lib: pathlib.Path) -> None:
     """Drop what a shipped app has no use for.
 
     PyObjC vendors its own test suite and 142 .dSYM debug bundles - 16 MB of
@@ -105,7 +153,6 @@ def _strip(contents: pathlib.Path) -> None:
     which makes the installer slower to build and larger to download.
     """
     freed = 0
-    lib = contents / "lib"
     doomed: list[pathlib.Path] = []
     for pattern in ("**/PyObjCTest", "**/__pycache__", "**/*.dSYM",
                     "**/tests", "**/test"):
@@ -125,6 +172,81 @@ def _strip(contents: pathlib.Path) -> None:
     print(f"stripped {freed / 1024 / 1024:.0f} MB of test and build files")
 
 
+def _unseal_hazards(contents: pathlib.Path) -> None:
+    """Delete files that make the bundle unsignable.
+
+    `venv` drops a `.gitignore` at the root of every environment it creates,
+    which here is `Contents/`. codesign refuses to seal a stray dotfile in the
+    bundle root, so the signature comes out structurally invalid:
+
+        engRAM.app: code object is not signed at all
+        In subcomponent: …/Contents/.gitignore
+
+    An invalid signature is far worse than no signature. Gatekeeper reports
+    `no usable signature`, and a quarantined copy - which is what everyone who
+    downloads the .dmg has - is SIGKILLed the instant it execs. No dialog, no
+    crash report, no dock bounce: the app simply does nothing when clicked.
+    """
+    for junk in (".gitignore", ".DS_Store"):
+        p = contents / junk
+        if p.exists():
+            p.unlink()
+            print(f"removed Contents/{junk} (would break the signature)")
+
+
+def _verify_signature(app: pathlib.Path) -> None:
+    """Refuse to ship a bundle whose signature does not verify.
+
+    This is the check whose absence shipped 1.13.0 broken, so it is fatal
+    rather than a warning.
+    """
+    out = subprocess.run(["codesign", "--verify", "--deep", "--strict",
+                          "--verbose=2", str(app)],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(
+            f"error: {app.name} is not correctly signed - refusing to ship it\n"
+            f"{out.stderr.strip()}")
+    print(f"signature verifies: {app.name}")
+
+
+def _verify_self_contained(app: pathlib.Path) -> None:
+    """Prove the bundle needs nothing from outside itself.
+
+    The check that was missing. The venv build shipped an app whose stdlib
+    lived in the build machine's home directory; it started fine here and
+    could not have started anywhere else, and no test said so.
+    """
+    contents = app / "Contents"
+    runtime = contents / "Resources" / "runtime"
+    probe = ("import json,sys,engram;"
+             "print(json.dumps({'prefix': sys.prefix, 'path': sys.path,"
+             " 'engram': engram.__file__, 'version': engram.__version__}))")
+    out = subprocess.run(
+        [str(contents / "MacOS" / "python"), "-c", probe],
+        capture_output=True, text=True,
+        env={"PYTHONHOME": str(runtime), "PATH": "/usr/bin:/bin",
+             "HOME": os.environ.get("HOME", "/tmp")})
+    if out.returncode != 0:
+        raise SystemExit("error: the embedded interpreter cannot start\n"
+                         + out.stderr.strip())
+    import json as _json
+    info = _json.loads(out.stdout)
+    root = str(app.resolve())
+    strays = [p for p in info["path"]
+              if p and not str(pathlib.Path(p).resolve()).startswith(root)]
+    if strays:
+        raise SystemExit(
+            "error: the bundle reaches outside itself - it would not start "
+            "on another Mac\n  " + "\n  ".join(strays))
+    if not str(pathlib.Path(info["engram"]).resolve()).startswith(root):
+        raise SystemExit(f"error: engram loaded from {info['engram']}")
+    if not (runtime / "lib" / f"python{_EMBEDDED_VER[0]}" / "os.py").exists():
+        raise SystemExit("error: no standard library inside the bundle")
+    print(f"self-contained: engram {info['version']}, "
+          f"{len(info['path'])} sys.path entries, all inside the bundle")
+
+
 def build_app(spec: str | None = None, out: pathlib.Path | None = None,
               python: str | None = None) -> pathlib.Path:
     """spec: what to pip-install (default: this checkout, so the build always
@@ -141,29 +263,71 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     macos.mkdir(parents=True)
     resources.mkdir(parents=True)
 
-    # 1. a venv rooted at Contents (see the module docstring for why)
-    print("creating the embedded environment…")
-    _run(base_python, "-m", "venv", "--copies", contents)
-    pip = contents / "bin" / "pip"
-    _run(pip, "install", "--quiet", "--upgrade", "pip")
-    _run(pip, "install", "--quiet", spec or str(ROOT))
-    _run(pip, "install", "--quiet", "pyobjc-framework-Cocoa>=10.0")
+    # 1. the interpreter's ENTIRE runtime, stdlib included, under Resources -
+    #    the one place codesign seals without extended attributes.
+    ver = _python_version(base_python)
+    _EMBEDDED_VER[0] = ver
+    src_prefix = pathlib.Path(base_python).resolve().parent.parent
+    if not (src_prefix / "lib" / f"python{ver}" / "os.py").exists():
+        raise SystemExit(
+            f"error: {base_python} has no self-contained standard library at "
+            f"{src_prefix}\n  install one with:  uv python install 3.12")
+    print(f"copying the Python {ver} runtime from {src_prefix}…")
+    runtime = resources / "runtime"
+    shutil.copytree(src_prefix, runtime, symlinks=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
+                                                  "*.pyo", ".DS_Store"))
+    rt_python = runtime / "bin" / f"python{ver}"
+    if not rt_python.exists():
+        rt_python = runtime / "bin" / "python3"
+    rt_python.chmod(0o755)
+    # uv marks its interpreters PEP 668 externally-managed so nobody pip
+    # installs into the shared copy. This one is a private copy inside the
+    # bundle, and installing into it is the entire point.
+    (runtime / "lib" / f"python{ver}" / "EXTERNALLY-MANAGED").unlink(
+        missing_ok=True)
+    _run(rt_python, "-m", "pip", "install", "--quiet", spec or str(ROOT))
+    _run(rt_python, "-m", "pip", "install", "--quiet",
+         "pyobjc-framework-Cocoa>=10.0")
 
-    _strip(contents)
+    _strip(runtime / "lib")
 
-    # 2. the interpreter must live INSIDE the bundle for it to have identity
-    py = contents / "bin" / f"python{sysconfig.get_python_version()}"
-    if not py.exists():
-        py = contents / "bin" / "python3"
-    shutil.copy2(py, macos / "python")
+    # Precompile everything, and freeze it. Python writes __pycache__ next to
+    # any module it imports without one - inside the bundle, after signing,
+    # which breaks the app's own seal the first time it runs. Compiling ahead
+    # with unchecked-hash means the interpreter trusts the bytecode without
+    # even stat-ing the source, so there is nothing left to write. The
+    # launcher sets PYTHONDONTWRITEBYTECODE too, belt and braces.
+    print("precompiling the runtime…")
+    cc = subprocess.run(
+        [str(rt_python), "-m", "compileall", "-q", "-f",
+         "--invalidation-mode", "unchecked-hash",
+         str(runtime / "lib" / f"python{ver}")],
+        capture_output=True, text=True)
+    if cc.returncode != 0:                 # a few stdlib fixtures never compile
+        print(f"  (compileall reported {cc.returncode}; continuing)")
+
+    _unseal_hazards(contents)
+
+    # 2. the interpreter must ALSO live in Contents/MacOS: macOS reads a
+    #    process's identity from where its executable sits, and a bundle whose
+    #    running image is elsewhere has no identifier, name, or icon.
+    shutil.copy2(rt_python, macos / "python")
     (macos / "python").chmod(0o755)
 
-    # 3. the executable named by Info.plist
+    # 3. the executable named by Info.plist. PYTHONHOME is what ties the
+    #    interpreter in MacOS/ to the runtime in Resources/; without it
+    #    CPython would infer a prefix of `Contents` and find no stdlib.
     launcher = macos / APP_NAME
     launcher.write_text(
         "#!/bin/sh\n"
-        '# Keep the running image inside the bundle - see build_macos_app.py\n'
+        "# Keep the running image inside the bundle - see build_macos_app.py\n"
         'here="$(cd "$(dirname "$0")" && pwd)"\n'
+        'PYTHONHOME="$(cd "$here/../Resources/runtime" && pwd)"\n'
+        "export PYTHONHOME\n"
+        "PYTHONDONTWRITEBYTECODE=1\n"
+        "export PYTHONDONTWRITEBYTECODE\n"
+        "unset PYTHONPATH PYTHONSTARTUP\n"
         'exec "$here/python" -m engram.cli menubar "$@"\n', encoding="utf-8")
     launcher.chmod(0o755)
 
@@ -189,12 +353,57 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     with open(contents / "Info.plist", "wb") as fh:
         plistlib.dump(info, fh)
 
-    # 4. ad-hoc signature: without it macOS may refuse to keep the login item,
-    #    and the identifier is what System Settings groups the item under.
+    # 4. ad-hoc signature, LAST - anything written into the bundle after this
+    #    point invalidates the seal. Without a valid one macOS refuses to keep
+    #    the login item, and the identifier is what System Settings groups the
+    #    item under.
+    # Checked BEFORE signing: running the interpreter is what writes bytecode
+    # into the bundle, and doing that afterwards is what broke the seal.
+    _verify_self_contained(app)
+
     _run("codesign", "--force", "--deep", "--sign", "-",
          "--identifier", BUNDLE_ID, app)
+    _verify_signature(app)
+    _no_xattr_signatures(app)
+    _verify_survives_running(app)
     print(f"built {app}")
     return app
+
+
+def _verify_survives_running(app: pathlib.Path) -> None:
+    """A signed app must not invalidate itself by being used.
+
+    Anything the app writes inside its own bundle - bytecode caches being the
+    obvious one - breaks the seal, and a broken seal means a quarantined copy
+    is killed on sight. So: run it once for real, then check the signature
+    again.
+    """
+    out = subprocess.run([str(app / "Contents" / "MacOS" / APP_NAME),
+                          "--self-check"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit("error: the built app cannot run\n"
+                         + (out.stderr or out.stdout).strip()[:2000])
+    _verify_signature(app)
+    print("signature survives running the app")
+
+
+def _no_xattr_signatures(app: pathlib.Path) -> None:
+    """No file in the bundle may keep its signature in extended attributes.
+
+    codesign does that for loose files in the bundle root, which it treats as
+    nested code. Extended attributes do not survive hdiutil, zip, or cp, so
+    such a bundle verifies where it was built and nowhere else.
+    """
+    bad = [p for p in app.rglob("*")
+           if p.is_file() and not p.is_symlink()
+           and b"com.apple.cs.CodeDirectory" in subprocess.run(
+               ["xattr", str(p)], capture_output=True).stdout]
+    if bad:
+        rel = "\n  ".join(str(p.relative_to(app)) for p in bad[:10])
+        raise SystemExit(
+            "error: these files carry xattr-only signatures and would break "
+            "the moment the app is copied:\n  " + rel)
+    print("no xattr-only signatures: the bundle survives being copied")
 
 
 def _login_plist(app: pathlib.Path) -> dict:
@@ -217,32 +426,67 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
         if d.exists():
             shutil.rmtree(d)
     (staging / "Applications").mkdir(parents=True)
-    shutil.copytree(app, staging / "Applications" / app.name, symlinks=True)
+    # ditto, not copytree: it is the only copy that preserves every
+    # attribute codesign relies on.
+    _run("ditto", app, staging / "Applications" / app.name)
     login_root.mkdir(parents=True)          # payload-free: scripts only
-    scripts = BUILD / "login-scripts"
-    if scripts.exists():
-        shutil.rmtree(scripts)
-    scripts.mkdir(parents=True)
-    post = scripts / "postinstall"
-    post.write_text(
+
+    def _scripts(name: str, body: str) -> pathlib.Path:
+        d = BUILD / name
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+        post = d / "postinstall"
+        post.write_text(body, encoding="utf-8")
+        post.chmod(0o755)
+        return d
+
+    # Both scripts run as root. Anything that touches the user's GUI session -
+    # SMAppService, `open` - has to be pushed back into it explicitly: root has
+    # no per-user launchd bootstrap, and asking it to register a login item is
+    # what produced "Could not connect to system service engram". `$USER` is
+    # not the installing human here either, so read the console owner instead.
+    preamble = (
         "#!/bin/sh\n"
+        f'APP="/Applications/{app.name}"\n'
+        '[ -d "$APP" ] || exit 0\n'
+        'USER_NAME=$(/usr/bin/stat -f%Su /dev/console)\n'
+        'USER_UID=$(/usr/bin/id -u "$USER_NAME" 2>/dev/null)\n'
+    )
+    core_scripts = _scripts("core-scripts", preamble + (
+        "# Installer payloads are not quarantined, but a bundle that arrived\n"
+        "# any other way (the .dmg, Migration Assistant, a restored backup)\n"
+        "# is, and a quarantined ad-hoc-signed app is SIGKILLed at exec.\n"
+        '/usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true\n'
+        "\n"
+        "# A second copy under ~/Applications claims the same bundle id, and\n"
+        "# then LaunchServices and SMAppService resolve whichever they saw\n"
+        "# first - often the stale one.\n"
+        'if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then\n'
+        '  /bin/rm -rf "/Users/$USER_NAME/Applications/engRAM.app" || true\n'
+        "fi\n"
+        'LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks'
+        '/LaunchServices.framework/Support/lsregister"\n'
+        '[ -x "$LSREG" ] && "$LSREG" -f "$APP" >/dev/null 2>&1\n'
+        "exit 0\n"))
+    login_scripts = _scripts("login-scripts", preamble + (
+        '[ -n "$USER_UID" ] && [ "$USER_NAME" != "root" ] || exit 0\n'
         "# Register with SMAppService so System Settings > Login Items lists\n"
         "# engRAM by name, with its icon, instead of a nameless legacy agent.\n"
-        f'APP="/Applications/{app.name}"\n'
-        'if [ -x "$APP/Contents/MacOS/engRAM" ]; then\n'
-        '  su "$USER" -c "\"$APP/Contents/MacOS/engRAM\" --login on" || true\n'
-        '  su "$USER" -c "open -a \"$APP\"" || true\n'
-        "fi\n"
-        "exit 0\n", encoding="utf-8")
-    post.chmod(0o755)
+        "asuser() { /bin/launchctl asuser \"$USER_UID\" /usr/bin/sudo -u "
+        '"$USER_NAME" "$@"; }\n'
+        'asuser "$APP/Contents/MacOS/engRAM" --login on || true\n'
+        'asuser /usr/bin/open -a "$APP" || true\n'
+        "exit 0\n"))
 
     core = BUILD / "core.pkg"
     login = BUILD / "login.pkg"
     _run("pkgbuild", "--root", staging, "--identifier", BUNDLE_ID,
-         "--version", version, "--install-location", "/", core)
+         "--version", version, "--install-location", "/",
+         "--scripts", core_scripts, core)
     _run("pkgbuild", "--root", login_root, "--identifier", BUNDLE_ID + ".login",
          "--version", version, "--install-location", "/",
-         "--scripts", BUILD / "login-scripts", "--nopayload", login)
+         "--scripts", login_scripts, "--nopayload", login)
 
     dist = BUILD / "distribution.xml"
     dist.write_text(f"""<?xml version="1.0" encoding="utf-8"?>
@@ -280,8 +524,31 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    shutil.copytree(app, stage / app.name, symlinks=True)
+    _run("ditto", app, stage / app.name)
     os.symlink("/Applications", stage / "Applications")
+    # engRAM is signed ad-hoc, not with a paid Developer ID, so it cannot be
+    # notarised. Anything dragged out of a downloaded .dmg carries the
+    # quarantine flag, and macOS refuses to launch a quarantined app it cannot
+    # attribute - silently, because engRAM has no dock icon to bounce. The
+    # .pkg does not have this problem: installer payloads are not quarantined.
+    (stage / "READ ME FIRST.txt").write_text(
+        "engRAM " + version + "\n"
+        "=================\n\n"
+        "Easiest install: use engRAM-" + version + ".pkg from the release page\n"
+        "instead of this disk image. It sets everything up in one click and\n"
+        "skips the warning below entirely.\n\n"
+        "If you would rather drag the app across:\n\n"
+        "  1. Drag engRAM.app onto the Applications folder here.\n"
+        "  2. The first time you open it, macOS will say it cannot check the\n"
+        "     app for malicious software. That is what it always says about\n"
+        "     software not signed with a $99/year Apple Developer ID.\n"
+        "  3. Open System Settings > Privacy & Security, scroll down, and\n"
+        "     click 'Open Anyway'. You only do this once.\n\n"
+        "engRAM has no dock icon - it lives in the menu bar. If you cannot\n"
+        "find its icon there (a full menu bar hides items behind the notch),\n"
+        "just open engRAM.app again: it will show its panel in a window.\n\n"
+        "Source, and every other way to install:\n"
+        "https://github.com/MaxFreedomPollard/engRAM\n", encoding="utf-8")
     out = BUILD / f"{APP_NAME}-{version}.dmg"
     out.unlink(missing_ok=True)
     _run("hdiutil", "create", "-volname", f"{APP_NAME} {version}",

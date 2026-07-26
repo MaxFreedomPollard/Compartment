@@ -40,6 +40,28 @@ _LEADING = 5
 _CENTER_Y = 10
 _HORIZONTAL, _VERTICAL = 0, 1
 
+# Written beside the vault the first time the app runs, so the very first
+# launch can open the panel by itself instead of leaving the user hunting a
+# menu bar icon they have never seen before.
+FIRST_RUN_MARKER = ".menubar-introduced"
+
+# A second launch asks the copy already running to show itself, over this.
+SHOW_NOTIFICATION = "io.github.maxfreedompollard.engram.show"
+
+
+def claim_first_run(vault: str) -> bool:
+    """True exactly once, on the first launch. Never raises: a read-only home
+    directory should cost the user a nicety, not the app."""
+    try:
+        marker = Path(vault).expanduser().parent / FIRST_RUN_MARKER
+        if marker.exists():
+            return False
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
 
 # --------------------------------------------------------------- data layer
 
@@ -226,12 +248,22 @@ def set_login(enabled: bool) -> str:
     if svc is None:
         return "unavailable (not running from engRAM.app)"
     try:
-        if enabled:
-            svc.registerAndReturnError_(None)
-        else:
-            svc.unregisterAndReturnError_(None)
+        res = (svc.registerAndReturnError_(None) if enabled
+               else svc.unregisterAndReturnError_(None))
     except Exception as exc:                            # noqa: BLE001
         return f"failed: {exc}"
+    # PyObjC turns the NSError** out-parameter into a second return value.
+    # The old code dropped it, so a refusal - "Could not connect to system
+    # service", which is what registering from a root installer script gets
+    # you - was reported as success.
+    ok, err = res if isinstance(res, tuple) else (bool(res), None)
+    if not ok:
+        detail = ""
+        try:
+            detail = str(err.localizedDescription()) if err is not None else ""
+        except Exception:                               # noqa: BLE001
+            pass
+        return f"failed: {detail or 'the login item was refused'}"
     return login_status()
 
 
@@ -275,18 +307,42 @@ def run(vault: str | None = None, show: bool = False,
     try:
         import objc                                     # noqa: F401
         from AppKit import (NSApp, NSApplication,
-                            NSApplicationActivationPolicyAccessory, NSColor,
+                            NSApplicationActivationPolicyAccessory,
+                            NSBackingStoreBuffered, NSBox, NSColor,
+                            NSRunningApplication,
                             NSFont, NSImage, NSMakeRect, NSMenu, NSMenuItem,
-                            NSPopover, NSSegmentedControl, NSStackView,
-                            NSStatusBar, NSSwitch, NSTextField, NSButton,
-                            NSView, NSViewController)
-        from Foundation import NSObject
+                            NSPanel, NSPopover, NSScreen, NSSegmentedControl,
+                            NSStackView, NSStatusBar, NSSwitch, NSTextField,
+                            NSButton, NSView, NSViewController,
+                            NSWindowStyleMaskClosable, NSWindowStyleMaskTitled,
+                            NSWindowStyleMaskUtilityWindow)
+        from Foundation import (NSBundle, NSDistributedNotificationCenter,
+                                NSObject)
     except ImportError:
         print("error: the menu bar app needs PyObjC.\n"
               "  pip install 'engram-memory-vault[menubar]'", file=sys.stderr)
         return 1
 
     vault_path = vault or default_vault()
+
+    # One running copy, one icon. LaunchServices normally turns a second
+    # launch into a reopen event for the copy already running, but a copy
+    # started straight from the executable is invisible to it - and then
+    # opening engRAM.app quietly adds a second status item next to the first
+    # instead of showing the panel. Handing off over a distributed
+    # notification works whichever way each copy was started.
+    if not render_to and (NSBundle.mainBundle().bundleIdentifier() or ""):
+        bundle_id = NSBundle.mainBundle().bundleIdentifier()
+        mine = NSRunningApplication.currentApplication().processIdentifier()
+        peers = [a for a in NSRunningApplication
+                 .runningApplicationsWithBundleIdentifier_(bundle_id)
+                 if a.processIdentifier() != mine]
+        if peers:
+            NSDistributedNotificationCenter.defaultCenter(
+            ).postNotificationName_object_userInfo_deliverImmediately_(
+                SHOW_NOTIFICATION, None, None, True)
+            print("engRAM is already running - asked it to show its panel")
+            return 0
 
     # -- small helpers on top of AppKit's verbosity ------------------------
     def label(text, size=13, bold=False, secondary=False, wrap=False,
@@ -319,11 +375,13 @@ def run(vault: str | None = None, show: bool = False,
         return s
 
     def divider():
-        v = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 1, 1))
-        v.setWantsLayer_(True)
-        v.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
-        v.heightAnchor().constraintEqualToConstant_(1).setActive_(True)
-        return v
+        # NSBox's own separator, not a layer-backed view: reaching through to
+        # CGColor logs an ObjCPointerWarning on every single rebuild.
+        b = NSBox.alloc().initWithFrame_(NSMakeRect(0, 0, CONTENT_WIDTH, 1))
+        b.setBoxType_(2)                                # NSBoxSeparator
+        b.widthAnchor().constraintEqualToConstant_(
+            CONTENT_WIDTH).setActive_(True)
+        return b
 
     class Controller(NSObject):
         def init(self):
@@ -332,6 +390,7 @@ def run(vault: str | None = None, show: bool = False,
             self.popover = None
             self.status_item = None
             self.body = None
+            self.window = None
             return self
 
         # ---- building the popover contents -----------------------------
@@ -421,17 +480,84 @@ def run(vault: str | None = None, show: bool = False,
                                  min(fit.height, POPOVER_MAX_HEIGHT)))
             return stack
 
-        def rebuild(self):
-            self.state = fetch_state(vault_path)
-            vc = self.popover.contentViewController()
-            for sub in list(vc.view().subviews()):
+        # Not an action: PyObjC infers a selector from the method name, and
+        # a name with no trailing underscores means "takes no arguments".
+        @objc.python_method
+        def _mount(self, host, body, h):
+            for sub in list(host.subviews()):
                 sub.removeFromSuperview()
+            host.setFrameSize_((POPOVER_WIDTH, h))
+            host.addSubview_(body)
+            body.setFrameOrigin_((0, 0))
+
+        def rebuild(self):
+            """Refresh whichever surface is on screen - popover or window."""
+            self.state = fetch_state(vault_path)
             body = self.buildBody()
             h = min(body.frame().size.height, POPOVER_MAX_HEIGHT)
-            self.popover.setContentSize_((POPOVER_WIDTH, h))
-            vc.view().setFrameSize_((POPOVER_WIDTH, h))
-            vc.view().addSubview_(body)
-            body.setFrameOrigin_((0, 0))
+            if self.window is not None and self.window.isVisible():
+                self._mount(self.window.contentView(), body, h)
+                self.window.setContentSize_((POPOVER_WIDTH, h))
+            else:
+                self.popover.setContentSize_((POPOVER_WIDTH, h))
+                self._mount(self.popover.contentViewController().view(),
+                            body, h)
+
+        # ---- getting the thing on screen -------------------------------
+        # Two surfaces, and which one to use is never in doubt:
+        #
+        #   clicked the status item -> popover. Reaching that handler means
+        #       the icon was clicked, so the icon is on screen and there is
+        #       something to anchor to. No geometry to guess at.
+        #   everything else -> window. First launch, reopening the app, a
+        #       second launch handing off: in all three the user has no
+        #       reachable icon to click, which is how this app came to look
+        #       broken in the first place.
+        @objc.python_method
+        def _makeWindow(self):
+            win = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, POPOVER_WIDTH, POPOVER_MAX_HEIGHT),
+                NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                | NSWindowStyleMaskUtilityWindow,
+                NSBackingStoreBuffered, False)
+            win.setTitle_("engRAM")
+            win.setReleasedWhenClosed_(False)
+            win.setHidesOnDeactivate_(False)
+            win.setLevel_(3)                            # NSFloatingWindowLevel
+            return win
+
+        @objc.python_method
+        def _placeWindow(self):
+            scr = NSScreen.mainScreen()
+            if scr is None:
+                self.window.center()
+                return
+            vf = scr.visibleFrame()
+            f = self.window.frame()
+            self.window.setFrameOrigin_((
+                vf.origin.x + vf.size.width - f.size.width - 24,
+                vf.origin.y + vf.size.height - f.size.height - 12))
+
+        @objc.python_method
+        def showWindow(self):
+            _d("showing the window")
+            if self.window is None:
+                self.window = self._makeWindow()
+            self.window.makeKeyAndOrderFront_(None)   # visible before rebuild,
+            self.rebuild()                            # so rebuild targets it
+            self._placeWindow()
+            NSApp.activateIgnoringOtherApps_(True)
+
+        @objc.python_method
+        def showPopover(self):
+            _d("showing the popover")
+            if self.window is not None and self.window.isVisible():
+                self.window.orderOut_(None)           # one surface at a time
+            self.rebuild()
+            btn = self.status_item.button()
+            self.popover.showRelativeToRect_ofView_preferredEdge_(
+                btn.bounds(), btn, 1)                  # NSRectEdgeMaxY
+            NSApp.activateIgnoringOtherApps_(True)
 
         # ---- actions ---------------------------------------------------
         def toggleHook_(self, sender):
@@ -454,6 +580,18 @@ def run(vault: str | None = None, show: bool = False,
         def refresh_(self, sender):
             self.rebuild()
 
+        def showFirst_(self, _):
+            """First launch, reopen, and second-launch handoff all land here.
+
+            Deliberately the window and never the popover. A popover is
+            transient: it closes the instant anything takes focus, so on a
+            first launch - when the user has never seen the icon, and the
+            installer or a browser may still be grabbing focus - it can be
+            gone before they ever notice it appeared. That is the exact
+            failure this is meant to end. A window stays until dismissed.
+            """
+            self.showWindow()
+
         def lockNow_(self, sender):
             lock_vault(vault_path)
             self.rebuild()
@@ -464,12 +602,10 @@ def run(vault: str | None = None, show: bool = False,
         def togglePopover_(self, sender):
             if self.popover.isShown():
                 self.popover.performClose_(sender)
+            elif self.window is not None and self.window.isVisible():
+                self.window.orderOut_(None)
             else:
-                self.rebuild()
-                btn = self.status_item.button()
-                self.popover.showRelativeToRect_ofView_preferredEdge_(
-                    btn.bounds(), btn, 1)               # NSRectEdgeMaxY
-                NSApp.activateIgnoringOtherApps_(True)
+                self.showPopover()
 
     def _spacer():
         v = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 1, 1))
@@ -542,8 +678,36 @@ def run(vault: str | None = None, show: bool = False,
            "| item at:", w.frame().origin.x if w else "no window",
            "| visible:", item.isVisible())
 
-    if show:
-        ctrl.togglePopover_(None)
+    # Double-clicking engRAM.app while it is already running arrives here.
+    # With no delegate macOS does nothing whatsoever, and for an app whose
+    # only other surface is a status item that may be hidden behind the notch
+    # that is indistinguishable from being broken. This is the way in that
+    # cannot fail: the icon can be invisible, the bar can be full, and
+    # opening the app again still shows the panel.
+    # Conforming to the protocol is what makes this work, not decoration.
+    # `hasVisibleWindows:` is a BOOL and the method returns a BOOL; with no
+    # protocol to read the signature from, PyObjC types both as object
+    # pointers, AppKit sees a method it cannot call, and the reopen event is
+    # silently dropped - which is precisely the do-nothing behaviour above.
+    try:
+        _proto = [objc.protocolNamed("NSApplicationDelegate")]
+    except Exception:                                   # noqa: BLE001
+        _proto = []
+
+    class EngramAppDelegate(NSObject, protocols=_proto):
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, vis):
+            _d("reopen event -> showing the panel")
+            ctrl.showFirst_(None)
+            return True
+
+    delegate = EngramAppDelegate.alloc().init()
+    app.setDelegate_(delegate)
+    NSDistributedNotificationCenter.defaultCenter(
+    ).addObserver_selector_name_object_(ctrl, "showFirst:",
+                                        SHOW_NOTIFICATION, None)
+
+    if show or claim_first_run(vault_path):
+        ctrl.performSelector_withObject_afterDelay_("showFirst:", None, 0.35)
     _d("entering run loop")
     app.run()
     _d("run loop exited")

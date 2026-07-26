@@ -7,13 +7,13 @@
     "url": "https://github.com/MaxFreedomPollard/engRAM",
     "source": "github"
   },
-  "version": "1.13.0",
+  "version": "1.14.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "engram-memory-vault",
-      "version": "1.13.0",
+      "version": "1.14.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
