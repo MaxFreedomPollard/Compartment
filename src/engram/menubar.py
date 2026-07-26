@@ -638,6 +638,14 @@ def run(vault: str | None = None, show: bool = False,
         return 0 if ok else 1
     item = NSStatusBar.systemStatusBar().statusItemWithLength_(-1.0)
     item.setAutosaveName_("engRAM")          # remember where the user puts it
+    # …but never remember it as hidden. An autosave name persists `visible`
+    # as well as position, and a status item can be hidden by a stray
+    # command-drag off the menu bar. Once that is saved the icon is gone for
+    # good - every later launch restores it as hidden, the app looks like it
+    # failed to start, and the only way back is to open the app. The icon
+    # belongs in the menu bar for as long as engRAM is running; Quit is what
+    # removes it.
+    item.setVisible_(True)
     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
         "brain.head.profile", "engRAM")
     if img is None:
@@ -699,6 +707,13 @@ def run(vault: str | None = None, show: bool = False,
             _d("reopen event -> showing the panel")
             ctrl.showFirst_(None)
             return True
+
+        def applicationShouldTerminateAfterLastWindowClosed_(self, sender):
+            # Closing the panel must never quit engRAM and take the menu bar
+            # icon with it. AppKit already defaults to NO, but this app has
+            # exactly one window and losing the icon by closing it would be
+            # indistinguishable from the app crashing.
+            return False
 
     delegate = EngramAppDelegate.alloc().init()
     app.setDelegate_(delegate)
