@@ -150,7 +150,7 @@ def snapshot_recent(v: Vault, limit: int = 20) -> dict:
 
 def _make_handler(ref: _VaultRef, token: str):
     class DashHandler(BaseHTTPRequestHandler):
-        server_version = "engram-dash"
+        server_version = "compartment-dash"
 
         def log_message(self, *_):        # memory contents stay off the terminal
             pass
