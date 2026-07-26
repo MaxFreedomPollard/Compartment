@@ -14,8 +14,8 @@ import sys
 import zipfile
 from pathlib import Path
 
-from . import (__version__, audit, claude_memory, offline_guard, packs,
-               selftest, session)
+from . import (__version__, audit, claude_hooks, claude_memory, offline_guard,
+               packs, selftest, session)
 from .acl import VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, user_model_dir
@@ -230,6 +230,33 @@ def cmd_recent(args) -> None:
             if tags:
                 print(f"{'':>19}tags: {', '.join(tags[:6])}")
     v.save()
+
+
+def cmd_hook(args) -> None:
+    """Deterministic capture, so remembering does not depend on the model
+    choosing to call a tool."""
+    if args.hook_cmd == "capture":
+        res = claude_hooks.capture(vault_path=args.vault)
+        if args.json:
+            _print(res)
+        sys.exit(0)          # never fail a user's edit over a memory write
+    elif args.hook_cmd == "install":
+        try:
+            out = claude_hooks.install(vault=args.vault if args.pin_vault
+                                       else None)
+        except ValueError as exc:
+            _die(str(exc))
+        print(f"capture hook installed in {out['settings']}")
+        print(f"  on {out['event']} for {out['matcher']}")
+        if out["backup"]:
+            print(f"  previous settings backed up to {out['backup']}")
+        print("  Claude Code memory writes now land in the vault "
+              "automatically (restart Claude Code to load it)")
+    elif args.hook_cmd == "uninstall":
+        print("capture hook removed" if claude_hooks.uninstall()
+              else "no engram hook was installed")
+    else:
+        print("installed" if claude_hooks.is_installed() else "not installed")
 
 
 def cmd_import_claude(args) -> None:
@@ -690,6 +717,32 @@ def _migrate_claude_memories(vault: str, skip: bool = False) -> None:
           "source of truth")
 
 
+def _install_capture_hook(vault: str, skip: bool = False) -> None:
+    """Instructions are a request; a hook is not. Without this, remembering
+    depends on the model choosing engram over the memory its host declares in
+    the system prompt - and the host wins that by default."""
+    if skip:
+        print("\n  capture hook not installed (--no-hooks). Install later "
+              "with `engram hook install`.")
+        return
+    try:
+        out = claude_hooks.install(vault=vault)
+    except ValueError as exc:            # malformed settings.json - never guess
+        print(f"\n  ! {exc}")
+        print("    fix the file, then run `engram hook install`")
+        return
+    except OSError as exc:
+        print(f"\n  ! could not write the capture hook ({exc}); "
+              "run `engram hook install` later")
+        return
+    print(f"\n  ✓ capture hook installed in {out['settings']}")
+    if out["backup"]:
+        print(f"    (previous settings backed up to {out['backup']})")
+    print("    Claude Code memory writes now land in the vault automatically, "
+          "so nothing depends on the model remembering to call a tool. "
+          "Restart Claude Code to load it; `engram hook uninstall` removes it.")
+
+
 def cmd_integrate(args) -> None:
     """One-command wiring into an agent ecosystem (hermes / claude)."""
     import shutil
@@ -785,6 +838,7 @@ def cmd_integrate(args) -> None:
             print(f"\n! no vault at {vault} - run `engram init` to create one")
         else:
             _migrate_claude_memories(vault, skip=args.no_import)
+        _install_capture_hook(vault, skip=args.no_hooks)
     else:
         _die(f"unknown integrate target {target!r} (hermes | claude)")
 
@@ -929,6 +983,23 @@ def main(argv: list[str] | None = None) -> None:
                    help="include seeded starting memories (hidden by default)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_recent)
+
+    ph = sub.add_parser("hook", help="Claude Code capture hook (deterministic "
+                                     "memory capture)")
+    ph_sub = ph.add_subparsers(dest="hook_cmd")
+    p = ph_sub.add_parser("capture", help="run by Claude Code; reads hook JSON "
+                                          "on stdin")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_hook)
+    p = ph_sub.add_parser("install", help="write the hook into "
+                                          "~/.claude/settings.json")
+    p.add_argument("--pin-vault", action="store_true",
+                   help="hard-code this vault path into the hook command")
+    p.set_defaults(fn=cmd_hook)
+    p = ph_sub.add_parser("uninstall", help="remove engram's hook only")
+    p.set_defaults(fn=cmd_hook)
+    p = ph_sub.add_parser("status", help="is the hook installed?")
+    p.set_defaults(fn=cmd_hook)
 
     p = sub.add_parser("import-claude",
                        help="import Claude Code's file memories into the vault")

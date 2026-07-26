@@ -178,6 +178,16 @@ every new memory here, treat the files as a read-only archive. One vault,
 encrypted, shared by every agent and project on the machine. Nothing is
 deleted; the files stay exactly where they were.
 
+**Capture that does not depend on the model.** Instructions are a request,
+and a host that declares its own memory in its system prompt outranks
+anything a tool says. So `engram integrate claude` also installs a
+`PostToolUse` hook: when Claude Code writes a memory file, the fact lands in
+the vault whether or not the model ever thought about engram. The hook is
+additive and idempotent (your other hooks are untouched, settings.json is
+backed up first), it exits successfully no matter what - a memory tool must
+never break your editor - and it stays quiet when the vault is locked.
+`engram hook status | install | uninstall`, or `integrate claude --no-hooks`.
+
 **See what it just learned.** `engram recent` lists the newest memories,
 newest last, hiding the thousands of seeded starting facts so the handful
 that real use produced are actually visible - and `engram status` reports

@@ -49,10 +49,24 @@ and neither is complete. `engram integrate claude` resolves it in two ways:
    read-only archive. This matters because the host declares its own memory
    in the system prompt, which otherwise outranks anything a tool says.
 
+3. **It stops relying on the model.** `integrate claude` installs a
+   `PostToolUse` hook into `~/.claude/settings.json`. When Claude Code writes
+   a file into its memory directory, the hook stores it in the vault - no
+   tool call required, so capture is deterministic instead of discretionary.
+   Your existing hooks are preserved, settings.json is backed up first, and
+   re-installing updates in place rather than duplicating. The hook always
+   exits 0 (a memory tool must never break an edit) and does nothing when the
+   vault is locked - `engram import-claude` sweeps up anything missed.
+
 ```bash
 engram import-claude --dry-run     # see exactly what would be imported
 engram import-claude               # do it (idempotent)
 engram integrate claude --no-import  # wire up, but skip the import
+engram integrate claude --no-hooks   # wire up, but install no hook
+
+engram hook status                 # is the capture hook installed?
+engram hook install                # add it later
+engram hook uninstall              # remove engram's hook only
 ```
 
 Nothing is deleted. If you want the Markdown files gone afterwards, remove
