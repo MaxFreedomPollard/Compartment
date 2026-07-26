@@ -61,7 +61,10 @@ Windows (PowerShell):
 py -m pip install engram-memory-vault; engram init; engram integrate claude
 ```
 Registers the MCP server with the Claude Code CLI (user scope, all
-projects) and prints the Claude Desktop config block. The server describes
+projects), **imports any memories Claude Code already wrote to its own
+file-based memory** (copy-only - the Markdown files are never modified;
+`--no-import` opts out, `engram import-claude` does it later), and prints
+the Claude Desktop config block. The server describes
 itself over the MCP handshake - it tells the model to recall before answering
 and to store durable facts, credentials, names, and decisions - so Claude
 treats engRAM as its memory with no hand-written instruction; `integrate
@@ -165,6 +168,22 @@ magnitude keeps the genuinely best match on top, importance settles
 near-ties in favor of what matters. The agent learns the user and the
 computer first, the world second, and forgets nothing.
 
+**One memory, not two.** Agent hosts increasingly ship a memory of their
+own - Claude Code keeps per-project Markdown files with an auto-loaded
+index. Two memories means facts land in whichever one the model happened to
+think of, and neither is complete. engRAM takes over on install: it imports
+what the file memory already holds, and both the MCP handshake and the
+managed CLAUDE.md block tell the model that engram supersedes it - write
+every new memory here, treat the files as a read-only archive. One vault,
+encrypted, shared by every agent and project on the machine. Nothing is
+deleted; the files stay exactly where they were.
+
+**See what it just learned.** `engram recent` lists the newest memories,
+newest last, hiding the thousands of seeded starting facts so the handful
+that real use produced are actually visible - and `engram status` reports
+`organic_records` beside the total, so a vault that has learned nothing can
+never look busy. Same view over MCP as `memory_recent`.
+
 **One pinned embedding space.** The model's SHA-256 is recorded in the
 vault and enforced at open; cosine comparisons stay mathematically valid
 forever instead of silently degrading when a model changes. Migration is
@@ -197,8 +216,8 @@ app you babysit.
   predicate, and as-of queries. Deterministic storage, host-model
   judgment - the same split as everything else in engRAM.
 - **CLI for everything else** - scripts, cron, other agents: `engram
-  store`, `engram search`, `engram forget`, `engram link`,
-  `engram relations`, `engram lock`.
+  store`, `engram search`, `engram recent`, `engram forget`, `engram link`,
+  `engram relations`, `engram import-claude`, `engram lock`.
 - **See the vault: `engram dash`** - one command opens a local page with
   everything at a glance: how many memories of what kind, growth over
   time, the relation graph, tags, per-agent counts, live search. Served

@@ -482,6 +482,60 @@ class Vault:
         return {"results": results, "note": DATA_NOT_INSTRUCTIONS}
 
     @_synchronized
+    def recent(self, caller: str, namespace: str | None = None,
+               limit: int = 20, include_seeded: bool = False) -> dict:
+        """The newest memories, oldest first.
+
+        Search ranks by relevance, which is the wrong axis for "what did you
+        just remember?" - the question every user asks first when checking
+        that memory is alive, and the feed a UI wants. Seeded starting
+        memories are excluded by default: thousands of them would otherwise
+        bury the handful of records that real use produced.
+        """
+        self._require_open()
+        if namespace is not None:
+            self.config.grant_for(caller, namespace)
+            allowed = {namespace}
+        else:
+            allowed = set(self._readable_namespaces(caller))
+
+        total = organic = 0
+        rows = []
+        for row in self.db.conn.execute(
+                "SELECT id, ns, tags, created, importance, quarantined "
+                "FROM records ORDER BY created"):
+            if row["ns"] not in allowed:
+                continue
+            total += 1
+            seeded = any(t.startswith("id:") for t in json.loads(row["tags"]))
+            if not seeded:
+                organic += 1
+            if seeded and not include_seeded:
+                continue
+            rows.append((row, seeded))
+
+        out = []
+        for row, seeded in rows[-max(0, int(limit)):]:
+            created = row["created"]
+            try:
+                stamp = datetime.datetime.fromtimestamp(
+                    float(created)).strftime("%Y-%m-%d %H:%M")
+            except (TypeError, ValueError, OSError):
+                stamp = ""
+            rec = {"id": row["id"], "namespace": row["ns"],
+                   "text": self.db.decrypt_text(self.db.get_row(row["id"]),
+                                                self._master),
+                   "tags": json.loads(row["tags"]),
+                   "importance": row["importance"], "created": created,
+                   "created_local": stamp, "seeded": seeded}
+            if row["quarantined"]:
+                rec["quarantined"] = True
+            out.append(rec)
+        self._audit_and_capture(caller, "recent", f"n={len(out)}")
+        return {"results": out,
+                "counts": {"total": total, "organic": organic,
+                           "seeded": total - organic}}
+
     def get(self, record_id: str, caller: str) -> dict:
         self._require_open()
         row = self.db.get_row(record_id)
@@ -632,11 +686,20 @@ class Vault:
         vec_bytes = n * dim * 4
         est_mb = 200 + (vec_bytes * 2) // (1024 * 1024)  # model+runtime ≈200MB base
         ok, entries, msg = audit.verify(self.db.conn)
+        # Seeded starting memories vs. what real use actually stored. A vault
+        # can hold thousands of records and still have learned nothing about
+        # its user; that distinction belongs in the first thing anyone reads.
+        organic = 0
+        for row in self.db.conn.execute("SELECT tags FROM records"):
+            if not any(t.startswith("id:") for t in json.loads(row["tags"])):
+                organic += 1
         return {
             "vault": self.path,
             "vault_id": self.header.vault_id,
             "locked": False,
             "records": n,
+            "organic_records": organic,
+            "seeded_records": n - organic,
             "relations": self.db.relation_count(),
             "namespaces": self.db.namespaces(),
             "packs": self.pack_list(),

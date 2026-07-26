@@ -32,8 +32,47 @@ Claude Desktop (`claude_desktop_config.json`):
              "--caller", "claude-desktop", "serve"] } } }
 ```
 
-The `memory_search` / `memory_store` / `memory_forget` / `memory_status` /
-`memory_lock` tools then appear in every session, plus the memory-graph
+### Claude Code already has a memory - engRAM takes it over
+
+Claude Code keeps its own memory as Markdown files in a per-project
+`memory/` directory with an auto-loaded `MEMORY.md` index. Left alone, you
+end up with two memories: the model writes to whichever it thinks of first,
+and neither is complete. `engram integrate claude` resolves it in two ways:
+
+1. **It imports what is already there.** Every memory file is parsed
+   (frontmatter `type` becomes the importance tier, the name becomes a tag)
+   and stored in the vault. The source files are read, never modified, and
+   re-running imports nothing twice - so it is safe on every re-run.
+2. **It tells the model which one wins.** The MCP handshake instructions and
+   the managed CLAUDE.md block both state that engram supersedes the file
+   memory: write new memories with `memory_store`, treat the directory as a
+   read-only archive. This matters because the host declares its own memory
+   in the system prompt, which otherwise outranks anything a tool says.
+
+```bash
+engram import-claude --dry-run     # see exactly what would be imported
+engram import-claude               # do it (idempotent)
+engram integrate claude --no-import  # wire up, but skip the import
+```
+
+Nothing is deleted. If you want the Markdown files gone afterwards, remove
+them yourself once `engram recent` shows the imported memories.
+
+### Seeing what memory learned
+
+```bash
+engram recent            # newest memories, newest last
+engram recent --limit 50
+engram recent --all      # include the seeded starting facts
+engram status            # organic_records vs seeded_records
+```
+
+`engram search` ranks by relevance, which cannot answer "what did you just
+remember?" - `recent` is that view, and `memory_recent` is the same thing
+over MCP.
+
+The `memory_search` / `memory_store` / `memory_recent` / `memory_forget` /
+`memory_status` / `memory_lock` tools then appear in every session, plus the memory-graph
 tools `memory_link` / `memory_relations` / `memory_unlink` for relational
 mapping (who works where, what belongs to what - with optional validity
 windows and as-of queries).
