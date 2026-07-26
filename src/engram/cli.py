@@ -232,6 +232,15 @@ def cmd_recent(args) -> None:
     v.save()
 
 
+def cmd_menubar(args) -> None:
+    """The macOS status bar app."""
+    from . import menubar
+    if args.self_check:
+        sys.exit(menubar.self_check(args.vault))
+    sys.exit(menubar.run(args.vault, show=args.show,
+                         render_to=args.render))
+
+
 def cmd_hook(args) -> None:
     """Deterministic capture, so remembering does not depend on the model
     choosing to call a tool."""
@@ -983,6 +992,16 @@ def main(argv: list[str] | None = None) -> None:
                    help="include seeded starting memories (hidden by default)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_recent)
+
+    p = sub.add_parser("menubar", help="macOS menu bar app (settings + recent "
+                                       "memories)")
+    p.add_argument("--show", action="store_true",
+                   help="open the popover immediately on launch")
+    p.add_argument("--self-check", action="store_true",
+                   help="print what the popover would show, no window")
+    p.add_argument("--render", metavar="PNG",
+                   help="write the popover to a PNG and exit (UI check)")
+    p.set_defaults(fn=cmd_menubar)
 
     ph = sub.add_parser("hook", help="Claude Code capture hook (deterministic "
                                      "memory capture)")

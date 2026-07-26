@@ -188,6 +188,14 @@ backed up first), it exits successfully no matter what - a memory tool must
 never break your editor - and it stays quiet when the vault is locked.
 `engram hook status | install | uninstall`, or `integrate claude --no-hooks`.
 
+**A menu bar app for the Mac.** `pip install 'engram-memory-vault[menubar]'`
+then `engram menubar` puts engRAM in the status bar: click the icon and a
+popover shows whether the vault is open, how much it has learned, the three
+settings worth changing day to day (capture hook, whether starter facts join
+searches, auto-lock), and the last five things it remembered. No dock icon,
+no window to manage, and it holds no vault in memory - state comes from the
+CLI, so an idle menu bar app costs nothing.
+
 **See what it just learned.** `engram recent` lists the newest memories,
 newest last, hiding the thousands of seeded starting facts so the handful
 that real use produced are actually visible - and `engram status` reports

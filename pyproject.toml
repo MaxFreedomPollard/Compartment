@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engram-memory-vault"
-version = "1.11.0"
+version = "1.12.0"
 description = "engRAM - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,6 +27,10 @@ engram = "engram.cli:main"
 # `pip install` compiles nothing and installs cleanly everywhere; large
 # corpora add it with `pip install engram-memory-vault[hnsw]`.
 hnsw = ["usearch>=2.9"]
+# The macOS menu bar app. PyObjC is macOS-only and irrelevant to the CLI and
+# MCP server, so it stays out of the default install: `pip install
+# engram-memory-vault[menubar]`, then `engram menubar`.
+menubar = ["pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'"]
 dev = ["pytest>=8", "usearch>=2.9"]
 
 [tool.setuptools.packages.find]
