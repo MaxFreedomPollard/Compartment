@@ -331,6 +331,7 @@ engram --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 | [SECURITY.md](SECURITY.md) | full threat model, honest limits |
 | [FORMAT.md](FORMAT.md) | byte-level `.vault` and `.mpack` specs (language-agnostic) |
 | [PACKS.md](PACKS.md) | authoring and shipping signed memory packs |
+| [RELEASING.md](RELEASING.md) | cutting a release: every download, every time |
 
 ## License
 
