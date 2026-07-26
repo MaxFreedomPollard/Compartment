@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compartment"
-version = "1.15.0"
+version = "1.15.1"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ dependencies = [
 [project.scripts]
 compartment = "compartment.cli:main"
 cmpt = "compartment.cli:main"
-# Compartment was engRAM until 1.15.0, and `engram` is the command sitting in
+# Compartment was engRAM until 1.15.1, and `engram` is the command sitting in
 # every existing MCP client config, shell alias and Hermes setup. Keeping it
 # means the rename costs nobody a broken agent.
 engram = "compartment.cli:main"

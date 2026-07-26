@@ -344,4 +344,7 @@ MIT.
 
 ---
 
+The last edition had a lot of nonsense in the Read Me. I disconnected Claude Code from Compartment as I was editing Compartment, and forgot to reconnect it. I then told Claude Code to   convert the name "engRAM" to "Compartment." As if to demonstrate exactly why Compartment is needed in the first place,   it ignored my clear instructions and instead wrote a Harry Potter novel of horseshit. When connected to Compartment, Claude Code knows not to do anything I don't tell it to do, and to never to guess my intentions. Without Compartment, it is not beholden to the user and instead does whatever it guesses an imaginary person wants. If you want your AI Agent to remember everything you tell it across sessions, and actually behave, use Compartment. I built Compartment for myself, because it's truly needed and I couldn't find anything like it anywhere.
+
 mcp-name: io.github.MaxFreedomPollard/compartment
+
