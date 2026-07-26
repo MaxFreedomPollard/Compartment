@@ -1,0 +1,25 @@
+# A tombstone for the old distribution name.
+#
+# engRAM was renamed to Compartment in 1.15.0. This package has no code in it:
+# it exists so that `pip install engram-memory-vault` keeps working and quietly
+# installs Compartment instead. PyPI names cannot be deleted or redirected, and
+# leaving the old name frozen at 1.14.0 would silently strand everyone who
+# installed it.
+#
+# Compartment still provides an `engram` console script, so a user who upgrades
+# through this shim keeps the exact command their MCP config already calls.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engram-memory-vault"
+version = "1.15.0"
+description = "Renamed to Compartment - install `compartment` instead. This package installs it for you."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["compartment>=1.15.0"]
+
+[project.urls]
+Homepage = "https://github.com/MaxFreedomPollard/Compartment"
