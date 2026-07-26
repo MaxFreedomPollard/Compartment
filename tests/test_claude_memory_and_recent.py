@@ -187,6 +187,86 @@ def test_recent_requires_an_open_vault(vault):
         vault.recent(caller="test")
 
 
+# --------------------------------------------- the install path itself
+# `engram integrate claude` imports on every run; that hook is the whole
+# "switch to engram on install" promise, so it is tested, not assumed.
+
+def _prepared_vault(tmp_path, memdir, monkeypatch):
+    from engram import claude_memory as cm, session
+    from engram.vault import Vault
+    monkeypatch.setattr(cm, "DEFAULT_ROOT", memdir)
+    vp = str(tmp_path / "install.vault")
+    v = Vault.create(vp, PASS_LOCAL, creator="test")
+    session.store(vp, v._master)          # what `engram init` leaves behind
+    v.lock()
+    return vp
+
+
+PASS_LOCAL = "CorrectHorse"
+
+
+def test_integrate_imports_existing_memories(tmp_path, memdir, monkeypatch,
+                                             capsys):
+    from engram import cli
+    from engram.vault import Vault
+    vp = _prepared_vault(tmp_path, memdir, monkeypatch)
+    cli._migrate_claude_memories(vp)
+    assert Vault.unlock(vp, passphrase=PASS_LOCAL).status()["organic_records"] == 3
+    assert "3 existing Claude Code memories" in capsys.readouterr().out
+
+
+def test_integrate_import_is_idempotent(tmp_path, memdir, monkeypatch):
+    from engram import cli
+    from engram.vault import Vault
+    vp = _prepared_vault(tmp_path, memdir, monkeypatch)
+    cli._migrate_claude_memories(vp)
+    cli._migrate_claude_memories(vp)          # re-running integrate is safe
+    assert Vault.unlock(vp, passphrase=PASS_LOCAL).status()["organic_records"] == 3
+
+
+def test_integrate_no_import_flag_skips(tmp_path, memdir, monkeypatch, capsys):
+    from engram import cli
+    from engram.vault import Vault
+    vp = _prepared_vault(tmp_path, memdir, monkeypatch)
+    cli._migrate_claude_memories(vp, skip=True)
+    assert Vault.unlock(vp, passphrase=PASS_LOCAL).status()["organic_records"] == 0
+    assert "skipped (--no-import)" in capsys.readouterr().out
+
+
+def test_integrate_pluralises_a_single_memory(tmp_path, monkeypatch, capsys):
+    """One file must read 'memory', not 'memories', in BOTH branches."""
+    from engram import cli
+    d = tmp_path / "one" / "proj" / "memory"
+    d.mkdir(parents=True)
+    (d / "solo.md").write_text(NO_FRONTMATTER, encoding="utf-8")
+    vp = _prepared_vault(tmp_path, tmp_path / "one", monkeypatch)
+    cli._migrate_claude_memories(vp, skip=True)
+    out = capsys.readouterr().out
+    assert "1 existing Claude Code memory found" in out
+    cli._migrate_claude_memories(vp)
+    assert "1 existing Claude Code memory into" in capsys.readouterr().out
+
+
+def test_integrate_with_no_memories_is_silent(tmp_path, monkeypatch, capsys):
+    from engram import cli, claude_memory as cm
+    monkeypatch.setattr(cm, "DEFAULT_ROOT", tmp_path / "empty")
+    cli._migrate_claude_memories(str(tmp_path / "nope.vault"))
+    assert capsys.readouterr().out == ""
+
+
+def test_integrate_on_locked_vault_says_so(tmp_path, memdir, monkeypatch,
+                                           capsys):
+    """A locked vault must fail loudly with the fix, never silently skip."""
+    from engram import cli, claude_memory as cm, session
+    from engram.vault import Vault
+    monkeypatch.setattr(cm, "DEFAULT_ROOT", memdir)
+    vp = str(tmp_path / "locked.vault")
+    Vault.create(vp, PASS_LOCAL, creator="test").lock()
+    session.clear(vp)                          # no stored credential
+    cli._migrate_claude_memories(vp)
+    assert "locked" in capsys.readouterr().out
+
+
 def test_mcp_instructions_claim_precedence():
     """The handshake must tell the model engram replaces file memory -
     without it, a built-in memory declared in the host's system prompt wins."""

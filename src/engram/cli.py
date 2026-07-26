@@ -664,12 +664,13 @@ def _migrate_claude_memories(vault: str, skip: bool = False) -> None:
     files = claude_memory.discover()
     if not files:
         return
+    noun = "memory" if len(files) == 1 else "memories"
     if skip:
-        print(f"\n  {len(files)} existing Claude Code memories found; skipped "
+        print(f"\n  {len(files)} existing Claude Code {noun} found; skipped "
               "(--no-import). Import later with `engram import-claude`.")
         return
-    print(f"\n  importing {len(files)} existing Claude Code "
-          f"{'memory' if len(files) == 1 else 'memories'} into the vault…")
+    print(f"\n  importing {len(files)} existing Claude Code {noun} "
+          "into the vault…")
     try:
         pw, key = Vault.resolve_credential(vault)
         v = Vault.unlock(vault, passphrase=pw, raw_key=key)
