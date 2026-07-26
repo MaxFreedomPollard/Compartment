@@ -87,8 +87,21 @@ def compartment_bin() -> str:
 
 
 def _cli_argv() -> list[str]:
-    """How this process runs the CLI. Using our own interpreter means the app
-    never depends on finding a console script at all."""
+    """How this process runs the CLI.
+
+    NOT sys.executable. Inside the .app that is the bundle launcher, a small
+    binary that always starts `compartment.cli menubar` and appends whatever
+    else it was given - so every CLI call the panel made came back as an
+    argparse usage error. The panel then read the word "keyfile" out of that
+    usage line and told the user their vault needed a 2FA keyfile it had
+    never had.
+
+    sys.prefix is the real interpreter's home in every case that matters:
+    PYTHONHOME points it at Contents/Resources/runtime inside the bundle, and
+    at the venv or system prefix everywhere else."""
+    exe = Path(sys.prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
+    if exe.exists():
+        return [str(exe), "-m", "compartment.cli"]
     return [sys.executable, "-m", "compartment.cli"]
 
 
@@ -218,6 +231,13 @@ def unlock_vault(vault: str, passphrase: str) -> tuple[bool, str]:
     if p.returncode == 0:
         return True, "unlocked"
     low = out.lower()
+    # Check this FIRST. If the CLI never ran, nothing in its output describes
+    # the vault - and argparse prints "[--keyfile KEYFILE]" in its usage line,
+    # which the keyfile test below happily mistook for a vault that needed a
+    # 2FA keyfile it had never been given. Never diagnose the vault from a
+    # message that is really about our own command line.
+    if "unrecognized arguments" in low or low.startswith("usage:"):
+        return False, "internal error: could not run the CLI"
     if "wrong passphrase" in low or "no keyslot" in low:
         return False, "wrong passphrase"
     if "keyfile" in low:

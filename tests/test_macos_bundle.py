@@ -121,6 +121,47 @@ def test_the_launcher_forwards_its_arguments():
     assert "-psn_" in c, "LaunchServices' process serial number is not ours"
 
 
+def test_the_launcher_behaves_like_the_interpreter_for_m_and_c():
+    """Inside the bundle this binary is sys.executable, and
+    [sys.executable, "-m", pkg] is how Python re-enters its own code.
+
+    While the launcher forced `compartment.cli menubar` onto every
+    invocation, each of those calls landed in argparse instead: the panel
+    could not read its own vault status, and read the "[--keyfile KEYFILE]"
+    out of argparse's usage line as a vault demanding a 2FA keyfile that had
+    never been set up."""
+    c = LAUNCHER.read_text(encoding="utf-8")
+    assert 'strcmp(user[0], "-m")' in c and 'strcmp(user[0], "-c")' in c, \
+        "-m and -c must pass through untouched"
+    body = c.split("int main")[1]
+    forced = body.index('"menubar"')
+    guard = body.index('strcmp(user[0], "-m")')
+    assert guard < forced, "the menubar subcommand must be conditional"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the bundle is macOS")
+@pytest.mark.parametrize("bundle", [
+    pathlib.Path("/Applications/Compartment.app"),
+    ROOT / "build" / "Compartment.app",
+])
+def test_a_built_launcher_really_runs_as_an_interpreter(bundle):
+    """The source assertion above cannot prove the compiled binary agrees."""
+    exe = bundle / "Contents" / "MacOS" / "Compartment"
+    if not exe.is_file():
+        pytest.skip(f"no bundle at {bundle}")
+    import subprocess
+    r = subprocess.run([str(exe), "-c", "import sys; print(sys.prefix)"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[:400]
+    assert "Resources/runtime" in r.stdout, r.stdout
+
+    v = subprocess.run([str(exe), "-m", "compartment.cli", "--version"],
+                       capture_output=True, text=True, timeout=120)
+    assert v.returncode == 0, v.stderr[:400]
+    assert "usage:" not in (v.stdout + v.stderr).lower(), \
+        "the CLI must run, not print argparse usage"
+
+
 def test_the_launcher_links_nothing_from_the_build_machine(tmp_path):
     """cc records whatever install name a dylib carries, and a standalone
     libpython carries the absolute path it was built at - inside the build

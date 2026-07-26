@@ -5,6 +5,8 @@ it writes is plain Python - so it is tested on every OS. `import compartment.men
 must stay AppKit-free for that to hold.
 """
 import json
+import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -161,10 +163,15 @@ def test_compartment_bin_prefers_the_environment_console_script(tmp_path,
 
 
 def test_state_runs_the_cli_through_our_own_interpreter():
-    """No dependence on finding a console script on PATH."""
+    """No dependence on finding a console script on PATH, and it must be OUR
+    interpreter - same prefix, so the CLI it imports is the one shipped
+    beside this app rather than whatever Python happens to be around."""
     argv = menubar._cli_argv()
-    assert argv[0] == sys.executable
     assert argv[1:] == ["-m", "compartment.cli"]
+    probe = subprocess.run([argv[0], "-c", "import sys; print(sys.prefix)"],
+                           capture_output=True, text=True, timeout=60)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == sys.prefix
 
 
 def test_auto_lock_labels_cover_every_choice():
@@ -291,3 +298,36 @@ def test_unlock_with_no_passphrase_never_runs_anything(monkeypatch):
                         lambda *a, **k: pytest.fail("should not shell out"))
     ok, note = menubar.unlock_vault("/v", "")
     assert not ok and "passphrase" in note
+
+
+def test_a_broken_cli_call_is_never_blamed_on_the_vault(monkeypatch):
+    """argparse prints "[--keyfile KEYFILE]" in its usage line. That once
+    reached the user as "needs its 2FA keyfile" on a vault that had no 2FA,
+    while the real fault was the app invoking its own CLI wrongly."""
+    class Failed:
+        returncode = 2
+        stdout = ""
+        stderr = ("usage: compartment [-h] [--vault VAULT] [--keyfile KEYFILE]\n"
+                  "compartment: error: unrecognized arguments: --vault /v unlock")
+
+    monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: Failed())
+    ok, note = menubar.unlock_vault("/v", "whatever")
+    assert not ok
+    assert "keyfile" not in note.lower(), note
+    assert "2fa" not in note.lower(), note
+
+
+def test_cli_argv_points_at_a_real_interpreter_not_the_app_launcher():
+    """Inside the .app, sys.executable is the bundle launcher, which always
+    runs `compartment.cli menubar` - so using it made every CLI call the
+    panel issued fail in argparse."""
+    argv = menubar._cli_argv()
+    assert argv[1:] == ["-m", "compartment.cli"]
+    exe = pathlib.Path(argv[0])
+    assert exe.exists(), exe
+    # The launcher lives in Contents/MacOS and is named for the app; a real
+    # interpreter never is.
+    assert exe.parent.name != "MacOS", f"{exe} is the bundle launcher"
+    probe = subprocess.run([str(exe), "-c", "import sys; print(sys.executable)"],
+                           capture_output=True, text=True, timeout=60)
+    assert probe.returncode == 0, probe.stderr
