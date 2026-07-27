@@ -397,6 +397,7 @@ def run(vault: str | None = None, show: bool = False,
                             NSFont, NSImage, NSMakeRect, NSMenu, NSMenuItem,
                             NSPanel, NSPopover, NSScreen, NSSegmentedControl,
                             NSClipView, NSScrollView,
+                            NSBitmapImageRep, NSGraphicsContext,
                             NSSecureTextField, NSStackView, NSStatusBar,
                             NSSwitch, NSTextField,
                             NSButton, NSView, NSViewController,
@@ -852,14 +853,33 @@ def run(vault: str | None = None, show: bool = False,
     _d("controller ready")
 
     if render_to:
-        # app.run() normally does this; without it the text system is not up
-        # and the snapshot comes out with controls but no glyphs at all.
+        # app.run() normally does this; without it the text system is not up.
         app.finishLaunching()
         body = ctrl.buildBody()
         body.layoutSubtreeIfNeeded()
         bounds = body.bounds()
-        rep = body.bitmapImageRepForCachingDisplayInRect_(bounds)
-        body.cacheDisplayInRect_toBitmapImageRep_(bounds, rep)
+        # Render through PDF, not cacheDisplayInRect. Caching a view that
+        # belongs to no window gives you the switches and the segmented
+        # control and not one glyph of text, because there is no window
+        # backing store for the text system to lay glyphs into. Ordering an
+        # offscreen window in does not help either: it draws as an inactive
+        # window, so even the controls lose their tint. The PDF path records
+        # glyphs vectorially with their fonts embedded and needs no window at
+        # all, so it captures the panel exactly as designed. Rasterise at 2x
+        # for a Retina-sharp asset.
+        pdf = body.dataWithPDFInsideRect_(bounds)
+        w, h = bounds.size.width, bounds.size.height
+        image = NSImage.alloc().initWithData_(pdf)
+        rep = (NSBitmapImageRep.alloc()
+               .initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+                   None, int(w * 2), int(h * 2), 8, 4, True, False,
+                   "NSCalibratedRGBColorSpace", 0, 0))
+        rep.setSize_((w, h))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.setCurrentContext_(
+            NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep))
+        image.drawInRect_(NSMakeRect(0, 0, w, h))
+        NSGraphicsContext.restoreGraphicsState()
         png = rep.representationUsingType_properties_(4, {})   # 4 = PNG
         ok = png.writeToFile_atomically_(render_to, True)
         print(f"rendered popover -> {render_to}" if ok
