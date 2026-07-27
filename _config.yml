@@ -1,0 +1,27 @@
+# GitHub Pages. The site exists so there is a URL Max owns for content to
+# point at - the repo's website field pointed at the PyPI package page, which
+# is a dead end for accumulated search authority.
+#
+# No separate landing copy: Jekyll falls back to README.md when there is no
+# index, so the site renders the README that is already reviewed and already
+# the front door. One source, one wording, nothing to keep in sync.
+title: Compartment
+theme: jekyll-theme-cayman
+
+# Everything that is code, build machinery or packaging. Without this Jekyll
+# walks the whole tree and publishes directory listings for src/ and tests/.
+exclude:
+  - src
+  - tests
+  - tools
+  - packaging
+  - install
+  - integrations
+  - build
+  - dist
+  - .venv
+  - .github
+  - pyproject.toml
+  - server.json
+  - glama.json
+  - RELEASING.md
