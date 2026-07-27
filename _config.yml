@@ -8,6 +8,12 @@
 title: Compartment
 theme: jekyll-theme-cayman
 
+# The card shown when this URL is posted to X, Slack, Discord or anywhere
+# else that reads Open Graph tags. Without it the link renders as a bare
+# grey box. Absolute, because Open Graph consumers do not resolve relative
+# paths. Regenerate with tools/make_social_card.py.
+image: https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/social-preview.png
+
 # Everything that is code, build machinery or packaging. Without this Jekyll
 # walks the whole tree and publishes directory listings for src/ and tests/.
 exclude:
