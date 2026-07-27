@@ -13,8 +13,8 @@ Attach all four, and list them together in the notes:
 |---|---|
 | `Compartment-<version>.pkg` | macOS, one click, with the optional menu bar utility |
 | `Compartment-<version>.dmg` | macOS, drag to Applications |
-| `compartment_memory_vault-<version>-py3-none-any.whl` | pip / offline installs, any OS |
-| `compartment_memory_vault-<version>.tar.gz` | source distribution, packagers, air-gapped builds |
+| `compartment-<version>-py3-none-any.whl` | pip / offline installs, any OS |
+| `compartment-<version>.tar.gz` | source distribution, packagers, air-gapped builds |
 
 GitHub adds "Source code (zip/tar.gz)" on its own. The notes should also carry
 the `pip install compartment` line for people who want the CLI and MCP
@@ -42,8 +42,8 @@ python tools/build_macos_app.py --pkg --dmg
 gh release create vX.Y.Z --title "…" --notes-file NOTES.md \
     build/Compartment-X.Y.Z.pkg \
     build/Compartment-X.Y.Z.dmg \
-    dist/compartment_memory_vault-X.Y.Z-py3-none-any.whl \
-    dist/compartment_memory_vault-X.Y.Z.tar.gz
+    dist/compartment-X.Y.Z-py3-none-any.whl \
+    dist/compartment-X.Y.Z.tar.gz
 
 # 5. the MCP registry entry tracks the version too. The registry token expires
 #    quickly, so log in immediately before publishing.
