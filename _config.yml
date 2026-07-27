@@ -12,7 +12,18 @@ theme: jekyll-theme-cayman
 # else that reads Open Graph tags. Without it the link renders as a bare
 # grey box. Absolute, because Open Graph consumers do not resolve relative
 # paths. Regenerate with tools/make_social_card.py.
-image: https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/social-preview.png
+#
+# It has to go through `defaults`, not a bare top-level `image:` key -
+# jekyll-seo-tag reads page.image, so a site-level key is silently ignored
+# and you get a page with no og:image and no sign of why.
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/social-preview.png
+
+twitter:
+  card: summary_large_image
 
 # Everything that is code, build machinery or packaging. Without this Jekyll
 # walks the whole tree and publishes directory listings for src/ and tests/.
