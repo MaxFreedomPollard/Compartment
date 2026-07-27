@@ -152,3 +152,33 @@ def test_login_helpers_report_instead_of_raising_off_windows():
     # No winreg here, so both must degrade to a message, not an exception.
     assert isinstance(systray.login_status(), str)
     assert systray.set_login(True).startswith("error:")
+
+
+# The panel used to draw itself at min(content, PANEL_MAX_HEIGHT) and simply
+# lose whatever fell below the line - no scrollbar, no ellipsis, nothing. The
+# change-password form was the casualty: it rendered one of its two boxes,
+# and the Save button and the "the two entries do not match" complaint were
+# both below the fold, so the form looked like it worked and changed nothing.
+def test_content_that_fits_is_drawn_whole_and_needs_no_scrollbar():
+    h, scrolling = systray.panel_geometry(300, systray.PANEL_MAX_HEIGHT)
+    assert (h, scrolling) == (300, False)
+
+
+def test_content_taller_than_the_panel_scrolls_rather_than_being_cut_off():
+    tall = systray.PANEL_MAX_HEIGHT * 3
+    h, scrolling = systray.panel_geometry(tall, systray.PANEL_MAX_HEIGHT)
+    assert scrolling, "overflow must scroll, never be silently clipped"
+    assert h == systray.PANEL_MAX_HEIGHT
+
+
+def test_the_panel_never_exceeds_its_maximum():
+    for content in (1, 100, 639, 640, 641, 5000):
+        h, _ = systray.panel_geometry(content, systray.PANEL_MAX_HEIGHT)
+        assert 0 < h <= systray.PANEL_MAX_HEIGHT, content
+
+
+def test_exactly_full_height_does_not_scroll():
+    # The boundary: equal to the maximum still fits, so no scrollbar appears.
+    assert systray.panel_geometry(systray.PANEL_MAX_HEIGHT,
+                                  systray.PANEL_MAX_HEIGHT) == (
+        systray.PANEL_MAX_HEIGHT, False)

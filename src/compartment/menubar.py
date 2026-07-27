@@ -396,6 +396,7 @@ def run(vault: str | None = None, show: bool = False,
                             NSRunningApplication,
                             NSFont, NSImage, NSMakeRect, NSMenu, NSMenuItem,
                             NSPanel, NSPopover, NSScreen, NSSegmentedControl,
+                            NSClipView, NSScrollView,
                             NSSecureTextField, NSStackView, NSStatusBar,
                             NSSwitch, NSTextField,
                             NSButton, NSView, NSViewController,
@@ -468,6 +469,17 @@ def run(vault: str | None = None, show: bool = False,
             CONTENT_WIDTH).setActive_(True)
         return b
 
+    class TopClip(NSClipView):
+        """A clip view whose origin is its top left corner.
+
+        AppKit's default is the bottom left, which inside a scroll view means
+        the panel opens showing its last line, with the title somewhere above
+        the fold. Flipping it makes "scrolled to the top" the resting state.
+        """
+
+        def isFlipped(self):
+            return True
+
     class Controller(NSObject):
         def init(self):
             self = objc.super(Controller, self).init()
@@ -485,8 +497,78 @@ def run(vault: str | None = None, show: bool = False,
             return self
 
         # ---- building the popover contents -----------------------------
+        @objc.python_method
+        def _finish(self, views):
+            stack = NSStackView.stackViewWithViews_(views)
+            stack.setOrientation_(_VERTICAL)
+            stack.setAlignment_(_LEADING)
+            stack.setSpacing_(6)
+            stack.setEdgeInsets_((CONTENT_INSET, CONTENT_INSET,
+                                  CONTENT_INSET, CONTENT_INSET))
+            stack.layoutSubtreeIfNeeded()
+            fit = stack.fittingSize()
+            stack.setFrameSize_((POPOVER_WIDTH, fit.height))
+            if fit.height <= POPOVER_MAX_HEIGHT:
+                return stack
+
+            # Taller than a popover is allowed to be. Scroll it. What this
+            # did before was cut the overflow off and say nothing, so the
+            # buttons below the fold were not merely out of reach - there
+            # was no sign they existed. That is how the passphrase form
+            # came to show one box out of two.
+            stack.setTranslatesAutoresizingMaskIntoConstraints_(True)
+            box = NSMakeRect(0, 0, POPOVER_WIDTH, POPOVER_MAX_HEIGHT)
+            scroll = NSScrollView.alloc().initWithFrame_(box)
+            scroll.setContentView_(TopClip.alloc().initWithFrame_(box))
+            scroll.setHasVerticalScroller_(True)
+            scroll.setDrawsBackground_(False)
+            scroll.setDocumentView_(stack)
+            return scroll
+
+        @objc.python_method
+        def buildChangeBody(self, st):
+            """Changing the passphrase gets the whole panel to itself.
+
+            The ordinary panel already fills POPOVER_MAX_HEIGHT, and this
+            popover clips instead of scrolling. Appending the fields to the
+            bottom of it put the second box, Save, and the error note below
+            the visible edge: you saw one box, pressed Return, and the save
+            failed its repeat check against an empty field you could neither
+            fill nor read the complaint about. A focused view cannot overflow.
+            """
+            def secure(placeholder):
+                f = NSSecureTextField.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, CONTENT_WIDTH, 24))
+                f.setPlaceholderString_(placeholder)
+                f.setTarget_(self)
+                f.setAction_("saveChangePw:")     # Return saves
+                return f
+
+            self.pw_new = secure("New passphrase")
+            self.pw_repeat = secure("Repeat it")
+            views = [row(label("Change password", 15, bold=True), _spacer()),
+                     label(summarise(st), 11, secondary=True),
+                     divider(),
+                     row(self.pw_new),
+                     row(self.pw_repeat)]
+            if self.change_note:
+                views.append(label(self.change_note, 11, secondary=True,
+                                   wrap=True))
+            views.append(label("Both boxes must match. There is no recovery "
+                               "phrase - if you forget this, the memories are "
+                               "unrecoverable.", 10, secondary=True, wrap=True))
+            save_b = NSButton.buttonWithTitle_target_action_("Save", self,
+                                                             "saveChangePw:")
+            save_b.setKeyEquivalent_("\r")
+            cancel_b = NSButton.buttonWithTitle_target_action_(
+                "Cancel", self, "cancelChangePw:")
+            views.append(row(save_b, cancel_b, _spacer()))
+            return self._finish(views)
+
         def buildBody(self):
             st = self.state
+            if self.changing_pw and st["exists"] and not st["locked"]:
+                return self.buildChangeBody(st)
             views = []
             title = row(label("Compartment", 15, bold=True),
                         label("locked" if st["locked"] else "unlocked", 11,
@@ -516,33 +598,11 @@ def run(vault: str | None = None, show: bool = False,
                 views.append(label("Stays unlocked until restart or Lock",
                                    10, secondary=True))
 
-            # Changing the passphrase needs the vault open, because rekey
-            # re-wraps a master key it can only hold while unlocked.
+            # Changing the passphrase is a separate view: see buildChangeBody.
             self.pw_new = self.pw_repeat = None
-            if st["exists"] and not st["locked"] and self.changing_pw:
-                def secure(placeholder):
-                    f = NSSecureTextField.alloc().initWithFrame_(
-                        NSMakeRect(0, 0, CONTENT_WIDTH - 92, 24))
-                    f.setPlaceholderString_(placeholder)
-                    f.setTarget_(self)
-                    f.setAction_("saveChangePw:")     # Return saves
-                    return f
-
-                self.pw_new = secure("New passphrase")
-                self.pw_repeat = secure("Repeat it")
-                save_b = NSButton.buttonWithTitle_target_action_(
-                    "Save", self, "saveChangePw:")
-                cancel_b = NSButton.buttonWithTitle_target_action_(
-                    "Cancel", self, "cancelChangePw:")
-                views.append(self.pw_new)
-                views.append(row(self.pw_repeat, save_b))
-                views.append(row(cancel_b, _spacer()))
-                if self.change_note:
-                    views.append(label(self.change_note, 11, secondary=True,
-                                       wrap=True))
-                views.append(label("There is no recovery phrase. If you forget "
-                                   "this, the memories are unrecoverable.",
-                                   10, secondary=True, wrap=True))
+            if self.change_note:
+                views.append(label(self.change_note, 11, secondary=True,
+                                   wrap=True))
             views.append(divider())
 
             views.append(label("SETTINGS", 10, bold=True, secondary=True))
@@ -613,17 +673,7 @@ def run(vault: str | None = None, show: bool = False,
             else:
                 views.append(row(refresh, _spacer(), quit_b))
 
-            stack = NSStackView.stackViewWithViews_(views)
-            stack.setOrientation_(_VERTICAL)
-            stack.setAlignment_(_LEADING)
-            stack.setSpacing_(6)
-            stack.setEdgeInsets_((CONTENT_INSET, CONTENT_INSET,
-                                  CONTENT_INSET, CONTENT_INSET))
-            stack.layoutSubtreeIfNeeded()
-            fit = stack.fittingSize()
-            stack.setFrameSize_((POPOVER_WIDTH,
-                                 min(fit.height, POPOVER_MAX_HEIGHT)))
-            return stack
+            return self._finish(views)
 
         # Not an action: PyObjC infers a selector from the method name, and
         # a name with no trailing underscores means "takes no arguments".

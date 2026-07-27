@@ -152,6 +152,18 @@ def set_login(enabled: bool) -> str:
         return f"error: {exc}"
 
 
+def panel_geometry(content: int, maximum: int) -> tuple[int, bool]:
+    """How tall to draw the panel, and whether it needs a scrollbar.
+
+    Split out from the Tk code so the rule is checked on every OS in CI: any
+    content taller than the panel scrolls. It is never cut off - the panel
+    losing its bottom silently is the whole reason this function exists.
+    """
+    if content > maximum:
+        return maximum, True
+    return max(content, 1), False
+
+
 # --- the app ---------------------------------------------------------------
 
 def run(vault: str | None = None, show: bool = False,
@@ -192,13 +204,52 @@ def run(vault: str | None = None, show: bool = False,
     root.withdraw()                                   # no stray empty window
     panel: dict = {"win": None, "note": None}
 
-    def build(win) -> None:
-        for child in win.winfo_children():
-            child.destroy()
-        state = fetch_state(vault_path)
-        frame = ttk.Frame(win, padding=14)
-        frame.pack(fill="both", expand=True)
+    def _content(frame, state) -> None:
+        """Everything the panel shows. Packs into `frame`, never sizes it -
+        deciding how tall the window gets is build()'s job, below."""
         s = state["settings"]
+
+        # Changing the passphrase gets the whole panel to itself, rather than
+        # being appended below a panel that is already full. Two boxes, Save
+        # and the reason the last attempt failed all belong on screen at once.
+        if state["exists"] and not state["locked"] and panel.get("changing"):
+            ttk.Label(frame, text="Change password", wraplength=WRAP,
+                      font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            ttk.Label(frame, text=summarise(state), wraplength=WRAP,
+                      foreground="#666").pack(anchor="w", pady=(2, 0))
+            ttk.Separator(frame).pack(fill="x", pady=10)
+            new = ttk.Entry(frame, show="•", width=34)
+            new.pack(anchor="w")
+            rep = ttk.Entry(frame, show="•", width=34)
+            rep.pack(anchor="w", pady=(6, 0))
+            new.focus_set()
+
+            def do_change(*_):
+                ok, note = change_passphrase(vault_path, new.get(), rep.get())
+                new.delete(0, "end")          # never leave one on screen
+                rep.delete(0, "end")
+                panel["changing"] = not ok
+                panel["change_note"] = note
+                refresh()
+
+            new.bind("<Return>", do_change)
+            rep.bind("<Return>", do_change)
+            if panel.get("change_note"):
+                ttk.Label(frame, text=panel["change_note"], wraplength=WRAP,
+                          foreground="#b00020").pack(anchor="w", pady=(8, 0))
+            ttk.Label(frame, text="Both boxes must match. There is no recovery "
+                                  "phrase - if you forget this, the memories "
+                                  "are unrecoverable.",
+                      foreground="#666", wraplength=WRAP,
+                      justify="left").pack(anchor="w", pady=(8, 0))
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", pady=(10, 0))
+            ttk.Button(bar, text="Save", command=do_change).pack(side="left")
+            ttk.Button(bar, text="Cancel",
+                       command=lambda: (panel.update(changing=False,
+                                                     change_note=None),
+                                        refresh())).pack(side="left", padx=6)
+            return
 
         ttk.Label(frame, text=summarise(state), wraplength=WRAP,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
@@ -275,43 +326,7 @@ def run(vault: str | None = None, show: bool = False,
                       wraplength=WRAP,
                       justify="left").pack(anchor="w", pady=(4, 0))
 
-        if state["exists"] and not state["locked"] and panel.get("changing"):
-            ttk.Separator(frame).pack(fill="x", pady=10)
-            ttk.Label(frame, text="CHANGE PASSWORD",
-                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
-            new = ttk.Entry(frame, show="•", width=34)
-            new.pack(anchor="w", pady=(6, 0))
-            rep = ttk.Entry(frame, show="•", width=34)
-            rep.pack(anchor="w", pady=(4, 0))
-            new.focus_set()
-
-            def do_change(*_):
-                ok, note = change_passphrase(vault_path, new.get(), rep.get())
-                # Never leave a passphrase sitting in a field on screen.
-                new.delete(0, "end")
-                rep.delete(0, "end")
-                panel["changing"] = not ok
-                panel["change_note"] = note
-                refresh()
-
-            new.bind("<Return>", do_change)
-            rep.bind("<Return>", do_change)
-            bar = ttk.Frame(frame)
-            bar.pack(fill="x", pady=(6, 0))
-            ttk.Button(bar, text="Save", command=do_change).pack(side="left")
-            ttk.Button(bar, text="Cancel",
-                       command=lambda: (panel.update(changing=False,
-                                                     change_note=None),
-                                        refresh())).pack(side="left", padx=6)
-            if panel.get("change_note"):
-                ttk.Label(frame, text=panel["change_note"],
-                          wraplength=WRAP).pack(anchor="w",
-                                                            pady=(4, 0))
-            ttk.Label(frame, text="There is no recovery phrase. If you forget "
-                                  "this, the memories are unrecoverable.",
-                      foreground="#666", wraplength=WRAP,
-                      justify="left").pack(anchor="w", pady=(4, 0))
-        elif panel.get("change_note"):
+        if panel.get("change_note"):        # result of the last attempt
             ttk.Label(frame, text=panel["change_note"],
                       wraplength=WRAP).pack(anchor="w", pady=(8, 0))
 
@@ -332,10 +347,56 @@ def run(vault: str | None = None, show: bool = False,
                                             refresh())).pack(side="left", padx=6)
         ttk.Button(buttons, text="Quit", command=quit_app).pack(side="right")
 
+    def build(win) -> None:
+        """Fill the window, and give it a scrollbar if the content overflows.
+
+        The content goes inside a canvas rather than straight into the window.
+        A fixed-height window cut its own bottom off and said nothing about
+        it, which is how the passphrase form came to show one box out of two:
+        the second box and the Save button were not merely out of reach, there
+        was no sign on screen that they existed at all.
+        """
+        for child in win.winfo_children():
+            child.destroy()
+        state = fetch_state(vault_path)
+
+        canvas = tk.Canvas(win, highlightthickness=0, borderwidth=0, width=PW)
+        try:                                  # match the themed background
+            canvas.configure(background=ttk.Style().lookup("TFrame",
+                                                           "background"))
+        except tk.TclError:                   # a theme without one: leave it
+            pass
+        vbar = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        frame = ttk.Frame(canvas, padding=14)
+        canvas.create_window((0, 0), window=frame, anchor="nw", width=PW)
+
+        _content(frame, state)
+
+        frame.update_idletasks()
+        need = frame.winfo_reqheight()
+        height, scrolling = panel_geometry(need, PMH)
+        canvas.configure(height=height, scrollregion=(0, 0, PW, need))
+        if scrolling:
+            vbar.pack(side="right", fill="y")
+            # Bound on the window, not the canvas: the content covers the
+            # canvas, so the wheel event never reaches it. Windows reports
+            # the delta in multiples of 120.
+            win.bind("<MouseWheel>",
+                     lambda e: canvas.yview_scroll(-(e.delta // 120), "units"))
+            vbar.update_idletasks()
+            panel["scroll_w"] = vbar.winfo_reqwidth()
+        else:
+            win.unbind("<MouseWheel>")
+            panel["scroll_w"] = 0
+
     def place(win) -> None:
         """Bottom right, above the taskbar, where the tray icon is."""
         win.update_idletasks()
-        w = PW
+        # The scrollbar sits beside the content, so widen the window by it
+        # rather than letting it eat a strip off the right of every line.
+        w = PW + panel.get("scroll_w", 0)
         h = min(win.winfo_reqheight(), PMH)
         x = win.winfo_screenwidth() - w - 12
         y = win.winfo_screenheight() - h - TBM
