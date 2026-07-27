@@ -1,7 +1,6 @@
 # Compartment Security Model
 
-Honest threat model. Read the "cannot protect against" section too - a
-security product that claims everything protects nothing.
+Honest threat model. Read the "cannot protect against" section too. I can honestly say Compartment has the best security of any vector memory. Important, as vector memory literally holds the entire computer's memory and essentially all chat logs + everything else from all operations. Vector memory is the #1 target for hackers, because of it's high value and (until now) total lack of any security.
 
 ## Cryptography
 
