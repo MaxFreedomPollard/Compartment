@@ -14,7 +14,7 @@ import uuid
 
 import numpy as np
 
-from . import crypto
+from . import crypto, wire
 from .crypto import CryptoError
 
 SCHEMA = """
@@ -110,7 +110,7 @@ class Store:
         rid = record_id or uuid.uuid4().hex
         rk, wrapped = crypto.new_record_key(master_key, rid)
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
-                         aad=b"engram-record-body:" + rid.encode())
+                         aad=wire.record_body(rid)[0])
         now = time.time()
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
@@ -129,8 +129,34 @@ class Store:
 
     def decrypt_text(self, row: sqlite3.Row, master_key: bytes) -> str:
         rk = crypto.unwrap_record_key(master_key, row["id"], row["key_wrapped"])
-        body = crypto.unseal(rk, row["ct"], aad=b"engram-record-body:" + row["id"].encode())
+        body = crypto.unseal_any(rk, row["ct"], *wire.record_body(row["id"]))
         return json.loads(body)["text"]
+
+    def migrate_wire(self, master_key: bytes) -> int:
+        """Rewrite every record under the current associated data.
+
+        Records are the one place the labels do not migrate for free: a row's
+        key wrap and ciphertext are written on insert and never touched again,
+        so without this pass every read of every pre-2.2 record would pay a
+        failed AEAD open before the one that works, forever. Vault.unlock
+        calls this once and records it in the header.
+
+        The record key is kept and re-wrapped rather than rotated, so the
+        plaintext is the only thing that round-trips. Nothing is written to
+        disk here: this mutates the in-memory database, and the caller's
+        save() is what makes it real, atomically. If any row fails to decrypt
+        the error propagates and no save happens, so a vault is never left
+        half-converted."""
+        rows = self.conn.execute("SELECT id, ct, key_wrapped FROM records").fetchall()
+        for row in rows:
+            rid = row["id"]
+            rk = crypto.unwrap_record_key(master_key, rid, row["key_wrapped"])
+            body = crypto.unseal_any(rk, row["ct"], *wire.record_body(rid))
+            self.conn.execute(
+                "UPDATE records SET ct = ?, key_wrapped = ? WHERE id = ?",
+                (crypto.seal(rk, body, aad=wire.record_body(rid)[0]),
+                 crypto.wrap_record_key(master_key, rid, rk), rid))
+        return len(rows)
 
     def delete(self, record_id: str, shred: bool) -> bool:
         """Delete a record. shred=True also VACUUMs so the content (including

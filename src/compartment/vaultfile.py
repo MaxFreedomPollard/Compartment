@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from nacl.signing import SigningKey, VerifyKey
 
-from . import crypto
+from . import crypto, wire
 from .crypto import CryptoError, TamperError
 
 MAGIC = b"NUCV"
@@ -94,11 +94,11 @@ def _atomic_replace(tmp: str, path: str) -> None:
 
 
 def _payload_aad(vault_id: str) -> bytes:
-    return b"engram-payload:" + vault_id.encode()
+    return wire.payload(vault_id)[0]
 
 
 def _journal_aad(vault_id: str, seq: int) -> bytes:
-    return b"engram-journal:" + vault_id.encode() + b":" + struct.pack(">Q", seq)
+    return wire.journal(vault_id, seq)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +188,16 @@ def read_vault_file(path: str) -> LoadedVaultFile:
 
 
 def decrypt_payload(header: VaultHeader, payload_ct: bytes, master_key: bytes) -> dict[str, bytes]:
-    plain = crypto.unseal(master_key, payload_ct, aad=_payload_aad(header.vault_id))
+    plain = crypto.unseal_any(master_key, payload_ct, *wire.payload(header.vault_id))
     return unpack_sections(plain)
 
 
 def decrypt_journal(header: VaultHeader, journal_cts: list[bytes], master_key: bytes) -> list[dict]:
+    """Entries are decrypted one at a time and each falls back on its own, so
+    a vault upgraded mid-journal (older entries, newer appends) still replays."""
     entries = []
     for seq, ct in enumerate(journal_cts):
-        plain = crypto.unseal(master_key, ct, aad=_journal_aad(header.vault_id, seq))
+        plain = crypto.unseal_any(master_key, ct, *wire.journal(header.vault_id, seq))
         entries.append(json.loads(plain))
     return entries
 

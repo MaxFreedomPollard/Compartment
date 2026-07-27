@@ -20,7 +20,7 @@ import struct
 import numpy as np
 from nacl.signing import SigningKey, VerifyKey
 
-from . import crypto
+from . import crypto, wire
 from .crypto import CryptoError, TamperError
 from .vaultfile import pack_sections, unpack_sections
 
@@ -71,7 +71,7 @@ def build_pack(*, name: str, version: str, description: str, records: list[dict]
     if passphrase is not None:
         salt = secrets.token_bytes(16)
         key = crypto.derive_key(passphrase.encode(), salt)
-        body = crypto.seal(key, body, aad=b"engram-pack:" + name.encode())
+        body = crypto.seal(key, body, aad=wire.pack(name)[0])
         header["kdf"] = crypto.DEFAULT_KDF
         header["salt"] = salt.hex()
     header["content_sha256"] = crypto.sha256(body)
@@ -119,7 +119,7 @@ def read_pack(blob: bytes, passphrase: str | None = None
             raise PackError(f"Pack {header['name']!r} is encrypted; passphrase required")
         key = crypto.derive_key(passphrase.encode(), bytes.fromhex(header["salt"]),
                                 header["kdf"])
-        body = crypto.unseal(key, body, aad=b"engram-pack:" + header["name"].encode())
+        body = crypto.unseal_any(key, body, *wire.pack(header["name"]))
 
     sections = unpack_sections(body)
     records = [json.loads(l) for l in

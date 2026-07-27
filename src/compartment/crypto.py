@@ -19,6 +19,8 @@ from nacl.bindings import (
     crypto_aead_xchacha20poly1305_ietf_encrypt,
 )
 
+from . import wire
+
 KEY_LEN = 32
 NONCE_LEN = 24
 
@@ -81,6 +83,35 @@ def unseal(key: bytes, blob: bytes, aad: bytes = b"") -> bytes:
         ) from exc
 
 
+def unseal_which(key: bytes, blob: bytes, aad: bytes,
+                 legacy: tuple[bytes, ...] = ()) -> tuple[bytes, bytes]:
+    """unseal(), accepting associated data written by an older build.
+
+    Returns (plaintext, the aad that actually authenticated), so a caller can
+    tell a migrated blob from one still carrying a legacy label and rewrite it.
+
+    The current spelling is tried first, so anything already migrated costs
+    exactly one AEAD open. Legacy spellings are tried in order only after that
+    fails, which is what lets a pre-rename vault open at all. If none of them
+    authenticate the data really is tampered with, or the key really is wrong,
+    and the original error is raised."""
+    try:
+        return unseal(key, blob, aad=aad), aad
+    except TamperError:
+        for old in legacy:
+            try:
+                return unseal(key, blob, aad=old), old
+            except TamperError:
+                continue
+        raise
+
+
+def unseal_any(key: bytes, blob: bytes, aad: bytes,
+               legacy: tuple[bytes, ...] = ()) -> bytes:
+    """unseal_which() when the caller does not care which label was used."""
+    return unseal_which(key, blob, aad, legacy)[0]
+
+
 def wipe(buf: bytearray) -> None:
     """Best-effort zeroization (Python cannot guarantee no copies exist)."""
     for i in range(len(buf)):
@@ -99,7 +130,7 @@ def make_passphrase_slot(master_key: bytes, passphrase: str, kdf: dict | None = 
         "type": "passphrase",
         "kdf": kdf,
         "salt": salt.hex(),
-        "wrapped": seal(wrap_key, master_key, aad=b"engram-keyslot").hex(),
+        "wrapped": seal(wrap_key, master_key, aad=wire.KEYSLOT).hex(),
     }
 
 
@@ -118,7 +149,7 @@ def make_recovery_slot(master_key: bytes, kdf: dict | None = None) -> tuple[dict
 # Domain separator between the knowledge factor (passphrase) and the
 # possession factor (keyfile bytes) before the KDF. Both factors feed
 # Argon2id, so two-factor unlock is enforced by arithmetic, not policy.
-KEYFILE_SEP = b"\x1f engram-2fa \x1f"
+KEYFILE_SEP = wire.KEYFILE_SEP
 KEYFILE_LEN = 32
 
 
@@ -137,19 +168,57 @@ def make_keyfile_slot(master_key: bytes, passphrase: str, keyfile: bytes,
         "kdf": kdf,
         "salt": salt.hex(),
         "keyfile_id": sha256(keyfile)[:16],   # UX only: detect the WRONG file
-        "wrapped": seal(wrap_key, master_key, aad=b"engram-keyslot").hex(),
+        "wrapped": seal(wrap_key, master_key, aad=wire.KEYSLOT).hex(),
     }
 
 
-def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
-    """Unwrap the master key from one slot."""
+def _slot_secrets(slot: dict, secret: str, keyfile: bytes | None) -> list[bytes]:
+    """The KDF inputs worth trying for this slot, current spelling first.
+
+    Only a two-factor slot has more than one. Its separator is a KDF input
+    rather than associated data, so an older separator derives a different
+    wrap key and can only be ruled out by deriving again."""
     raw = secret.encode("utf-8")
-    if slot["type"] == "passphrase+keyfile":
-        if keyfile is None:
-            raise CryptoError("This keyslot requires a keyfile")
-        raw = raw + KEYFILE_SEP + keyfile
-    wrap_key = derive_key(raw, bytes.fromhex(slot["salt"]), slot["kdf"])
-    return unseal(wrap_key, bytes.fromhex(slot["wrapped"]), aad=b"engram-keyslot")
+    if slot["type"] != "passphrase+keyfile":
+        return [raw]
+    if keyfile is None:
+        raise CryptoError("This keyslot requires a keyfile")
+    return [raw + sep + keyfile
+            for sep in (wire.KEYFILE_SEP, *wire.KEYFILE_SEP_LEGACY)]
+
+
+def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
+    """Unwrap the master key from one slot.
+
+    A slot written before 2.2 carries the legacy associated data, and a
+    two-factor one the legacy keyfile separator. Both still open. The slot is
+    then rewritten in place under the current spelling, so it migrates the
+    first time its credential is used; the caller persists that by saving the
+    header. Re-sealing only happens when something was actually legacy, or
+    every unlock would dirty the header and force a needless vault rewrite."""
+    salt, kdf = bytes.fromhex(slot["salt"]), slot["kdf"]
+    wrapped = bytes.fromhex(slot["wrapped"])
+    failure: TamperError | None = None
+    for i, raw in enumerate(_slot_secrets(slot, secret, keyfile)):
+        wrap_key = derive_key(raw, salt, kdf)
+        try:
+            master, used = unseal_which(wrap_key, wrapped, wire.KEYSLOT,
+                                        wire.KEYSLOT_LEGACY)
+        except TamperError as exc:
+            failure = exc
+            continue
+        if i:
+            # legacy separator: the wrap key itself is stale, so the slot has
+            # to be built again from scratch (a second Argon2id pass, once).
+            fresh = make_keyfile_slot(master, secret, keyfile, kdf)
+            fresh["type"] = slot["type"]
+            slot.clear()
+            slot.update(fresh)
+        elif used != wire.KEYSLOT:
+            # same wrap key, only the associated data moves. Free.
+            slot["wrapped"] = seal(wrap_key, master, aad=wire.KEYSLOT).hex()
+        return master
+    raise failure if failure is not None else TamperError("Keyslot did not open")
 
 
 def unwrap_master(keyslots: list[dict], secret: str,
@@ -190,16 +259,20 @@ def normalize_recovery(text: str) -> str:
 # Per-record keys → crypto-shred
 # ---------------------------------------------------------------------------
 
+def wrap_record_key(master_key: bytes, record_id: str, record_key: bytes) -> bytes:
+    aad, _ = wire.record_key(record_id)
+    return seal(master_key, record_key, aad=aad)
+
+
 def new_record_key(master_key: bytes, record_id: str) -> tuple[bytes, bytes]:
     """Returns (record_key, wrapped_record_key). Destroying the wrapped key
     makes the record's ciphertext permanently undecryptable (crypto-shred)."""
     rk = new_key()
-    wrapped = seal(master_key, rk, aad=b"engram-record:" + record_id.encode())
-    return rk, wrapped
+    return rk, wrap_record_key(master_key, record_id, rk)
 
 
 def unwrap_record_key(master_key: bytes, record_id: str, wrapped: bytes) -> bytes:
-    return unseal(master_key, wrapped, aad=b"engram-record:" + record_id.encode())
+    return unseal_any(master_key, wrapped, *wire.record_key(record_id))
 
 
 # 256 short, common, distinct words for recovery phrases (16 words = 128 bits).

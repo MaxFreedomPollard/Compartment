@@ -27,7 +27,7 @@ offset  size  field
   "payload_len": 12345,
   "model":       {"name": "...", "sha256": "...", "dim": 384},
   "manifest":    null | Manifest,
-  "extra":       {"creator": "..."}
+  "extra":       {"creator": "...", "wire": 2}
 }
 ```
 
@@ -35,6 +35,20 @@ The header is plaintext by design: it contains only public parameters
 (never secrets), and must be readable to attempt unlock. Its integrity is
 enforced indirectly: every ciphertext binds the `vault_id` in its AAD, and
 keyslot wrapping fails AEAD auth if slots are altered.
+
+`extra.wire` is the spelling of the AAD labels in this file, absent meaning 1:
+
+| | labels |
+|---|---|
+| 1 | `engram-keyslot`, `engram-payload:`, `engram-record:`, `engram-record-body:`, `engram-journal:`, `engram-pack:`, `engram-session:`, and `\x1f engram-2fa \x1f` |
+| 2 | the `compartment-` spellings used throughout this document |
+
+Both are readable. A reader tries the current label and falls back to the
+legacy one; a writer only ever emits the current label. Opening a `wire: 1`
+vault therefore rewrites it as `wire: 2` in place, which is a relabelling and
+not a re-encryption: the master key, the per-record keys and every plaintext
+are unchanged. An implementation that drops the legacy labels cannot open any
+vault written before 2.2.
 
 ### KeySlot
 

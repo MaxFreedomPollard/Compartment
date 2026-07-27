@@ -25,7 +25,7 @@ import uuid
 
 import numpy as np
 
-from . import audit, crypto, vaultfile
+from . import audit, crypto, vaultfile, wire
 from .platforms import FileLock
 from .acl import AclError, VaultConfig
 from .crypto import CryptoError, TamperError
@@ -140,7 +140,7 @@ class Vault:
             keyslots=[slot_pw],
             payload_len=0,
             model={"name": model_name, "sha256": emb.model_sha256, "dim": emb.dim},
-            extra={"creator": creator},
+            extra={"creator": creator, "wire": wire.WIRE_FORMAT},
         )
         db = Store()
         db.set_meta("model_name", model_name)
@@ -164,9 +164,14 @@ class Vault:
         if raw_key is not None:
             master = raw_key
             # verify the key actually opens this vault (AEAD auth below)
+            slots_migrated = False
         elif passphrase is not None:
+            # open_slot rewrites a pre-2.2 keyslot in place as it opens it, so
+            # compare rather than trust: whatever changed has to reach disk.
+            before = crypto.canonical_json(loaded.header.keyslots)
             master = crypto.unwrap_master(loaded.header.keyslots, passphrase,
                                           keyfile=keyfile)
+            slots_migrated = crypto.canonical_json(loaded.header.keyslots) != before
         else:
             raise CryptoError("No credential provided (passphrase or key)")
         sections = vaultfile.decrypt_payload(loaded.header, loaded.payload_ct, master)
@@ -180,7 +185,8 @@ class Vault:
         for e in entries:
             v._replay(e)
         merged = v._merge_legacy_starter()
-        if entries or loaded.truncated_tail or merged:
+        rewired = v._migrate_wire_format()
+        if entries or loaded.truncated_tail or merged or rewired or slots_migrated:
             if loaded.truncated_tail:
                 print("notice: discarded one unacknowledged (crash-truncated) write")
             v.save()  # compact replayed journal into the payload
@@ -198,6 +204,24 @@ class Vault:
             v._embedder = None  # caller must reembed() before searching
         v._rebuild_index()
         return v
+
+    def _migrate_wire_format(self) -> int:
+        """Bring a vault written by an older build onto the current labels.
+
+        Compartment was engRAM until 1.15.0 and the name was still in the
+        bytes until 2.2: associated data, KDF context, keychain identity. See
+        wire.py for what those are and why they are not branding.
+
+        Almost all of it moves for free, because the payload and journal are
+        resealed on every save anyway. Records are the exception, so they get
+        an explicit pass here. It runs once, gated on a header marker, and
+        writes nothing itself: the caller's save() commits the whole thing
+        atomically, or an exception means none of it lands."""
+        if self.header.extra.get("wire", 1) >= wire.WIRE_FORMAT:
+            return 0
+        n = self.db.migrate_wire(self._master)
+        self.header.extra["wire"] = wire.WIRE_FORMAT
+        return n or 1   # truthy even for an empty vault: the marker must save
 
     def _merge_legacy_starter(self) -> int:
         """One-time reorganization: fold the legacy read-only packs/starter
@@ -822,21 +846,33 @@ class Vault:
 # macOS Keychain integration (optional keyslot type "keychain")
 # ---------------------------------------------------------------------------
 
-def _keychain_service(path: str) -> str:
-    """Keychain identity for a vault.
+def _keychain_names(path: str) -> list[tuple[str, str]]:
+    """(account, service) pairs identifying this vault's Keychain item,
+    current spelling first.
 
-    Frozen at the pre-rename spelling, like the on-disk constants: this names
-    a credential macOS already stored. Renaming it does not migrate anything,
-    it just stops finding the item, and the vault reports itself locked with
-    no indication why."""
-    return f"engram-vault:{os.path.abspath(path)}"
+    These name a credential macOS has already stored, so they behave like the
+    on-disk labels: renaming does not move the item, it just stops finding it,
+    and the vault would report itself locked with no indication why. The
+    legacy pair is therefore still looked up, and keychain_get moves the item
+    across the first time it finds one."""
+    abspath = os.path.abspath(path)
+    pairs = [(wire.KEYCHAIN_ACCOUNT, wire.KEYCHAIN_SERVICE + abspath)]
+    pairs += [(acct, svc + abspath)
+              for acct in wire.KEYCHAIN_ACCOUNT_LEGACY
+              for svc in wire.KEYCHAIN_SERVICE_LEGACY]
+    return pairs
+
+
+def _keychain_service(path: str) -> str:
+    return wire.KEYCHAIN_SERVICE + os.path.abspath(path)
 
 
 def keychain_store(path: str, master_key: bytes) -> None:
     if platform.system() != "Darwin":
         raise CryptoError("Keychain unlock is only available on macOS")
     subprocess.run(
-        ["security", "add-generic-password", "-U", "-a", "engram",
+        ["security", "add-generic-password", "-U",
+         "-a", wire.KEYCHAIN_ACCOUNT,
          "-s", _keychain_service(path), "-w", master_key.hex()],
         check=True, capture_output=True)
 
@@ -844,23 +880,35 @@ def keychain_store(path: str, master_key: bytes) -> None:
 def keychain_get(path: str) -> bytes | None:
     if platform.system() != "Darwin":
         return None
-    r = subprocess.run(
-        ["security", "find-generic-password", "-a", "engram",
-         "-s", _keychain_service(path), "-w"],
-        capture_output=True, text=True)
-    if r.returncode != 0:
-        return None
-    try:
-        return bytes.fromhex(r.stdout.strip())
-    except ValueError:
-        return None
+    for i, (account, service) in enumerate(_keychain_names(path)):
+        r = subprocess.run(
+            ["security", "find-generic-password", "-a", account,
+             "-s", service, "-w"],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            continue
+        try:
+            key = bytes.fromhex(r.stdout.strip())
+        except ValueError:
+            return None
+        if i:
+            # found under the pre-rename name: re-file it, then drop the old
+            # item so this lookup costs one call again from here on.
+            keychain_store(path, key)
+            subprocess.run(
+                ["security", "delete-generic-password", "-a", account,
+                 "-s", service], capture_output=True)
+        return key
+    return None
 
 
 def keychain_clear(path: str) -> bool:
     if platform.system() != "Darwin":
         return False
-    r = subprocess.run(
-        ["security", "delete-generic-password", "-a", "engram",
-         "-s", _keychain_service(path)],
-        capture_output=True)
-    return r.returncode == 0
+    cleared = False
+    for account, service in _keychain_names(path):
+        r = subprocess.run(
+            ["security", "delete-generic-password", "-a", account,
+             "-s", service], capture_output=True)
+        cleared = cleared or r.returncode == 0
+    return cleared
