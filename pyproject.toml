@@ -8,6 +8,27 @@ version = "2.1"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["mcp", "model-context-protocol", "memory", "agent-memory",
+            "vector-database", "semantic-search", "encryption", "offline",
+            "local-first", "claude", "claude-code", "privacy", "rag"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Environment :: Console",
+    "Environment :: MacOS X",
+    "Operating System :: OS Independent",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database :: Database Engines/Servers",
+    "Typing :: Typed",
+]
 dependencies = [
     "pynacl>=1.5",
     "argon2-cffi>=23.1",
@@ -16,6 +37,18 @@ dependencies = [
     "numpy>=1.26",
     "mcp>=1.0",
 ]
+
+# PyPI is the repo's declared homepage, so it is a real front door - and
+# without these it is a dead end: no Source link, no Issues link, nothing
+# carrying a reader back to GitHub. Directories that scrape PyPI were
+# producing a listing with no repository link at all.
+[project.urls]
+Homepage = "https://github.com/MaxFreedomPollard/Compartment"
+Source = "https://github.com/MaxFreedomPollard/Compartment"
+Issues = "https://github.com/MaxFreedomPollard/Compartment/issues"
+Changelog = "https://github.com/MaxFreedomPollard/Compartment/releases"
+Documentation = "https://github.com/MaxFreedomPollard/Compartment#readme"
+Security = "https://github.com/MaxFreedomPollard/Compartment/blob/main/SECURITY.md"
 
 [project.scripts]
 compartment = "compartment.cli:main"
