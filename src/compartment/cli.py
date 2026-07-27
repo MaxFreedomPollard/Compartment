@@ -468,6 +468,25 @@ def cmd_audit(args) -> None:
         sys.exit(2)
 
 
+def cmd_audit_repair(args) -> None:
+    v = _open_vault(args)
+    try:
+        changed, first = audit.relink(v.db.conn)
+    except ValueError as exc:
+        _die(str(exc))
+    if not changed:
+        _print({"ok": True, "relinked": 0, "message": "audit chain already intact"})
+        return
+    v._audit_and_capture("user", "audit-repair",
+                         f"relinked {changed} entries from seq {first}")
+    v.save()
+    ok, n, msg = audit.verify(v.db.conn)
+    _print({"ok": ok, "relinked": changed, "first_break_at_seq": first,
+            "entries": n, "message": msg, "head": audit.head(v.db.conn)})
+    if not ok:
+        sys.exit(2)
+
+
 def cmd_verify(args) -> None:
     loaded = read_vault_file(args.vault)   # structure + format checks
     out = {"vault": args.vault, "format": "ok",
@@ -1165,6 +1184,8 @@ def main(argv: list[str] | None = None) -> None:
     pa_sub = pa.add_subparsers(dest="audit_cmd", required=True)
     p = pa_sub.add_parser("verify", help="verify the hash chain")
     p.set_defaults(fn=cmd_audit)
+    p = pa_sub.add_parser("repair", help="re-link a chain broken by an older build")
+    p.set_defaults(fn=cmd_audit_repair)
 
     p = sub.add_parser("verify", help="check vault structure + signed manifest")
     p.set_defaults(fn=cmd_verify)

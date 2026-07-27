@@ -359,12 +359,14 @@ class Vault:
             self.db.delete_relation(e["id"])
         else:
             raise TamperError(f"Unknown journal op {op!r}")
+        # Link to the head this log actually has, keeping the original time.
+        # The writer's own head may never have reached disk - a read is audited
+        # in RAM and persists only on save - so replaying its prev_hash
+        # verbatim leaves a link pointing at an entry no one else has, and
+        # verify stops there permanently. The journal entry's contents are
+        # already AEAD-authenticated, so nothing is lost by re-linking.
         a = e["audit"]
-        self.db.conn.execute(
-            "INSERT INTO audit (ts, caller, op, detail, prev_hash, hash)"
-            " VALUES (?,?,?,?,?,?)",
-            (a["ts"], a["caller"], a["op"], a["detail"], a["prev_hash"], a["hash"]),
-        )
+        audit.append(self.db.conn, a["caller"], a["op"], a["detail"], ts=a["ts"])
 
     def _audit_and_capture(self, caller: str, op: str, detail: str) -> dict:
         audit.append(self.db.conn, caller, op, detail)
