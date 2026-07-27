@@ -23,12 +23,18 @@ server without the app.
 ## Steps
 
 ```bash
-# 1. version in lockstep - all three, or the PyPI publish silently no-ops
+# 1. version in lockstep, or the PyPI publish silently no-ops
 #    (publish.yml uses skip-existing, so a release that reuses a version
 #    uploads nothing and the README on PyPI never updates)
-#      pyproject.toml    version = "X.Y.Z"
-#      src/compartment/__init__.py    __version__ = "X.Y.Z"
-#      server.json       both "version" fields
+#
+#      pyproject.toml                  version    = "2.1"
+#      src/compartment/__init__.py     __version__ = "2.1"
+#      server.json   packages[0].version = "2.1"    the string PyPI serves
+#      server.json   version             = "2.1.0"  the SEMVER form
+#
+#    The two server.json fields are deliberately NOT the same value. Step 5
+#    explains why; setting them both to "2.1" is what published a registry
+#    entry that never became latest.
 
 python -m pytest -q                          # must be green
 
@@ -45,9 +51,24 @@ gh release create vX.Y.Z --title "…" --notes-file NOTES.md \
     dist/compartment-X.Y.Z-py3-none-any.whl \
     dist/compartment-X.Y.Z.tar.gz
 
-# 5. the MCP registry entry tracks the version too. The registry token expires
-#    quickly, so log in immediately before publishing.
-mcp-publisher login github --token "$(gh auth token)" && mcp-publisher publish
+# 5. the MCP registry entry tracks the version too. Three things bite here.
+#
+#    a) The registry picks "latest" by SEMVER ordering, at publish time. Our
+#       version numbers are plain (2, 2.1) and plain numbers are not valid
+#       semver, so a bare "2.1" does NOT outrank an older "1.15.0" and the
+#       old entry keeps isLatest. Hence the split in step 1: `version` gets
+#       the semver form, `packages[0].version` gets the string PyPI serves.
+#       The two fields are independent and the registry treats them so.
+#    b) Marking a version deprecated does NOT recompute isLatest. A
+#       deprecated version can still be flagged latest. Deprecation alone
+#       never repairs a bad pin; only publishing a higher semver does.
+#    c) Published versions are immutable. A wrong pin cannot be edited, only
+#       superseded, so it is worth getting right the first time.
+#
+#    The registry token expires within minutes, so log in immediately before
+#    every publish or status call, even if you logged in one command ago.
+mcp-publisher login github --token "$(gh auth token)" \
+    && mcp-publisher validate && mcp-publisher publish
 ```
 
 ## Verify, do not assume
@@ -59,6 +80,16 @@ mcp-publisher login github --token "$(gh auth token)" && mcp-publisher publish
   `HTTP/2 200`, with a `content-length` matching the artifact.
 - **PyPI picked it up.** The release triggers `publish.yml`; confirm the new
   version appears at pypi.org/project/compartment.
+- **The registry hands out a pin that installs.** Whichever entry carries
+  `isLatest: true` must name a PyPI version that exists, or every
+  `uvx compartment@<version> serve` fails outright:
+
+  ```bash
+  curl -s https://registry.modelcontextprotocol.io/v0.1/servers/\
+  io.github.MaxFreedomPollard%2Fcompartment/versions
+  # find isLatest true, then check its packages[0].version:
+  curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/compartment/<that>/json
+  ```
 
 Uploading ~250 MB of installers takes minutes; run it in the background rather
 than letting a foreground timeout kill it half way.
