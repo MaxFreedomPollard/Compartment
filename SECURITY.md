@@ -9,10 +9,13 @@ Honest threat model. Read the "cannot protect against" section too. I can honest
 | All encryption at rest | XChaCha20-Poly1305 AEAD (libsodium via PyNaCl) |
 | Key derivation | Argon2id (t=3, m=64MiB, p=4; params stored in header) |
 | Keyslots | LUKS-style: random 256-bit master key wrapped per slot |
-| Recovery | 16 words from a 256-word list = 128 bits, own keyslot |
+| Recovery | none. Your passphrase is the only credential; nothing is generated for you |
 | Per-record keys | wrapped by master key → crypto-shred on `forget --shred` |
 | Signing (vaults + packs) | Ed25519 |
 | Integrity | AEAD tags everywhere + hash-chained audit log |
+
+Vaults created before 1.15.0 were issued a 16-word recovery phrase in its own
+keyslot. Those still open with that phrase, but no new vault is given one.
 
 No homemade crypto. AAD binds every ciphertext to its role and vault
 (payloads, journal entries by sequence number, keyslots, record bodies by
