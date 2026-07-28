@@ -254,3 +254,33 @@ def test_the_panel_knows_before_anything_is_clicked(tmp_path, monkeypatch):
                                    "openclaw": False})
     st = menubar.fetch_state(str(tmp_path / "nope.vault"))
     assert st["integrations"]["claude"] is True
+
+
+def test_the_capture_hook_alone_is_not_a_connection(fake_home, monkeypatch):
+    """The hook is not an MCP server. With it installed and nothing
+    registered the model has no memory tools at all, so reporting connected
+    put a green light on a machine that could not recall anything on
+    purpose."""
+    from compartment import claude_hooks
+    monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: True)
+    assert menubar.integration_status("/v")["claude"] is False
+
+
+def test_claude_desktop_registration_counts_as_connected(fake_home,
+                                                         monkeypatch):
+    """Claude Desktop keeps its servers in its own file. Reading only Claude
+    Code's meant a Desktop-only machine could never report connected."""
+    from compartment import claude_desktop
+    cfg = fake_home / "claude_desktop_config.json"
+    cfg.write_text(json.dumps(
+        {"mcpServers": {"compartment": {"command": "compartment"}}}))
+    monkeypatch.setattr(claude_desktop, "config_path", lambda: cfg)
+    assert menubar.integration_status("/v")["claude"] is True
+
+
+def test_neither_claude_registered_is_not_connected(fake_home, monkeypatch):
+    from compartment import claude_desktop, claude_hooks
+    monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: True)
+    monkeypatch.setattr(claude_desktop, "config_path",
+                        lambda: fake_home / "nothing-here.json")
+    assert menubar.integration_status("/v")["claude"] is False

@@ -406,18 +406,27 @@ def integration_status(vault: str) -> dict:
     and a record it did keep could disagree with the truth after someone
     edited a config by hand. Best effort, and never raises - not being able
     to tell must not stop the button from working.
+
+    Connected means an MCP server is registered, and nothing else counts.
+    The capture hook used to be accepted here as a second-best answer, which
+    made a machine with the hook and no server report itself connected while
+    the model had no memory tools at all. An indicator that reports a state
+    it has not checked is worse than no indicator.
     """
     out = {t: False for t, _ in INTEGRATION_TARGETS}
-    try:                                                # Claude Code / Desktop
+    try:                                                # Claude Code
         p = Path.home() / ".claude.json"
         if p.is_file():
             cfg = json.loads(p.read_text(encoding="utf-8"))
             out["claude"] = "compartment" in (cfg.get("mcpServers") or {})
-        if not out["claude"]:
-            from . import claude_hooks
-            out["claude"] = bool(claude_hooks.is_installed())
-    except (OSError, ValueError, Exception):            # noqa: BLE001
+    except Exception:                                   # noqa: BLE001
         pass
+    if not out["claude"]:
+        try:                                            # Claude Desktop
+            from . import claude_desktop
+            out["claude"] = claude_desktop.is_registered()
+        except Exception:                               # noqa: BLE001
+            pass
     try:                                                # Hermes
         hermes = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
         out["hermes"] = (hermes / "plugins" / "compartment"

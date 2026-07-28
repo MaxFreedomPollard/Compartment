@@ -18,8 +18,8 @@ import time
 import zipfile
 from pathlib import Path
 
-from . import (__version__, audit, claude_hooks, claude_memory, offline_guard,
-               packs, selftest, session)
+from . import (__version__, audit, claude_desktop, claude_hooks, claude_memory,
+               offline_guard, packs, selftest, session)
 from .acl import VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, user_model_dir
@@ -166,6 +166,9 @@ def cmd_init(args) -> None:
               "`compartment lock`")
     st = v.status()
     v.save()
+    # Before the app appears, so the first thing anyone sees is a panel whose
+    # buttons already report what this machine is connected to.
+    connected = connect_present_agents(path)
     if args.no_app:
         print("  command-line only install (--no-app): no app")
     elif _cli_only_requested():
@@ -175,6 +178,9 @@ def cmd_init(args) -> None:
         _start_status_bar_app(path)
     print(f"\nVault ready: {st['records']} records, projected RAM "
           f"~{st['projected_ram_mb']}MB. Run `compartment selftest` to verify.")
+    if connected:
+        print(f"Connected to {', '.join(connected)}. Restart "
+              f"{'it' if len(connected) == 1 else 'them'} to load the change.")
 
 
 def _cli_only_requested(seconds: float = 5.0) -> bool:
@@ -1177,15 +1183,24 @@ def cmd_integrate(args) -> None:
         cfg_path = Path(os.environ.get("OPENCLAW_HOME",
                                        Path.home() / ".openclaw")) / "openclaw.json"
         wrote = False
-        if cfg_path.is_file():
+        # An OpenClaw that has not written its config yet is a normal first
+        # install, not a reason to hand the JSON back for pasting: it reads
+        # this file whether or not it has created one.
+        if cfg_path.is_file() or cfg_path.parent.is_dir():
             try:
-                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                backup = cfg_path.with_suffix(".json.bak-compartment")
-                backup.write_bytes(cfg_path.read_bytes())  # byte-exact recovery copy
+                existed = cfg_path.is_file()
+                cfg = (json.loads(cfg_path.read_text(encoding="utf-8"))
+                       if existed else {})
+                backup = None
+                if existed:
+                    backup = cfg_path.with_suffix(".json.bak-compartment")
+                    backup.write_bytes(cfg_path.read_bytes())  # byte-exact recovery copy
                 cfg.setdefault("mcpServers", {})["compartment"] = entry
+                cfg_path.parent.mkdir(parents=True, exist_ok=True)
                 cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
                 wrote = True
-                print(f"✓ registered in {cfg_path} (backup: {backup.name})")
+                print(f"✓ registered in {cfg_path}"
+                      + (f" (backup: {backup.name})" if backup else ""))
                 print("  restart to load:  openclaw gateway restart")
                 print("  verify:           openclaw mcp list")
             except (json.JSONDecodeError, OSError) as exc:
@@ -1211,11 +1226,33 @@ def cmd_integrate(args) -> None:
             print("  Claude Code CLI not found; register manually with:")
             print(f"    claude mcp add --scope user compartment -- {compartment_bin} "
                   f"--vault {vault} --caller claude-code serve")
-        print("\n  For Claude Desktop, add to claude_desktop_config.json:")
-        print(json.dumps({"mcpServers": {"compartment": {
-            "command": compartment_bin,
-            "args": ["--vault", vault, "--caller", "claude-desktop", "serve"],
-        }}}, indent=2))
+        # Claude Desktop is a separate program with a separate config file, so
+        # wiring Claude Code leaves it connected to nothing. This used to print
+        # the block and leave the pasting to the user, which is not connecting
+        # them: `integrate` has to finish, or the button that runs it is a
+        # half-measure the user has to discover and complete by hand.
+        if claude_desktop.present():
+            print("\n  registering the Compartment MCP server with Claude "
+                  "Desktop…")
+            try:
+                reg = claude_desktop.register(
+                    compartment_bin,
+                    ["--vault", vault, "--caller", "claude-desktop", "serve"])
+                print(f"  ✓ registered in {reg['config']}")
+                if reg["backup"]:
+                    print(f"    (previous config backed up to {reg['backup']})")
+                print("    Restart Claude Desktop to load it.")
+            except ValueError as exc:    # malformed config - never guess
+                print(f"  ! {exc}")
+                print("    fix the file, then run `compartment integrate "
+                      "claude` again")
+            except OSError as exc:
+                print(f"  ! could not write the Claude Desktop config ({exc}); "
+                      "run `compartment integrate claude` again once it is "
+                      "writable")
+        else:
+            print("\n  Claude Desktop is not installed on this machine, so "
+                  "there is nothing to wire for it.")
         try:
             md = _write_managed_claude_md()
             print(f"\n  ✓ wrote the compartment memory block into {md}")
@@ -1233,6 +1270,68 @@ def cmd_integrate(args) -> None:
         _install_capture_hook(vault, skip=args.no_hooks)
     else:
         _die(f"unknown integrate target {target!r} (hermes | claude)")
+
+
+def agent_present(target: str) -> bool:
+    """Whether an agent is on this machine at all.
+
+    Generous on purpose: a CLI on PATH, or the directory the agent keeps its
+    own configuration in. Wiring an agent that is not installed writes a
+    config nobody will ever read, and missing one that is installed leaves
+    exactly the unpressed button this is here to avoid.
+    """
+    import shutil
+    if target == "claude":
+        return bool(shutil.which("claude")) or claude_desktop.present()
+    if target == "hermes":
+        return (bool(shutil.which("hermes"))
+                or Path(os.environ.get("HERMES_HOME",
+                                       Path.home() / ".hermes")).is_dir())
+    if target == "openclaw":
+        return (bool(shutil.which("openclaw"))
+                or Path(os.environ.get("OPENCLAW_HOME",
+                                       Path.home() / ".openclaw")).is_dir())
+    return False
+
+
+def connect_present_agents(vault: str) -> list[str]:
+    """Wire every agent already on this machine, at install time.
+
+    Someone installing a memory server has an agent to give it to, or they
+    would not be installing it. Finishing the install at a panel of unpressed
+    buttons asks them to work out that the install was not the whole install,
+    and the first thing they see is a row of things reporting that nothing is
+    connected. Connecting what is here is what the install was for, and the
+    check marks then describe the machine instead of instructing the user.
+
+    Never fatal: an agent that cannot be wired says so and the install
+    carries on to the next one.
+    """
+    from argparse import Namespace
+    from . import menubar
+
+    here = [(t, name) for t, name in menubar.INTEGRATION_TARGETS
+            if agent_present(t)]
+    if not here:
+        print("\nNo agent found on this machine yet. Connect one whenever you "
+              "install it, with `compartment integrate <agent>` or the "
+              "CONNECT AN AGENT buttons in the app.")
+        return []
+
+    print(f"\nConnecting the {len(here)} agent"
+          f"{'' if len(here) == 1 else 's'} already installed here…")
+    done = []
+    for target, name in here:
+        print(f"\n--- {name} ---")
+        try:
+            cmd_integrate(Namespace(target=target, vault=vault,
+                                    no_import=False, no_hooks=False))
+            done.append(name)
+        except SystemExit as exc:            # _die must not end the install
+            print(f"  ! could not connect {name}: {exc}")
+        except Exception as exc:             # noqa: BLE001
+            print(f"  ! could not connect {name}: {exc}")
+    return done
 
 
 # ------------------------------------------------------------------- setup
