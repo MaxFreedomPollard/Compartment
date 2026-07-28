@@ -32,7 +32,7 @@ from .home import env, home
 from .menubar import (AUTO_LOCK_CHOICES, RECENT_COUNT, auto_lock_label,
                       change_passphrase, claim_first_run, default_vault,
                       fetch_state, lock_vault, self_check, set_setting,
-                      summarise, unlock_vault)
+                      starter_note, summarise, unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -109,7 +109,7 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     rows.append(("heading", f"LAST {RECENT_COUNT} MEMORIES"))
     recent = state.get("recent") or []
     if not recent:
-        rows.append(("empty", "Nothing yet."))
+        rows.append(("empty", starter_note(state)))
     for r in recent:
         rows.append(("memory", (r.get("text") or "").strip()))
     return rows

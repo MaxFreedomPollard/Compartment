@@ -61,6 +61,15 @@ QUARANTINE_WARNING = (
 )
 
 
+def is_seeded(tags_json: str) -> bool:
+    """Did this record arrive with the vault, rather than during use?
+
+    Seeding preserves each starting memory's stable id as an "id:" tag, and
+    nothing else writes one, so the tag is the mark. It is the same test
+    everywhere a caller asks to see one set without the other."""
+    return any(t.startswith("id:") for t in json.loads(tags_json))
+
+
 class VaultLockedError(CryptoError):
     pass
 
@@ -503,10 +512,18 @@ class Vault:
                    + IMPORTANCE_WEIGHT * self._importance_of(rid)
                    for rid, s in scores.items()}
 
+        # The starting memories are ordinary records in "main", so a namespace
+        # filter cannot reach them. Anyone who wants recall limited to what the
+        # agent learned here turns them off, and that has to be honoured on the
+        # one path that returns memories to a model.
+        starter = self.config.settings.get("search_starter_facts", True)
+
         results = []
         for rid in sorted(boosted, key=boosted.get, reverse=True):
             row = self.db.get_row(rid)
             if row is None or row["ns"] not in allowed:
+                continue
+            if not starter and is_seeded(row["tags"]):
                 continue
             if tags and not set(tags) <= set(json.loads(row["tags"])):
                 continue
@@ -564,7 +581,7 @@ class Vault:
             if row["ns"] not in allowed:
                 continue
             total += 1
-            seeded = any(t.startswith("id:") for t in json.loads(row["tags"]))
+            seeded = is_seeded(row["tags"])
             if not seeded:
                 organic += 1
             if seeded and not include_seeded:

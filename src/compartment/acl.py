@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "settings": {
         "auto_lock_minutes": 30,
         "include_packs_in_search": True,
+        "search_starter_facts": True,
         "unlock_tool_enabled": False,
         "duplicate_threshold": 0.97,
         "index_precision": "f32",

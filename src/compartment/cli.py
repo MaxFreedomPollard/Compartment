@@ -86,11 +86,23 @@ def _pack_bytes(name: str) -> bytes | None:
     return p.read_bytes() if p.is_file() else None
 
 
-def _seed_pack_bytes() -> bytes:
-    b = _pack_bytes("starter")
-    if b is None:
-        raise CryptoError("Bundled starter.mpack is missing from this install")
-    return b
+def _seed_blobs() -> list[tuple[str, bytes]]:
+    """The starting memories, or a hard failure.
+
+    They are part of every install, command line or app, so an install that
+    cannot produce them is broken and has to say so. Returning nothing here
+    would create a vault that is empty but looks finished, which is the one
+    outcome a new user cannot diagnose."""
+    out = []
+    for name in _starter_pack_names():
+        blob = _pack_bytes(name)
+        if blob is None:
+            _die(f"this install is incomplete: {name}.mpack is missing from "
+                 f"{_data_dir()}. The starting memories ship with every "
+                 "install - reinstall Compartment rather than start with an "
+                 "empty vault.")
+        out.append((name, blob))
+    return out
 
 
 def _starter_pack_names() -> list[str]:
@@ -112,6 +124,9 @@ def cmd_init(args) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if os.path.exists(path):
         _die(f"{path} already exists - Compartment never overwrites a vault")
+    # Before a passphrase is chosen and before anything reaches disk: a broken
+    # install fails here, with nothing to clean up.
+    seeds = _seed_blobs()
     print(f"Compartment {__version__} - creating vault: {path}")
     print(f"Embedding model: {DEFAULT_MODEL} (bundled, offline)")
     if args.passphrase:
@@ -131,10 +146,7 @@ def cmd_init(args) -> None:
     print("(Optional second factor: `compartment 2fa enable` - see README.)")
     print("\nFinishing vault setup (offline)…")
     total = 0
-    for name in _starter_pack_names():
-        blob = _pack_bytes(name)
-        if blob is None:
-            continue
+    for _, blob in seeds:
         out = packs.seed_records(v, blob, caller=args.creator)
         total += out["records"]
         nrec = out["records"]
@@ -450,8 +462,16 @@ def cmd_recent(args) -> None:
         print(f"{counts['total']} records | {counts['organic']} organic "
               f"(stored during use) | {counts['seeded']} seeded")
         if not out["results"]:
-            print("\nno memories stored yet"
-                  + ("" if args.all else " (starter facts hidden; --all shows them)"))
+            # A fresh vault is not an empty one. Saying "no memories" to
+            # someone who just watched several thousand load is how a working
+            # install gets mistaken for a broken one.
+            if counts["seeded"] and not args.all:
+                print(f"\nnothing stored during use yet. The "
+                      f"{counts['seeded']:,} starting memories that came with "
+                      f"the vault are loaded and searchable - list them with "
+                      f"`compartment recent --all`.")
+            else:
+                print("\nno memories stored yet")
         else:
             print(f"\n{len(out['results'])} most recent, oldest first:\n")
         for r in out["results"]:

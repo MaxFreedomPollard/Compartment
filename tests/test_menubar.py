@@ -43,7 +43,7 @@ def test_set_setting_persists_to_the_config_file(vault_path, monkeypatch):
     menubar.set_setting(vault_path, "search_starter_facts", False)
     menubar.set_setting(vault_path, "auto_lock_minutes", 0)
     cfg = VaultConfig.load(vault_path)          # straight from disk
-    assert cfg.settings["include_packs_in_search"] is False
+    assert cfg.settings["search_starter_facts"] is False
     assert cfg.settings["auto_lock_minutes"] == 0
     again = menubar.read_settings(vault_path)
     assert again["search_starter_facts"] is False

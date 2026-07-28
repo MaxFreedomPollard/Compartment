@@ -146,7 +146,7 @@ def read_settings(vault: str) -> dict:
     return {
         "capture_hook": hook,
         "search_starter_facts": bool(
-            cfg.settings.get("include_packs_in_search", True)),
+            cfg.settings.get("search_starter_facts", True)),
         "auto_lock_minutes": int(cfg.settings.get("auto_lock_minutes", 30)),
     }
 
@@ -162,7 +162,7 @@ def set_setting(vault: str, key: str, value) -> dict:
         return read_settings(vault)
     cfg = VaultConfig.load(vault)
     if key == "search_starter_facts":
-        cfg.settings["include_packs_in_search"] = bool(value)
+        cfg.settings["search_starter_facts"] = bool(value)
     elif key == "auto_lock_minutes":
         cfg.settings["auto_lock_minutes"] = int(value)
     else:
@@ -287,6 +287,19 @@ def summarise(state: dict) -> str:
         return "locked - unlock in Terminal: compartment unlock"
     return (f"{state['records']:,} memories · "
             f"{state['organic']:,} stored by you")
+
+
+def starter_note(state: dict) -> str:
+    """What the recent list says when nothing has been stored during use.
+
+    A new vault holds thousands of starting memories and no organic ones, so
+    the recent feed is legitimately empty on day one. "Nothing yet" there
+    reads as an empty vault, which is the opposite of what happened."""
+    seeded = max(int(state.get("records", 0)) - int(state.get("organic", 0)), 0)
+    if not seeded:
+        return "nothing stored yet"
+    return (f"nothing stored during use yet - {seeded:,} starting memories "
+            "came with the vault and are searchable now")
 
 
 def auto_lock_label(minutes: int) -> str:
@@ -730,7 +743,8 @@ def run(vault: str | None = None, show: bool = False,
                 views.append(label("unlock the vault to see them", 11,
                                    secondary=True))
             elif not st["recent"]:
-                views.append(label("nothing stored yet", 11, secondary=True))
+                views.append(label(starter_note(st), 11, secondary=True,
+                                   wrap=True))
             else:
                 for r in st["recent"]:
                     text = " ".join((r.get("text") or "").split())
