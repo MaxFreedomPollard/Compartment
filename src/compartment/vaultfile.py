@@ -220,6 +220,14 @@ def write_vault_file(
     header.payload_len = len(payload_ct)
     if signing_key is not None:
         header.manifest = _make_manifest(header, payload_ct, signing_key)
+    else:
+        # The payload is resealed with a fresh nonce on every save, so its
+        # sha256 changes even when the plaintext does not. A manifest signed
+        # against an earlier payload can therefore never match again, and
+        # keeping it would make `verify` report tampering on a vault nobody
+        # touched. Modifying a sealed vault ends the seal: drop the manifest
+        # so the file honestly describes itself as unsigned.
+        header.manifest = None
     hjson = crypto.canonical_json(header.to_json())
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:

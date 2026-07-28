@@ -9,9 +9,15 @@ Security posture (same invariants as the rest of Compartment):
   command runs. The URL contains a random token; requests without it get
   404 (constant-time compare), so other local processes cannot browse the
   vault by scanning ports.
-- Read-only: GET only, no write endpoint exists. Zero outbound connections,
-  zero external assets - every byte of HTML/CSS/JS below ships in this file
-  and the page's CSP forbids loading anything else.
+- GET only; no endpoint writes to the vault. The panels read the in-RAM
+  SQLite directly and the search box uses a no-record ranking pass, so
+  looking at the vault does not touch a record, append an audit row, or
+  reseal the file. The single exception is reopening after ANOTHER process
+  wrote the vault: Vault.unlock compacts the replayed journal, which
+  rewrites the file. That write belongs to the reopen, not to the page.
+- Zero outbound connections, zero external assets - every byte of
+  HTML/CSS/JS below ships in this file and the page's CSP forbids loading
+  anything else.
 """
 from __future__ import annotations
 
@@ -23,17 +29,22 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .vault import Vault
+from .acl import AclError
+from .crypto import CryptoError
+from .vault import (CANDIDATES, COSINE_WEIGHT, IMPORTANCE_WEIGHT, RRF_K,
+                    Vault, VaultLockedError)
 
 TAG_HIDE_PREFIX = "id:"          # seed ids would swamp the tag cloud
 
-# Importance tiers (salience.py) → human buckets shown as "types of memories"
+# Importance tiers (salience.py) → human buckets shown as "types of memories".
+# The page's JS colours memory rows from this same list (it is injected into
+# PAGE below), so the tier boundaries and the hex values cannot drift apart.
 TYPE_BUCKETS = [
     ("decisions & consent", 0.90, 1.01, "#e8b339"),
     ("personal facts & preferences", 0.80, 0.90, "#4fc3f7"),
-    ("machine & configuration", 0.70, 0.80, "#9575cd"),
-    ("substantive statements", 0.25, 0.70, "#66bb6a"),
-    ("pleasantries", -0.01, 0.25, "#78909c"),
+    ("machine & configuration", 0.70, 0.80, "#a78bfa"),
+    ("substantive statements", 0.25, 0.70, "#5fd38a"),
+    ("pleasantries", -0.01, 0.25, "#8b98ad"),
 ]
 
 
@@ -49,56 +60,86 @@ class _VaultRef:
     def get(self) -> Vault:
         with self._lock:
             if self._v is None or self._v._locked or self._v.is_stale():
-                pw, key = Vault.resolve_credential(self.path)
-                self._v = Vault.unlock(self.path, passphrase=pw, raw_key=key)
+                try:
+                    pw, key = Vault.resolve_credential(self.path)
+                except CryptoError as exc:      # no credential = still locked
+                    raise VaultLockedError(str(exc)) from exc
+                kf = None if key is not None else \
+                    Vault.load_keyfile_hint(self.path)
+                self._v = Vault.unlock(self.path, passphrase=pw, raw_key=key,
+                                       keyfile=kf)
             return self._v
 
 
 # ---------------------------------------------------------------- snapshots
 
-def snapshot_stats(v: Vault) -> dict:
-    con = v.db.conn
-    n_records = v.db.count()
-    n_relations = v.db.relation_count()
-    n_quar = con.execute(
-        "SELECT COUNT(*) c FROM records WHERE quarantined = 1").fetchone()["c"]
-    n_entities = con.execute(
-        "SELECT COUNT(*) c FROM (SELECT subject_n e FROM relations "
-        "UNION SELECT object_n FROM relations)").fetchone()["c"]
+def _ns_clause(allowed: set[str]) -> tuple[str, list[str]]:
+    """SQL fragment + params limiting a query to the namespaces this caller
+    may read, so the panels show exactly what the search box would return."""
+    if not allowed:
+        return "0", []
+    return "ns IN (%s)" % ",".join("?" * len(allowed)), sorted(allowed)
 
-    types = []
-    for label, lo, hi, color in TYPE_BUCKETS:
-        c = con.execute(
-            "SELECT COUNT(*) c FROM records WHERE importance >= ? AND "
-            "importance < ?", (lo, hi)).fetchone()["c"]
-        types.append({"label": label, "count": c, "color": color})
 
-    growth = [{"d": r["d"], "n": r["n"]} for r in con.execute(
-        "SELECT date(created, 'unixepoch') d, COUNT(*) n FROM records "
-        "GROUP BY d ORDER BY d")]
+def snapshot_stats(v: Vault, caller: str = "dash") -> dict:
+    # The SQLite connection and the index are shared with whatever else is
+    # using this vault, so every read runs under the vault's own lock.
+    with v._oplock:
+        v._require_open()
+        allowed = set(v._readable_namespaces(caller))
+        ns, nsp = _ns_clause(allowed)
+        con = v.db.conn
+        n_records = con.execute(
+            f"SELECT COUNT(*) c FROM records WHERE {ns}", nsp).fetchone()["c"]
+        n_relations = con.execute(
+            f"SELECT COUNT(*) c FROM relations WHERE {ns}", nsp).fetchone()["c"]
+        n_quar = con.execute(
+            f"SELECT COUNT(*) c FROM records WHERE quarantined = 1 AND {ns}",
+            nsp).fetchone()["c"]
+        n_entities = con.execute(
+            f"SELECT COUNT(*) c FROM (SELECT subject_n e FROM relations "
+            f"WHERE {ns} UNION SELECT object_n FROM relations WHERE {ns})",
+            nsp + nsp).fetchone()["c"]
 
-    tags: dict[str, int] = {}
-    agents: dict[str, int] = {}
-    for row in con.execute("SELECT tags, prov FROM records"):
-        for t in json.loads(row["tags"]):
-            if not t.startswith(TAG_HIDE_PREFIX):
-                tags[t] = tags.get(t, 0) + 1
-        agents[json.loads(row["prov"]).get("agent", "?")] = \
-            agents.get(json.loads(row["prov"]).get("agent", "?"), 0) + 1
-    top_tags = sorted(tags.items(), key=lambda kv: -kv[1])[:24]
-    top_agents = sorted(agents.items(), key=lambda kv: -kv[1])
+        types = []
+        for label, lo, hi, color in TYPE_BUCKETS:
+            c = con.execute(
+                f"SELECT COUNT(*) c FROM records WHERE importance >= ? AND "
+                f"importance < ? AND {ns}", [lo, hi] + nsp).fetchone()["c"]
+            types.append({"label": label, "count": c, "color": color})
 
-    preds: dict[str, int] = {}
-    for row in con.execute("SELECT predicate FROM relations"):
-        preds[row["predicate"]] = preds.get(row["predicate"], 0) + 1
-    top_preds = sorted(preds.items(), key=lambda kv: -kv[1])[:12]
+        # Bucket in LOCAL time: every other timestamp on the page is rendered
+        # with the browser's locale, and a UTC bucket would let the last bar
+        # and the newest "recent memory" disagree by a day.
+        growth = [{"d": r["d"], "n": r["n"]} for r in con.execute(
+            f"SELECT date(created, 'unixepoch', 'localtime') d, COUNT(*) n "
+            f"FROM records WHERE {ns} GROUP BY d ORDER BY d", nsp)]
 
-    st = v.status()
+        tags: dict[str, int] = {}
+        agents: dict[str, int] = {}
+        for row in con.execute(f"SELECT tags, prov FROM records WHERE {ns}",
+                               nsp):
+            for t in json.loads(row["tags"]):
+                if not t.startswith(TAG_HIDE_PREFIX):
+                    tags[t] = tags.get(t, 0) + 1
+            agent = json.loads(row["prov"]).get("agent", "?")
+            agents[agent] = agents.get(agent, 0) + 1
+        top_tags = sorted(tags.items(), key=lambda kv: -kv[1])[:24]
+        top_agents = sorted(agents.items(), key=lambda kv: -kv[1])
+
+        preds: dict[str, int] = {}
+        for row in con.execute(
+                f"SELECT predicate FROM relations WHERE {ns}", nsp):
+            preds[row["predicate"]] = preds.get(row["predicate"], 0) + 1
+        top_preds = sorted(preds.items(), key=lambda kv: -kv[1])[:12]
+
+        st = v.status()          # re-entrant: same thread already holds _oplock
     return {
         "vault": st["vault"], "vault_id": st["vault_id"],
         "records": n_records, "relations": n_relations,
         "entities": n_entities, "quarantined": n_quar,
-        "namespaces": st["namespaces"],
+        "namespaces": [e for e in st["namespaces"]
+                       if e["namespace"] in allowed],
         "types": types, "growth": growth,
         "tags": [{"tag": t, "count": c} for t, c in top_tags],
         "agents": [{"agent": a, "count": c} for a, c in top_agents],
@@ -112,7 +153,17 @@ def snapshot_stats(v: Vault) -> dict:
 
 def snapshot_graph(v: Vault, caller: str = "dash",
                    max_edges: int = 400, max_nodes: int = 120) -> dict:
-    rels = v.relations(caller=caller, limit=max_edges)["relations"]
+    # Vault.relations would append an audit row per page load; the store's
+    # own query is the same data with no write. ACL is applied here instead.
+    with v._oplock:
+        v._require_open()
+        allowed = set(v._readable_namespaces(caller))
+        ns, nsp = _ns_clause(allowed)
+        total = v.db.conn.execute(
+            f"SELECT COUNT(*) c FROM relations WHERE {ns}", nsp).fetchone()["c"]
+        rels = [{"subject": r["subject"], "predicate": r["predicate"],
+                 "object": r["object"]}
+                for r in v.db.query_relations(ns_in=allowed, limit=max_edges)]
     degree: dict[str, dict] = {}
     for r in rels:
         for name in (r["subject"], r["object"]):
@@ -127,35 +178,99 @@ def snapshot_graph(v: Vault, caller: str = "dash",
         o = " ".join(r["object"].split()).lower()
         if s in keep and o in keep:
             edges.append({"s": s, "o": o, "p": r["predicate"]})
-    return {"nodes": nodes, "edges": edges, "total_relations": len(rels)}
+    # total_relations is every relation the caller may read; the graph draws
+    # at most max_edges of them, and only those between drawn entities.
+    return {"nodes": nodes, "edges": edges, "total_relations": total,
+            "shown_relations": len(edges)}
 
 
-def snapshot_recent(v: Vault, limit: int = 20) -> dict:
+def snapshot_recent(v: Vault, caller: str = "dash", limit: int = 20) -> dict:
     out = []
-    for row in v.db.conn.execute(
-            "SELECT * FROM records ORDER BY created DESC LIMIT ?", (limit,)):
-        text = v.db.decrypt_text(row, v._master)
-        out.append({
-            "id": row["id"], "namespace": row["ns"],
-            "text": text[:240] + ("…" if len(text) > 240 else ""),
-            "importance": row["importance"], "created": row["created"],
-            "quarantined": bool(row["quarantined"]),
-            "tags": [t for t in json.loads(row["tags"])
-                     if not t.startswith(TAG_HIDE_PREFIX)][:6],
-        })
+    with v._oplock:
+        v._require_open()
+        allowed = set(v._readable_namespaces(caller))
+        ns, nsp = _ns_clause(allowed)
+        for row in v.db.conn.execute(
+                f"SELECT * FROM records WHERE {ns} "
+                f"ORDER BY created DESC LIMIT ?", nsp + [limit]):
+            text = v.db.decrypt_text(row, v._master)
+            out.append({
+                "id": row["id"], "namespace": row["ns"],
+                "text": text[:240] + ("…" if len(text) > 240 else ""),
+                "importance": row["importance"], "created": row["created"],
+                "quarantined": bool(row["quarantined"]),
+                "tags": [t for t in json.loads(row["tags"])
+                         if not t.startswith(TAG_HIDE_PREFIX)][:6],
+            })
     return {"recent": out}
+
+
+def snapshot_search(v: Vault, query: str, caller: str = "dash",
+                    top_k: int = 10) -> dict:
+    """Rank the same way Vault.search does, without recording the read.
+
+    Vault.search charges the vault for every query: db.touch on each hit
+    (which re-ranks the record by having been looked at) and one audit row
+    per search. A dashboard that redraws itself would rewrite the vault's
+    history simply by being open, so the fusion below is repeated here
+    against the same constants, minus those two writes. If Vault.search ever
+    grows a "do not record this read" switch, delete this and call it.
+    """
+    with v._oplock:
+        v._require_open()
+        allowed = set(v._readable_namespaces(caller))
+        qvec = v.embedder.embed_query(query)
+        vec_hits = v.index.search(qvec, CANDIDATES)
+        fts_hits = v.db.fts_search(query, CANDIDATES)
+
+        scores: dict[str, float] = {}
+        vec_score: dict[str, float] = {}
+        for rank, (ikey, s) in enumerate(vec_hits):
+            rid = v._id_by_ikey.get(ikey)
+            if rid:
+                scores[rid] = scores.get(rid, 0) + 1.0 / (RRF_K + rank + 1)
+                vec_score[rid] = s
+        for rank, (rid, _) in enumerate(fts_hits):
+            scores[rid] = scores.get(rid, 0) + 1.0 / (RRF_K + rank + 1)
+        boosted = {rid: s
+                   + COSINE_WEIGHT * vec_score.get(rid, 0.0)
+                   + IMPORTANCE_WEIGHT * v._importance_of(rid)
+                   for rid, s in scores.items()}
+
+        results = []
+        for rid in sorted(boosted, key=boosted.get, reverse=True):
+            row = v.db.get_row(rid)
+            if row is None or row["ns"] not in allowed:
+                continue
+            text = v.db.decrypt_text(row, v._master)
+            results.append({
+                "id": rid, "namespace": row["ns"], "text": text,
+                "score": round(scores[rid], 5),
+                "cosine": round(vec_score.get(rid, 0.0), 4),
+                "importance": row["importance"], "created": row["created"],
+                "quarantined": bool(row["quarantined"]),
+                "tags": [t for t in json.loads(row["tags"])
+                         if not t.startswith(TAG_HIDE_PREFIX)][:6],
+            })
+            if len(results) >= top_k:
+                break
+    return {"results": results}
 
 
 # ------------------------------------------------------------------ server
 
 def _make_handler(ref: _VaultRef, token: str):
+    token_b = token.encode("ascii")
+
     class DashHandler(BaseHTTPRequestHandler):
         server_version = "compartment-dash"
+        _started = False              # has any byte of a response gone out?
 
         def log_message(self, *_):        # memory contents stay off the terminal
             pass
 
         def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self._started = True
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -170,37 +285,66 @@ def _make_handler(ref: _VaultRef, token: str):
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, obj: dict) -> None:
-            self._send(200, json.dumps(obj).encode(), "application/json")
+        def _json(self, obj: dict, code: int = 200) -> None:
+            self._send(code, json.dumps(obj).encode(), "application/json")
+
+        def _fail(self, exc: Exception) -> None:
+            """One error response, with a status a client can act on."""
+            if self._started:
+                return          # the response already went out (or died) - do
+                                # not write a second one onto the same socket
+            if isinstance(exc, VaultLockedError):
+                code = 423      # locked: the user unlocks out of band
+            elif isinstance(exc, AclError):
+                code = 403
+            elif isinstance(exc, CryptoError):
+                code = 503      # stale reopen, tamper, model mismatch…
+            else:
+                code = 500
+            try:
+                self._json({"error": type(exc).__name__, "message": str(exc)},
+                           code=code)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def do_GET(self) -> None:          # noqa: N802 (http.server API)
-            parsed = urllib.parse.urlparse(self.path)
-            parts = parsed.path.strip("/").split("/", 1)
-            if not parts or not hmac.compare_digest(parts[0], token):
-                self._send(404, b"not found", "text/plain")
-                return
-            route = parts[1] if len(parts) > 1 else ""
             try:
-                v = ref.get()
+                parsed = urllib.parse.urlparse(self.path)
+                try:
+                    # http.server decodes the request line as latin-1, so a
+                    # path with high bytes round-trips; compare bytes, and let
+                    # anything that will not encode simply miss the token.
+                    raw = parsed.path.encode("latin-1")
+                except UnicodeEncodeError:
+                    raw = b""
+                head, _, tail = raw.strip(b"/").partition(b"/")
+                if not hmac.compare_digest(head, token_b):
+                    self._send(404, b"not found", "text/plain")
+                    return
+                route = tail.decode("latin-1")
+                # The page itself needs no vault: a locked vault must still
+                # render the page (which then reports the lock), not replace
+                # it with a JSON blob.
                 if route == "":
                     self._send(200, PAGE.encode(), "text/html; charset=utf-8")
                 elif route == "api/stats":
-                    self._json(snapshot_stats(v))
+                    self._json(snapshot_stats(ref.get()))
                 elif route == "api/graph":
-                    self._json(snapshot_graph(v))
+                    self._json(snapshot_graph(ref.get()))
                 elif route == "api/recent":
-                    self._json(snapshot_recent(v))
+                    self._json(snapshot_recent(ref.get()))
                 elif route == "api/search":
                     q = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
                     if not q.strip():
                         self._json({"results": []})
                     else:
-                        out = v.search(q, caller="dash", top_k=10)
-                        self._json(out)
+                        self._json(snapshot_search(ref.get(), q))
                 else:
                     self._send(404, b"not found", "text/plain")
+            except (BrokenPipeError, ConnectionResetError):
+                return                     # browser navigated away mid-write
             except Exception as exc:       # locked vault, stale reopen failure…
-                self._json({"error": type(exc).__name__, "message": str(exc)})
+                self._fail(exc)
 
     return DashHandler
 
@@ -221,7 +365,9 @@ def run(path: str, vault: Vault) -> None:
     ref = _VaultRef(path, vault)
     httpd, url = start(ref)
     print(f"Compartment dashboard: {url}")
-    print("  serving from RAM, 127.0.0.1 only, read-only - Ctrl-C to stop")
+    print("  serving from RAM, 127.0.0.1 only, GET only - viewing the vault "
+          "changes nothing in it")
+    print("  Ctrl-C to stop")
     try:
         webbrowser.open(url)
     except Exception:
@@ -236,7 +382,7 @@ def run(path: str, vault: Vault) -> None:
 
 # ------------------------------------------------------------------- page
 
-PAGE = r"""<!doctype html>
+_PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Compartment</title>
@@ -266,7 +412,7 @@ body{
 header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
  margin-bottom:10px}
 .brand{font-size:26px;font-weight:700;letter-spacing:.4px}
-.brand .ram{background:linear-gradient(92deg,var(--blue),var(--cyan));
+.brand .ac{background:linear-gradient(92deg,var(--blue),var(--cyan));
  -webkit-background-clip:text;background-clip:text;color:transparent}
 .brand .dot{color:var(--gold)}
 .path{font:11.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -392,7 +538,7 @@ footer i{width:5px;height:5px;border-radius:50%;background:var(--green);
  box-shadow:0 0 7px var(--green);display:inline-block}
 </style></head><body>
 <header>
- <div class="brand">eng<span class="ram">RAM</span><span class="dot">.</span></div>
+ <div class="brand">Compart<span class="ac">ment</span><span class="dot">.</span></div>
  <span class="path" id="vaultpath">connecting…</span>
  <div class="meta">
   <span class="badge" id="modelbadge"><i></i><span>model</span></span>
@@ -451,16 +597,29 @@ footer i{width:5px;height:5px;border-radius:50%;background:var(--green);
   <div id="recent"></div>
  </div>
 </div>
-<footer><i></i> served from RAM · 127.0.0.1 only · read-only · nothing
- decrypted touches disk · stop with Ctrl-C in the terminal</footer>
+<footer><i></i> served from RAM · 127.0.0.1 only · GET only, and viewing
+ changes nothing · nothing decrypted touches disk · stop with Ctrl-C in the
+ terminal</footer>
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmt=n=>n.toLocaleString("en-US");
 const when=t=>new Date(t*1000).toLocaleString([], {dateStyle:"medium",timeStyle:"short"});
-const impColor=v=>v>=0.9?"#e8b339":v>=0.8?"#4fc3f7":v>=0.7?"#a78bfa":v>0.25?"#5fd38a":"#8b98ad";
-async function api(p){const r=await fetch("api/"+p);return r.json();}
+/* injected from TYPE_BUCKETS in dash.py: one source for tiers and colours */
+const TYPE_TIERS=__TYPE_BUCKETS__;
+const impColor=v=>{
+ for(const t of TYPE_TIERS){if(v>=t.lo&&v<t.hi)return t.color;}
+ return TYPE_TIERS[TYPE_TIERS.length-1].color;};
+/* absolute, so /<token> works exactly like /<token>/ */
+const API_BASE=location.pathname.replace(/\/+$/,"")+"/api/";
+async function api(p){
+ const r=await fetch(API_BASE+p);
+ let j=null;try{j=await r.json();}catch(e){j=null;}
+ if(j&&j.error)return j;
+ if(!r.ok||j===null)return{error:"HTTP "+r.status,
+  message:r.statusText||("HTTP "+r.status)};
+ return j;}
 function setBadge(id,text,cls){const b=$(id);
  b.querySelector("span").textContent=text;if(cls)b.className="badge "+cls;}
 
@@ -494,23 +653,24 @@ function growth(s){
  const W=c.clientWidth,H=170;c.width=W*dpr;c.height=H*dpr;
  c.style.height=H+"px";
  const x=c.getContext("2d");x.scale(dpr,dpr);
- const days=s.growth;if(!days.length)return;
+ const all=s.growth;if(!all.length)return;
  const L=34,R=10,B=24,T=12,IW=W-L-R,IH=H-T-B;
  x.strokeStyle="rgba(255,255,255,.05)";x.lineWidth=1;
  for(let g=0;g<4;g++){const gy=T+IH*g/3;
   x.beginPath();x.moveTo(L,gy);x.lineTo(W-R,gy);x.stroke();}
- const bars=days.slice(-60);
- const maxN=Math.max(...bars.map(d=>d.n),1);
- const slot=IW/bars.length,bw=Math.min(34,Math.max(2.5,slot-3));
- bars.forEach((d,i)=>{const h=Math.max(2,IH*d.n/maxN);
-  const bx=L+i*slot+(slot-bw)/2,by=T+IH-h;
+ /* one window, one x scale: bars and the cumulative line plot the same days */
+ const days=all.slice(-60),off=all.length-days.length;
+ let cum=0;const allCum=all.map(d=>cum+=d.n);
+ const cums=allCum.slice(off);
+ const maxN=Math.max(...days.map(d=>d.n),1);
+ const slot=IW/days.length,bw=Math.min(34,Math.max(2.5,slot-3));
+ const px=i=>L+i*slot+slot/2,py=i=>T+IH-IH*cums[i]/cum;
+ days.forEach((d,i)=>{const h=Math.max(2,IH*d.n/maxN);
+  const bx=px(i)-bw/2,by=T+IH-h;
   const gr=x.createLinearGradient(0,by,0,by+h);
   gr.addColorStop(0,"#58a6ff");gr.addColorStop(1,"#58a6ff33");
   x.fillStyle=gr;
   x.beginPath();x.roundRect(bx,by,bw,h,[3,3,0,0]);x.fill();});
- let cum=0;const cums=days.map(d=>cum+=d.n);
- const px=i=>L+IW*(days.length===1?0.5:i/(days.length-1)),
-       py=i=>T+IH-IH*cums[i]/cum;
  const area=x.createLinearGradient(0,T,0,T+IH);
  area.addColorStop(0,"rgba(232,179,57,.16)");area.addColorStop(1,"rgba(232,179,57,0)");
  x.beginPath();x.moveTo(px(0),T+IH);
@@ -523,12 +683,13 @@ function growth(s){
  x.beginPath();x.arc(lx,ly,3.4,0,7);x.fillStyle="#e8b339";
  x.shadowColor="#e8b339";x.shadowBlur=9;x.fill();x.shadowBlur=0;
  x.fillStyle="#5c6579";x.font="10px sans-serif";
- x.fillText(bars[0].d,L,H-8);
- const lastLabel=bars[bars.length-1].d;
+ x.fillText(days[0].d,L,H-8);
+ const lastLabel=days[days.length-1].d;
  x.fillText(lastLabel,W-R-x.measureText(lastLabel).width,H-8);
  $("growthhint").innerHTML=
   `<b style="color:#58a6ff">bars</b> per day · <b
-   style="color:#e8b339">line</b> cumulative (${fmt(cum)})`;
+   style="color:#e8b339">line</b> cumulative (${fmt(cum)})`+
+  (off?` · last ${days.length} days with memories`:"");
 }
 function tablefill(id,rows){
  $(id).querySelector("tbody").innerHTML=rows.map(([a,b])=>
@@ -544,11 +705,15 @@ function graph(g){
  const W=c.clientWidth,H=400;c.width=W*dpr;c.height=H*dpr;
  c.style.height=H+"px";
  const x=c.getContext("2d");x.scale(dpr,dpr);
+ const total=g.total_relations===undefined?g.edges.length:g.total_relations;
  $("graphcount").textContent=g.nodes.length?
-  `${g.nodes.length} entities · ${g.edges.length} relations`:"";
+  (g.edges.length<total
+   ? `${g.nodes.length} entities · ${fmt(g.edges.length)} of ${fmt(total)} relations drawn`
+   : `${g.nodes.length} entities · ${fmt(g.edges.length)} relations`):"";
  if(!g.nodes.length){
   $("graphhint").innerHTML="no relations mapped yet - the agent adds them "+
-   "with <b>memory_link</b>, or you can: <b>compartment link \"Maya\" \"works at\" \"Acme\"</b>";
+   "with <b>memory_link</b>, and you can add one yourself with "+
+   "<b>compartment link \"Maya\" \"works at\" \"Acme\"</b>";
   return;}
  $("graphhint").innerHTML="<b>node size & warmth</b> = connectedness · hover for names";
  const maxDeg=Math.max(...g.nodes.map(n=>n.degree),1);
@@ -634,7 +799,9 @@ function memline(m){
 let lastStats=null,lastGraph=null;
 function redraw(){if(lastStats)growth(lastStats);if(lastGraph)graph(lastGraph);}
 addEventListener("load",redraw);
-addEventListener("resize",redraw);
+/* the graph layout is O(N^2) x 300 iterations - never per resize event */
+let rsz;
+addEventListener("resize",()=>{clearTimeout(rsz);rsz=setTimeout(redraw,200);});
 async function refresh(){
  try{
   const s=await api("stats");
@@ -662,11 +829,27 @@ $("q").addEventListener("input",()=>{clearTimeout(deb);
   const q=$("q").value.trim();
   if(!q){$("results").innerHTML="";return;}
   const r=await api("search?q="+encodeURIComponent(q));
+  if(!r||r.error){$("results").innerHTML=
+   `<div class="hint err">${esc((r&&(r.message||r.error))||"search failed")}</div>`;
+   return;}
   $("results").innerHTML=(r.results||[]).map(m=>memline(
    {...m,quarantined:m.quarantined||false})).join("")||
    '<div class="hint">no matches</div>';},250);});
+function graphError(msg){
+ $("graphcount").textContent="";
+ $("graphhint").innerHTML=`<span class="err">${esc(msg)}</span>`;}
 refresh();
-api("graph").then(g=>{lastGraph=g;graph(g);});
+api("graph").then(g=>{
+ if(!g||g.error||!g.nodes){
+  graphError((g&&(g.message||g.error))||"graph unavailable");return;}
+ lastGraph=g;graph(g);
+}).catch(e=>graphError(String(e)));
 setInterval(refresh,30000);
 </script></body></html>
 """
+
+# One definition of the importance tiers: the Python legend and the JS row
+# colours read the same list, so a boundary or a hex cannot drift.
+PAGE = _PAGE_TEMPLATE.replace("__TYPE_BUCKETS__", json.dumps(
+    [{"label": label, "lo": lo, "hi": hi, "color": color}
+     for label, lo, hi, color in TYPE_BUCKETS]))

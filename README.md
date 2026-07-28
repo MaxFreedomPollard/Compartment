@@ -5,7 +5,7 @@
 Your AI agent forgets you the moment the session ends. Compartment ends
 that. With Compartment, your AI agent gets better with experience: it keeps
 every decision, preference and detail you give it, permanently, encrypted,
-on your own computer. Hermes, Claude,  OpenClaw and other AI Agents can
+on your own computer. Hermes, Claude, OpenClaw and other AI Agents can
 install in one command. One fully-transferable memory store is shared
 simultaneously by all agents on the computer. 100% offline: no network, no
 API key, no cloud account, no telemetry. The embedding model ships inside
@@ -135,7 +135,7 @@ own - Claude Code keeps per-project Markdown files with an auto-loaded
 index. Two memories means facts land in whichever one the model happened to
 think of, and neither is complete. Compartment takes over on install: it imports
 what the file memory already holds, and both the MCP handshake and the
-managed CLAUDE.md block tell the model that compartment supersedes it - write
+managed CLAUDE.md block tell the model that Compartment supersedes it - write
 every new memory here, treat the files as a read-only archive. One vault,
 encrypted, shared by every agent and project on the machine. Nothing is
 deleted; the files stay exactly where they were.
@@ -144,7 +144,7 @@ deleted; the files stay exactly where they were.
 and a host that declares its own memory in its system prompt outranks
 anything a tool says. So `compartment integrate claude` also installs a
 `PostToolUse` hook: when Claude Code writes a memory file, the fact lands in
-the vault whether or not the model ever thought about compartment. The hook is
+the vault whether or not the model ever thought about Compartment. The hook is
 additive and idempotent (your other hooks are untouched, settings.json is
 backed up first), it exits successfully no matter what - a memory tool must
 never break your editor - and it stays quiet when the vault is locked.
@@ -281,7 +281,7 @@ and `compartment bench`.
 | Peak RSS, model + vault + index resident | 319 MB |
 | Store one memory (embed + encrypt + fsync journal) | ~40 ms |
 | Wheel size, model included | ~30 MB |
-| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 199 tests, ~60 s |
+| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 249 tests, ~60 s |
 
 A single network round-trip to a cloud memory API costs more than this
 entire pipeline. The property that makes Compartment secure (no plaintext

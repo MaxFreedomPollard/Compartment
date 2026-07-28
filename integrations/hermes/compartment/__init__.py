@@ -201,8 +201,14 @@ class CompartmentMemoryProvider(MemoryProvider):
                 v.store(text, caller=_CALLER, namespace=_NAMESPACE,
                         tags=tags or ["hermes"], importance=importance)
                 return
-            except VaultStaleError:
+            except VaultStaleError as exc:
                 self._vault = None  # reopen and retry once
+                if attempt == 2:
+                    # Two stale attempts means the write is being dropped.
+                    # Say so: a silently lost memory is worse than a noisy log.
+                    logger.warning(
+                        "compartment store dropped after %d stale-vault "
+                        "retries: %s", attempt, exc)
             except Exception as exc:
                 logger.warning("compartment store failed: %s", exc)
                 return
@@ -246,25 +252,32 @@ class CompartmentMemoryProvider(MemoryProvider):
 
     def handle_tool_call(self, tool_name: str, args, **kwargs) -> str:
         from compartment.vault import VaultStaleError
-        try:
-            v = self._open()
-            if tool_name == "compartment_search":
-                return json.dumps(v.search(args["query"], caller=_CALLER,
-                                           top_k=int(args.get("top_k", 6))))
-            if tool_name == "compartment_store":
-                return json.dumps(v.store(args["text"], caller=_CALLER,
-                                          namespace=_NAMESPACE,
-                                          tags=args.get("tags", []),
-                                          importance=float(args.get("importance", 0.6))))
-            if tool_name == "compartment_forget":
-                return json.dumps(v.forget(args["record_id"], caller=_CALLER,
-                                           shred=bool(args.get("shred", False))))
-            return json.dumps({"error": f"unknown tool {tool_name}"})
-        except VaultStaleError:
-            self._vault = None
-            return self.handle_tool_call(tool_name, args, **kwargs)
-        except Exception as exc:
-            return json.dumps({"error": type(exc).__name__, "message": str(exc)})
+        # Bounded exactly like _store_with_retry. Recursing on VaultStaleError
+        # meant a vault another process keeps rewriting recursed until
+        # RecursionError; two attempts, then the caller gets a plain error.
+        for attempt in (1, 2):
+            try:
+                v = self._open()
+                if tool_name == "compartment_search":
+                    return json.dumps(v.search(args["query"], caller=_CALLER,
+                                               top_k=int(args.get("top_k", 6))))
+                if tool_name == "compartment_store":
+                    return json.dumps(v.store(args["text"], caller=_CALLER,
+                                              namespace=_NAMESPACE,
+                                              tags=args.get("tags", []),
+                                              importance=float(args.get("importance", 0.6))))
+                if tool_name == "compartment_forget":
+                    return json.dumps(v.forget(args["record_id"], caller=_CALLER,
+                                               shred=bool(args.get("shred", False))))
+                return json.dumps({"error": f"unknown tool {tool_name}"})
+            except VaultStaleError as exc:
+                self._vault = None      # drop the stale handle and reopen once
+                if attempt == 2:
+                    return json.dumps({"error": type(exc).__name__,
+                                       "message": str(exc)})
+            except Exception as exc:
+                return json.dumps({"error": type(exc).__name__,
+                                   "message": str(exc)})
 
     # -- setup wizard integration --------------------------------------------
 
@@ -288,8 +301,8 @@ class CompartmentMemoryProvider(MemoryProvider):
         vault = _vault_path()
         if not os.path.exists(vault):
             print(f"  No vault yet at {vault}.")
-            print("  Create one (then stays "
-                  "unlocked\n  until reboot):")
+            print("  Create one - it then stays unlocked\n"
+                  "  until the next reboot:")
             print("      compartment init")
         else:
             print(f"  Using existing vault: {vault}")

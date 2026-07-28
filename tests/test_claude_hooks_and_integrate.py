@@ -343,3 +343,36 @@ def test_integrate_reports_malformed_settings_without_dying(home, vault_path,
     assert "not valid JSON" in out and "compartment hook install" in out
     # the import still happened - one broken file cannot stop the rest
     assert Vault.unlock(vault_path, passphrase=PASS).status()["organic_records"] == 1
+
+
+# --- parser-level regression cover -----------------------------------------
+# The tests above build an argparse Namespace by hand, so they kept passing
+# while `integrate claude` crashed for every real user: the code read
+# `args.no_hooks` and the parser never defined `--no-hooks`. These go through
+# the real parser, which is the only way that class of bug shows up.
+
+def _parsed(monkeypatch, handler_name, argv):
+    """Run argv through the real parser, capturing args instead of dispatching."""
+    seen = {}
+    monkeypatch.setattr(cli, handler_name, lambda args: seen.update(vars(args)))
+    cli.main(argv)
+    return seen
+
+
+def test_integrate_claude_accepts_the_documented_no_hooks_flag(monkeypatch):
+    seen = _parsed(monkeypatch, "cmd_integrate",
+                   ["integrate", "claude", "--no-hooks"])
+    assert seen["target"] == "claude"
+    assert seen["no_hooks"] is True
+
+
+def test_integrate_claude_defaults_no_hooks_to_false(monkeypatch):
+    seen = _parsed(monkeypatch, "cmd_integrate", ["integrate", "claude"])
+    # the read that used to raise AttributeError
+    assert seen["no_hooks"] is False
+    assert seen["no_import"] is False
+
+
+def test_bare_hook_has_a_handler_instead_of_crashing(monkeypatch):
+    seen = _parsed(monkeypatch, "cmd_hook", ["hook"])
+    assert seen["hook_cmd"] is None

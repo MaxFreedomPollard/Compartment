@@ -19,7 +19,7 @@ default, exactly like hindsight/mem0/byterover, with zero manual steps.
   when the pip package or vault is absent, so bundling it is inert until
   a user selects it.
 - `plugins/memory/compartment/plugin.yaml` - the `upstream/plugin.yaml`
-  beside this file (declares `pip_dependencies: ["compartment>=1.5"]`
+  beside this file (declares `pip_dependencies: ["compartment>=2.3"]`
   so the picker's dependency step installs the engine on selection).
 
 Why no registry entry in `hermes_cli/memory_providers.py`: the picker is

@@ -134,10 +134,12 @@ def cmd_init(args) -> None:
             continue
         out = packs.seed_records(v, blob, caller=args.creator)
         total += out["records"]
-        print(f"  {out['name']}@{out['version']}: {out['records']} starting "
-              "memories")
-    print(f"  → vault ready ({total} memories in 'main' - editable and "
-          "forgettable like anything the agent stores)")
+        nrec = out["records"]
+        print(f"  {out['name']}@{out['version']}: {nrec} starting "
+              f"{'memory' if nrec == 1 else 'memories'}")
+    print(f"  → vault ready ({total} {'memory' if total == 1 else 'memories'} "
+          "in 'main' - editable and forgettable like anything the agent "
+          "stores)")
     if args.keychain:
         if sys.platform != "darwin":
             _die("--keychain is only available on macOS")
@@ -316,7 +318,11 @@ def cmd_hook(args) -> None:
         print("capture hook removed" if claude_hooks.uninstall()
               else "no compartment hook was installed")
     else:
+        # No subcommand given (bare `compartment hook`) behaves like `status`,
+        # then points at the rest of the group instead of failing.
         print("installed" if claude_hooks.is_installed() else "not installed")
+        if getattr(args, "hook_cmd", None) is None:
+            print("  subcommands: status | install | uninstall | capture")
 
 
 def cmd_import_claude(args) -> None:
@@ -343,9 +349,10 @@ def cmd_import_claude(args) -> None:
                                      namespace=args.namespace)
     v.save()
     n = res["imported"]
+    scanned = res["scanned"]
     print(f"imported {n} {'memory' if n == 1 else 'memories'} "
           f"({res['duplicates']} already present, {res['failed']} failed) "
-          f"from {res['scanned']} files")
+          f"from {scanned} {'file' if scanned == 1 else 'files'}")
     for e in res["errors"][:10]:
         print(f"  ! {e}")
     print("source files were not modified; re-running this is a no-op")
@@ -400,7 +407,9 @@ def cmd_relations(args) -> None:
                 window = f"  [{r['valid_from'] or '…'} → {r['valid_to'] or '…'}]"
             print(f"{r['subject']} -[{r['predicate']}]→ {r['object']}"
                   f"{window}  ({r['id'][:8]})")
-        print(f"-- {len(out['relations'])} relations. {out['note']}")
+        nrel = len(out["relations"])
+        print(f"-- {nrel} {'relation' if nrel == 1 else 'relations'}. "
+              f"{out['note']}")
     v.save()
 
 
@@ -425,7 +434,11 @@ def cmd_export(args) -> None:
     if args.plaintext:
         print("WARNING: exporting PLAINTEXT memories to disk", file=sys.stderr)
         Path(args.out).write_text(data, encoding="utf-8")
-        print(f"exported {data.count(chr(10))} records → {args.out}")
+        # Count the lines actually written rather than newline characters:
+        # export_jsonl ends with a trailing newline only when it is non-empty,
+        # so a newline count is one off the moment that changes.
+        n = sum(1 for line in data.splitlines() if line.strip())
+        print(f"exported {n} {'record' if n == 1 else 'records'} → {args.out}")
     else:
         _die("export writes plaintext; pass --plaintext to confirm you want that")
     v.save()
@@ -434,7 +447,7 @@ def cmd_export(args) -> None:
 def cmd_import(args) -> None:
     v = _open_vault(args)
     n = v.import_jsonl(Path(args.file).read_text(encoding="utf-8"), namespace=args.namespace)
-    print(f"imported {n} records")
+    print(f"imported {n} {'record' if n == 1 else 'records'}")
 
 
 def cmd_rekey(args) -> None:
@@ -537,12 +550,21 @@ def cmd_reindex(args) -> None:
               "(fully offline)")
     else:
         v = _open_vault(args)
-    precision = "i8" if args.int8 else "f32"
+    # Plain `reindex` rebuilds; it does not silently re-decide precision. Only
+    # an explicit --int8 / --f32 changes what is persisted, so a vault that was
+    # built int8 stays int8 across ordinary rebuilds.
+    if args.int8:
+        precision = "i8"
+    elif args.f32:
+        precision = "f32"
+    else:
+        precision = v.config.settings.get("index_precision", "f32")
     v.config.settings["index_precision"] = precision
     v.config.save(args.vault)
     v._rebuild_index()
     v.save()
-    print(f"reindexed: {v.index.kind}, {len(v.index)} vectors")
+    n = len(v.index)
+    print(f"reindexed: {v.index.kind}, {n} {'vector' if n == 1 else 'vectors'}")
 
 
 def cmd_serve(args) -> None:
@@ -1106,6 +1128,8 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_hook)
     p = ph_sub.add_parser("status", help="is the hook installed?")
     p.set_defaults(fn=cmd_hook)
+    # Bare `compartment hook` must report status, not crash on a missing fn.
+    ph.set_defaults(fn=cmd_hook, hook_cmd=None)
 
     p = sub.add_parser("import-claude",
                        help="import Claude Code's file memories into the vault")
@@ -1204,8 +1228,13 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_bench)
 
     p = sub.add_parser("reindex", help="rebuild the vector index / migrate models")
-    p.add_argument("--int8", action="store_true")
-    p.add_argument("--f32", action="store_true")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--int8", action="store_true",
+                   help="store the index int8-quantized (smaller, faster)")
+    g.add_argument("--f32", action="store_true",
+                   help="store the index in float32 (the default for a new "
+                        "vault); without either flag the vault keeps whatever "
+                        "precision it already has")
     p.add_argument("--re-embed", action="store_true",
                    help="re-embed every record with --model (default: bundled)")
     p.add_argument("--model")
@@ -1249,6 +1278,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("target", choices=["claude", "hermes", "openclaw"])
     p.add_argument("--no-import", action="store_true",
                    help="do not import existing Claude Code file memories")
+    p.add_argument("--no-hooks", action="store_true",
+                   help="wire up, but install no capture hook (add it later "
+                        "with `compartment hook install`)")
     p.set_defaults(fn=cmd_integrate)
 
     ps = sub.add_parser("setup", help="models + air-gap bundles")

@@ -3,10 +3,10 @@
 # `hermes memory setup` auto-installs compartment when the user selects
 # Compartment in the picker. Use THIS file in the upstream PR.
 name: compartment
-version: 1.5.0
-description: "Compartment: fully offline, AEAD-encrypted vector memory. No API key, no cloud. Locks itself on restart/power loss, per-caller namespaces, crypto-shred deletion, hybrid recall."
+version: 1.7.0
+description: "Compartment - high-security, fully offline, encrypted vector memory. AEAD-encrypted vault, locked-by-default after restart, native Hermes provider, no API key."
 pip_dependencies:
-  - "compartment>=1.5"
+  - "compartment>=2.3"
 requires_env: []
 hooks:
   - on_session_switch

@@ -8,7 +8,7 @@ in `~/.hermes/plugins/<name>/` and activates the one named by
 Install (four steps, see the plugin's docstring for detail):
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/python -m pip install compartment-vault
+~/.hermes/hermes-agent/venv/bin/python -m pip install compartment
 cp -r compartment ~/.hermes/plugins/compartment
 compartment init                     # once; stays unlocked until restart
 # config.yaml → memory.provider: compartment

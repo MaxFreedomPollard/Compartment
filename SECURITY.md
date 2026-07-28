@@ -14,7 +14,7 @@ Honest threat model. Read the "cannot protect against" section too. I can honest
 | Signing (vaults + packs) | Ed25519 |
 | Integrity | AEAD tags everywhere + hash-chained audit log |
 
-Vaults created before 1.15.0 were issued a 16-word recovery phrase in its own
+Vaults created before 1.8.0 were issued a 16-word recovery phrase in their own
 keyslot. Those still open with that phrase, but no new vault is given one.
 
 No homemade crypto. AAD binds every ciphertext to its role and vault

@@ -126,7 +126,14 @@ def uninstall(settings: Path | None = None) -> bool:
     if not removed:
         return False
     data["hooks"][EVENT] = kept
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # Same care as install(): keep a recovery copy, then swap the new file in
+    # atomically. A crash or a full disk mid-write must not cost the user every
+    # other hook, permission and env var in this file.
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(path.suffix + ".compartment-backup"))
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     return True
 
 

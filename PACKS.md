@@ -63,7 +63,7 @@ to `main` untouched. Canonical hand-editable source:
 `tools/starter/starter_facts.jsonl` - one JSON object per line,
 
 ```json
-{"id": "akc-00001", "tags": ["akc", "measurements"], "text": "The body mass of a african elephant (adult) is typically about 6,000 kg (ranging from 4,000 to 7,000 kg)."}
+{"id": "akc-00001", "tags": ["akc", "measurements"], "text": "The body mass of an African elephant (adult) is typically about 6,000 kg (ranging from 4,000 to 7,000 kg)."}
 ```
 
 ### Editing the starter memory

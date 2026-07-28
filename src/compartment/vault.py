@@ -35,6 +35,10 @@ from .vindex import BRUTE_FORCE_LIMIT, build_index
 
 RRF_K = 60
 CANDIDATES = 50
+# How many nearest neighbours the duplicate guard inspects. The top hit alone
+# is not enough: it may sit in a different namespace and mask a real duplicate
+# just below it.
+DEDUP_CANDIDATES = 5
 # Fused score = RRF(vector) + RRF(keyword) + COSINE_WEIGHT*cosine
 #             + IMPORTANCE_WEIGHT*importance.
 # Pure reciprocal-rank fusion compresses every hit to ~1/61 and throws away
@@ -393,12 +397,24 @@ class Vault:
         # curated pack/seed contents install verbatim)
         thr = 2.0 if (pack is not None or not _dedup) else float(
             self.config.settings.get("duplicate_threshold", 0.97))
-        for ikey, score in self.index.search(vec, 1):
-            rid = self._id_by_ikey.get(ikey)
-            if rid and score >= thr:
+        # thr above 1.0 is the "never deduplicate" sentinel: no cosine can
+        # reach it, so skip the search entirely rather than paying for a full
+        # scan per record while seeding thousands of pack facts.
+        if thr <= 1.0:
+            # The single nearest neighbour may live in another namespace, in
+            # which case a genuine same-namespace duplicate one rank down was
+            # being missed. Walk a small window instead, stopping as soon as
+            # the scores drop below the threshold (results are descending).
+            for ikey, score in self.index.search(vec, DEDUP_CANDIDATES):
+                if score < thr:
+                    break
+                rid = self._id_by_ikey.get(ikey)
+                if not rid:
+                    continue
                 row = self.db.get_row(rid)
                 if row and row["ns"] == ns:
-                    return {"id": rid, "duplicate": True, "score": round(score, 4)}
+                    return {"id": rid, "namespace": ns, "duplicate": True,
+                            "score": round(score, 4)}
         prov = prov or {"host": platform.node(), "agent": caller,
                         "session": env("SESSION", "-")}
         rid = self.db.insert(record_id=None, ns=ns, text=text, vec=vec,
@@ -541,8 +557,13 @@ class Vault:
                 continue
             rows.append((row, seeded))
 
+        # rows[-0:] is rows[0:], so a limit of 0 (or a negative one) would
+        # return the WHOLE vault instead of nothing. memory_recent exposes
+        # this limit to the host model, so the empty window has to be explicit.
+        lim = int(limit)
+        window = rows[-lim:] if lim > 0 else []
         out = []
-        for row, seeded in rows[-max(0, int(limit)):]:
+        for row, seeded in window:
             created = row["created"]
             try:
                 stamp = datetime.datetime.fromtimestamp(
@@ -696,10 +717,18 @@ class Vault:
 
     @_synchronized
     def lock(self, signing_key=None) -> None:
-        """Flush, seal, and drop key material from this process."""
+        """Flush, seal, and drop key material from this process.
+
+        The key is dropped, not scrubbed. It is held as `bytes`, which is
+        immutable, so the old `bytearray(self._master)` dance zeroed a throwaway
+        copy and left the real key untouched while briefly putting a second
+        plaintext copy of it on the heap. Releasing the only reference is
+        strictly better than that. Genuinely scrubbing it needs the key held in
+        a mutable buffer end to end, which PyNaCl will not accept (it requires
+        `bytes`), so that is a wider change than this one. See SECURITY.md,
+        which already states that Python cannot guarantee zeroization.
+        """
         self.save(signing_key=signing_key)
-        key = bytearray(self._master)
-        crypto.wipe(key)
         self._master = None
         self._locked = True
 
@@ -832,14 +861,23 @@ class Vault:
         texts = [r["text"] for r in records]
         vecs = self.embedder.embed_passages(texts) if texts else []
         n = 0
+        skipped = 0
         for r, vec in zip(records, vecs):
-            self.store(r["text"], caller=caller,
-                       namespace=namespace or r.get("namespace"),
-                       tags=r.get("tags", []), importance=r.get("importance", 0.5),
-                       quarantined=r.get("quarantined", False),
-                       vec=vec, _journal=False)
-            n += 1
-        self._audit_and_capture(caller, "import", f"{n} records")
+            # store() returns without inserting when the record is a
+            # near-duplicate, so counting every line would report a file that
+            # was already present as fully imported.
+            res = self.store(r["text"], caller=caller,
+                             namespace=namespace or r.get("namespace"),
+                             tags=r.get("tags", []),
+                             importance=r.get("importance", 0.5),
+                             quarantined=r.get("quarantined", False),
+                             vec=vec, _journal=False)
+            if res.get("duplicate"):
+                skipped += 1
+            else:
+                n += 1
+        self._audit_and_capture(
+            caller, "import", f"{n} records, {skipped} duplicates skipped")
         self.save()
         return n
 

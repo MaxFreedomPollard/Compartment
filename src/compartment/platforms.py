@@ -17,6 +17,11 @@ from pathlib import Path
 
 IS_WINDOWS = os.name == "nt"
 
+# Both helpers below sit on the vault-open path, so every subprocess they run
+# is bounded. A wedged system binary degrades to the documented fallback
+# instead of hanging the caller indefinitely.
+_SUBPROCESS_TIMEOUT = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Advisory exclusive file lock (context manager over an open file handle)
@@ -91,12 +96,20 @@ def boot_time() -> str:
     every restart, so a credential wrapped with it dies on reboot."""
     system = platform.system()
     if system == "Darwin":
-        out = subprocess.run(["sysctl", "-n", "kern.boottime"],
-                             capture_output=True, text=True, check=True).stdout
-        import re
-        m = re.search(r"sec = (\d+)", out)
-        if m:
-            return m.group(1)
+        # Guarded like the other branches, and bounded: this runs on every
+        # vault open, so a missing or wedged sysctl must fall through to the
+        # actionable error below instead of raising something opaque or
+        # hanging the process forever.
+        try:
+            out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                                 capture_output=True, text=True, check=True,
+                                 timeout=_SUBPROCESS_TIMEOUT).stdout
+            import re
+            m = re.search(r"sec = (\d+)", out)
+            if m:
+                return m.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
     elif system == "Linux":
         try:
             with open("/proc/stat") as f:
@@ -170,14 +183,16 @@ def machine_id() -> str:
         if system == "Darwin":
             out = subprocess.run(
                 ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                capture_output=True, text=True, check=True).stdout
+                capture_output=True, text=True, check=True,
+                timeout=_SUBPROCESS_TIMEOUT).stdout
             for line in out.splitlines():
                 if "IOPlatformUUID" in line:
                     return line.split('"')[-2]
         elif system == "Linux":
             for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
                 if os.path.exists(p):
-                    return open(p).read().strip()
+                    with open(p) as f:
+                        return f.read().strip()
         elif system == "Windows":
             import winreg
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,

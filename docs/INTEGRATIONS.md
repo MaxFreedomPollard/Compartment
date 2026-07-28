@@ -37,14 +37,14 @@ Claude Desktop (`claude_desktop_config.json`):
 Claude Code keeps its own memory as Markdown files in a per-project
 `memory/` directory with an auto-loaded `MEMORY.md` index. Left alone, you
 end up with two memories: the model writes to whichever it thinks of first,
-and neither is complete. `compartment integrate claude` resolves it in two ways:
+and neither is complete. `compartment integrate claude` resolves it in three ways:
 
 1. **It imports what is already there.** Every memory file is parsed
    (frontmatter `type` becomes the importance tier, the name becomes a tag)
    and stored in the vault. The source files are read, never modified, and
    re-running imports nothing twice - so it is safe on every re-run.
 2. **It tells the model which one wins.** The MCP handshake instructions and
-   the managed CLAUDE.md block both state that compartment supersedes the file
+   the managed CLAUDE.md block both state that Compartment supersedes the file
    memory: write new memories with `memory_store`, treat the directory as a
    read-only archive. This matters because the host declares its own memory
    in the system prompt, which otherwise outranks anything a tool says.
@@ -146,7 +146,7 @@ turn encrypted, and exposes `compartment_search` / `compartment_store` /
 
 **Shipping in Hermes out of the box** (no copy step for anyone): that
 requires an upstream hermes-agent PR bundling this plugin under
-`plugins/memory/compartment` with `pip_dependencies: ["compartment"]` -
+`plugins/memory/compartment` with `pip_dependencies: ["compartment>=2.3"]` -
 which in turn requires the PyPI release. Sequence: publish `compartment`
 → PR → every Hermes user sees Compartment in the picker by default.
 

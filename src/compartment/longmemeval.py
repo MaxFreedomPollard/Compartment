@@ -83,21 +83,25 @@ def download(variant: str = "s") -> Path:
 def _fts_ranks(texts: list[str], query: str, limit: int) -> dict[int, int]:
     """BM25 ranks over the turn corpus, Compartment's FTS5 quoting rules."""
     con = sqlite3.connect(":memory:")
-    con.execute("CREATE VIRTUAL TABLE fts USING fts5(text)")
-    con.executemany("INSERT INTO fts (rowid, text) VALUES (?, ?)",
-                    list(enumerate(texts)))
-    safe = " ".join('"' + t.replace('"', "") + '"'
-                    for t in query.split() if t.replace('"', ""))
-    if not safe:
-        return {}
-    # OR the terms: a memory query rarely matches every word of a question
-    safe = safe.replace('" "', '" OR "')
+    # Every exit from here on has to close the connection, including the
+    # empty-query early return - this runs once per question, so a leaked
+    # connection per call adds up over a 500-question sweep.
     try:
-        rows = con.execute(
-            "SELECT rowid, rank FROM fts WHERE fts MATCH ? ORDER BY rank "
-            "LIMIT ?", (safe, limit)).fetchall()
-    except sqlite3.OperationalError:
-        return {}
+        con.execute("CREATE VIRTUAL TABLE fts USING fts5(text)")
+        con.executemany("INSERT INTO fts (rowid, text) VALUES (?, ?)",
+                        list(enumerate(texts)))
+        safe = " ".join('"' + t.replace('"', "") + '"'
+                        for t in query.split() if t.replace('"', ""))
+        if not safe:
+            return {}
+        # OR the terms: a memory query rarely matches every word of a question
+        safe = safe.replace('" "', '" OR "')
+        try:
+            rows = con.execute(
+                "SELECT rowid, rank FROM fts WHERE fts MATCH ? ORDER BY rank "
+                "LIMIT ?", (safe, limit)).fetchall()
+        except sqlite3.OperationalError:
+            return {}
     finally:
         con.close()
     return {int(r[0]): rank for rank, r in enumerate(rows)}
@@ -261,6 +265,8 @@ def run(variant: str = "s", limit: int | None = None,
     print()
 
     def pct(rows: list[dict], key: str) -> float:
+        if not rows:
+            return 0.0
         return round(100.0 * sum(r[key] for r in rows) / len(rows), 1)
 
     out: dict = {
@@ -272,6 +278,21 @@ def run(variant: str = "s", limit: int | None = None,
         "fusion": "RRF(exact vector) + RRF(BM25) + 0.02*cosine, "
                   "session = best turn",
     }
+    if not scored:
+        # Every question was an abstention or had no usable turns. Report that
+        # honestly instead of dying on a divide-by-zero after doing all the
+        # embedding work.
+        out["note"] = ("no questions were scored - every instance was an "
+                       "abstention question or had no usable turns; "
+                       "recall and latency are undefined")
+        for k in ks:
+            out[f"recall_any@{k}"] = None
+            out[f"recall_all@{k}"] = None
+        out["by_type"] = {}
+        out["query_ms_p50"] = None
+        out["query_ms_p95"] = None
+        out["unique_turns_embedded"] = len(cache)
+        return out
     for k in ks:
         out[f"recall_any@{k}"] = pct(scored, f"any@{k}")
         out[f"recall_all@{k}"] = pct(scored, f"all@{k}")
