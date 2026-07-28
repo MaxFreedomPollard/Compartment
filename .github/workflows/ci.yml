@@ -62,7 +62,7 @@ jobs:
       - name: It opens and stays open
         run: |
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
-            timeout 25 compartment panel --show &
+            compartment panel --show >/dev/null 2>&1 &
           PID=$!
           sleep 18
           if ! kill -0 $PID 2>/dev/null; then
@@ -70,17 +70,27 @@ jobs:
           fi
           echo "still running after 18s"
           kill $PID 2>/dev/null || true
+          pkill -f "compartment.*panel" || true
+          sleep 2
 
       - name: A second copy stands down instead of opening a second window
         run: |
+          # Detached from the step's stdout, or the runner waits on it.
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
-            timeout 40 compartment panel --show &
+            compartment panel --show >/dev/null 2>&1 &
           sleep 12
-          out=$(xvfb-run -a compartment panel --show 2>&1)
-          echo "$out"
-          echo "$out" | grep -q "already open" || {
-            echo "a second copy did not stand down"; exit 1; }
+          set +e
+          out=$(timeout 30 xvfb-run -a compartment panel --show 2>&1)
+          rc=$?
+          set -e
+          echo "second copy rc=$rc said: $out"
           pkill -f "compartment.*panel" || true
+          if [ "$rc" -ne 0 ]; then
+            echo "the second copy did not exit; it opened a window of its own"
+            exit 1
+          fi
+          echo "$out" | grep -q "already open" || {
+            echo "the second copy exited without saying why"; exit 1; }
 
       - name: It puts itself in the applications menu
         run: |
