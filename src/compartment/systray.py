@@ -30,10 +30,10 @@ from pathlib import Path
 from .home import env, home
 
 from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
-                      auto_lock_label, change_passphrase, claim_first_run,
-                      default_vault, fetch_state, integrate, lock_vault,
-                      self_check, set_setting, starter_note, summarise,
-                      unlock_vault)
+                      acquire_instance_lock, auto_lock_label,
+                      change_passphrase, claim_first_run, default_vault,
+                      fetch_state, integrate, lock_vault, self_check,
+                      set_setting, starter_note, summarise, unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -111,8 +111,10 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     # is wired to it. One button per agent, so that step is not a terminal
     # command someone has to know about.
     rows.append(("heading", "CONNECT AN AGENT"))
+    wired = state.get("integrations") or {}
     for target, name in INTEGRATION_TARGETS:
-        rows.append((f"connect:{target}", name))
+        rows.append((f"connect:{target}",
+                     f"{name} ✓" if wired.get(target) else name))
     rows.append(("note", state.get("connect_note") or
                  "Registers memory with the agent, writes its instructions "
                  "and turns on capture. The same as running "
@@ -204,6 +206,14 @@ def run(vault: str | None = None, show: bool = False,
     if render_to:                                     # parity with --render
         print("error: --render is macOS only", file=sys.stderr)
         return 2
+
+    # One icon per vault, however each copy was started: the Run key at
+    # sign-in, `compartment init`, or a person launching it again by hand.
+    _lock, only = acquire_instance_lock(vault_path)
+    if not only:
+        print("Compartment is already running - open it from the "
+              "notification area")
+        return 0
 
     try:
         import tkinter as tk
@@ -350,22 +360,45 @@ def run(vault: str | None = None, show: bool = False,
         ttk.Label(frame, text="CONNECT AN AGENT",
                   font=("Segoe UI", 8, "bold")).pack(anchor="w")
 
-        def connect(target):
-            _ok, note = integrate(vault_path, target)
-            panel["connect_note"] = note
+        def connect(target, name):
+            """Say it is working, then work, so the click is visibly seen.
+
+            Tk repaints between events and not during one, so doing the
+            wiring straight from the handler freezes the panel for a second
+            and then changes one line: indistinguishable from a dead button.
+            """
+            if panel.get("connect_busy"):
+                return                          # one at a time
+            panel["connect_busy"] = target
+            panel["connect_note"] = f"Connecting {name}…"
             refresh()
 
+            def work():
+                try:
+                    _ok, note = integrate(vault_path, target)
+                except Exception as exc:        # noqa: BLE001
+                    note = f"could not connect: {exc}"
+                panel["connect_busy"] = None
+                panel["connect_note"] = note
+                refresh()
+            (panel.get("win") or root).after(50, work)
+
+        wired = state.get("integrations") or {}
         connect_row = ttk.Frame(frame)
         connect_row.pack(fill="x", pady=(6, 0))
         for _target, _name in INTEGRATION_TARGETS:
-            ttk.Button(connect_row, text=_name,
-                       command=lambda t=_target: connect(t)
+            ttk.Button(connect_row,
+                       text=f"{_name} ✓" if wired.get(_target) else _name,
+                       state=("disabled" if panel.get("connect_busy")
+                              else "normal"),
+                       command=lambda t=_target, n=_name: connect(t, n)
                        ).pack(side="left", padx=(0, 6))
         ttk.Label(frame, text=panel.get("connect_note") or
                   "Registers memory with the agent, writes its instructions "
                   "and turns on capture. The same as running "
                   "`compartment integrate claude` in a terminal.",
-                  foreground="#666", wraplength=WRAP,
+                  foreground=("#000" if panel.get("connect_note") else "#666"),
+                  wraplength=WRAP,
                   justify="left").pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(frame).pack(fill="x", pady=10)

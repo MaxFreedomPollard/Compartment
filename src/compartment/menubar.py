@@ -69,6 +69,52 @@ def claim_first_run(vault: str) -> bool:
 
 # --------------------------------------------------------------- data layer
 
+#: Held for as long as the status bar app runs. One icon per vault.
+INSTANCE_LOCK_NAME = ".menubar.lock"
+
+#: Module-level so the handle outlives acquire_instance_lock's frame. A
+#: garbage-collected file object closes its descriptor, and closing the
+#: descriptor drops the lock, which would let a second copy in.
+_INSTANCE_LOCK = None
+
+
+def acquire_instance_lock(vault: str):
+    """Claim the right to be the status bar app for this vault.
+
+    Returns (handle, is_only_copy). An operating system lock rather than a
+    pid file, because the kernel drops it when the process dies: a pid file
+    left behind by a crash or a kill would lock the app out of its own menu
+    bar until someone deleted the file by hand.
+
+    A machine where the lock cannot be taken at all - a read-only home, an
+    exotic filesystem - is told it is the only copy. Starting twice is a
+    nuisance; refusing to start is a broken install, and the nuisance is the
+    better failure.
+    """
+    global _INSTANCE_LOCK
+    try:
+        path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+b")                       # noqa: SIM115 - held open
+    except OSError:
+        return None, True
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:                  # another copy holds it
+        fh.close()
+        return None, False
+    except Exception:                # noqa: BLE001 - no locking here at all
+        return fh, True
+    _INSTANCE_LOCK = fh
+    return fh, True
+
+
 def compartment_bin() -> str:
     """A real `compartment` CLI path, for commands handed to other programs.
 
@@ -83,7 +129,12 @@ def compartment_bin() -> str:
     for c in candidates:
         if c.is_file() and c.parent.name != "MacOS":
             return str(c)
-    return shutil.which("compartment") or "compartment"
+    # Same PATH problem as user_path() describes: from a login item, a bare
+    # which() misses ~/.local/bin and writes "compartment" into the agent's
+    # config, which then only works when the agent happens to be started
+    # from a shell that has it.
+    return (shutil.which("compartment", path=user_path())
+            or shutil.which("compartment") or "compartment")
 
 
 def _cli_argv() -> list[str]:
@@ -109,10 +160,58 @@ def default_vault() -> str:
     return env("VAULT", str(home() / "memory.vault"))
 
 
+#: Worked out once, then reused: asking the login shell costs a fork.
+_USER_PATH = None
+
+
+def user_path() -> str:
+    """The PATH a terminal on this machine would have.
+
+    A status bar app started at login inherits launchd's PATH, which is
+    /usr/bin:/bin:/usr/sbin:/sbin and nothing else. Every agent CLI worth
+    wiring lives somewhere else: `claude` installs into ~/.local/bin,
+    Homebrew into /opt/homebrew/bin. So `integrate` run from the app could
+    not find the very tool it was there to connect, skipped the part that
+    needed it, and reported the agent as not installed - on a machine where
+    it plainly was.
+
+    The login shell is asked because it is the only thing that knows what
+    the user's own PATH is. The well-known directories are added after it as
+    a floor, for the case where the shell cannot be asked at all.
+    """
+    global _USER_PATH
+    if _USER_PATH is not None:
+        return _USER_PATH
+    parts = []
+    if sys.platform != "win32":
+        shell = os.environ.get("SHELL") or "/bin/sh"
+        try:
+            out = subprocess.run([shell, "-lc", 'printf %s "$PATH"'],
+                                 capture_output=True, text=True, timeout=15,
+                                 encoding="utf-8", errors="replace").stdout
+            parts += [p for p in (out or "").strip().split(os.pathsep) if p]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    parts += [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if sys.platform != "win32":
+        h = Path.home()
+        parts += [str(h / ".local" / "bin"), "/usr/local/bin",
+                  "/opt/homebrew/bin", str(h / "bin"),
+                  str(h / ".claude" / "local")]
+    seen, ordered = set(), []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            ordered.append(p)
+    _USER_PATH = os.pathsep.join(ordered)
+    return _USER_PATH
+
+
 def _run(args: list[str], timeout: int = 60) -> tuple[int, str]:
     try:
         p = subprocess.run(args, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8", errors="replace")
+                           timeout=timeout, encoding="utf-8", errors="replace",
+                           env={**os.environ, "PATH": user_path()})
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
@@ -176,6 +275,7 @@ def fetch_state(vault: str) -> dict:
     dies because a vault is missing is worse than one that says so."""
     state = {"vault": vault, "exists": os.path.exists(vault), "locked": True,
              "records": 0, "organic": 0, "recent": [], "error": None,
+             "integrations": integration_status(vault),
              "settings": {"capture_hook": False,
                           "search_starter_facts": True,
                           "auto_lock_minutes": 30}}
@@ -287,6 +387,52 @@ INTEGRATION_TARGETS = (("claude", "Claude"),
                        ("openclaw", "OpenClaw"))
 
 
+def integration_status(vault: str) -> dict:
+    """Which agents are already wired to this machine.
+
+    Reads each agent's own configuration, which is the only thing that can
+    answer it: Compartment keeps no record of who it has been connected to,
+    and a record it did keep could disagree with the truth after someone
+    edited a config by hand. Best effort, and never raises - not being able
+    to tell must not stop the button from working.
+    """
+    out = {t: False for t, _ in INTEGRATION_TARGETS}
+    try:                                                # Claude Code / Desktop
+        p = Path.home() / ".claude.json"
+        if p.is_file():
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+            out["claude"] = "compartment" in (cfg.get("mcpServers") or {})
+        if not out["claude"]:
+            from . import claude_hooks
+            out["claude"] = bool(claude_hooks.is_installed())
+    except (OSError, ValueError, Exception):            # noqa: BLE001
+        pass
+    try:                                                # Hermes
+        hermes = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        out["hermes"] = (hermes / "plugins" / "compartment"
+                         / "plugin.yaml").is_file()
+    except OSError:
+        pass
+    try:                                                # OpenClaw
+        p = Path(os.environ.get("OPENCLAW_HOME",
+                                Path.home() / ".openclaw")) / "openclaw.json"
+        if p.is_file():
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+            out["openclaw"] = "compartment" in (cfg.get("mcpServers") or {})
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def connected_summary(vault: str) -> str:
+    """One line naming the agents already wired, for the panel."""
+    names = [n for t, n in INTEGRATION_TARGETS
+             if integration_status(vault).get(t)]
+    if not names:
+        return "Not connected to an agent yet."
+    return "Connected: " + ", ".join(names)
+
+
 def integrate(vault: str, target: str) -> tuple[bool, str]:
     """Connect an agent to this vault, from the panel. Returns (ok, message).
 
@@ -301,16 +447,25 @@ def integrate(vault: str, target: str) -> tuple[bool, str]:
     """
     if target not in dict(INTEGRATION_TARGETS):
         return False, f"unknown target {target!r}"
+    name = dict(INTEGRATION_TARGETS)[target]
+    already = integration_status(vault).get(target, False)
     code, out = _run([*_cli_argv(), "--vault", vault, "integrate", target],
                      timeout=300)
     text = " ".join(out.split())
     if code != 0:
-        return False, (text[:200] or f"could not connect {target}")
-    name = dict(INTEGRATION_TARGETS)[target]
+        return False, (text[:200] or f"could not connect {name}")
     if "not found" in text.lower():
-        return True, (f"{name} is not installed on this machine yet. "
-                      "Compartment is ready for it when it is.")
-    return True, f"{name} is connected. Restart it to pick up the change."
+        return True, (f"Could not find {name} on this machine. Everything "
+                      f"that does not need it is set up; install {name} and "
+                      f"click again.")
+    # Wiring is idempotent, so the button always runs it: someone clicking it
+    # a second time usually has a reason, like a vault that has moved. What
+    # changes is what it says afterwards, because "connected" in answer to a
+    # click that changed nothing reads as a lie.
+    if already:
+        return True, (f"{name} was already connected. Checked again and left "
+                      f"it wired to this vault.")
+    return True, f"{name} is connected. Restart {name} to pick up the change."
 
 
 def summarise(state: dict) -> str:
@@ -562,6 +717,21 @@ def run(vault: str | None = None, show: bool = False,
             print("Compartment is already running - asked it to show its panel")
             return 0
 
+    # The check above can only see bundled applications, and a pip install is
+    # a bare Python process with no bundle identifier at all - so it saw
+    # nothing, every launch believed it was the first, and `init` (which
+    # loads a RunAtLoad LaunchAgent and then starts the app itself) put two
+    # icons in the menu bar of every pip install. The lock does not care how
+    # a copy was started.
+    if not render_to:
+        _lock, only = acquire_instance_lock(vault_path)
+        if not only:
+            NSDistributedNotificationCenter.defaultCenter(
+            ).postNotificationName_object_userInfo_deliverImmediately_(
+                SHOW_NOTIFICATION, None, None, True)
+            print("Compartment is already running - asked it to show its panel")
+            return 0
+
     # -- small helpers on top of AppKit's verbosity ------------------------
     def label(text, size=13, bold=False, secondary=False, wrap=False,
               truncate=False, width=CONTENT_WIDTH):
@@ -627,6 +797,7 @@ def run(vault: str | None = None, show: bool = False,
             self.pw_repeat = None
             self.change_note = None
             self.connect_note = None  # what the last Connect button reported
+            self.connect_busy = None  # the agent being wired right now
             return self
 
         # ---- building the popover contents -----------------------------
@@ -778,18 +949,27 @@ def run(vault: str | None = None, show: bool = False,
             # people, so it is a button.
             views.append(label("CONNECT AN AGENT", 10, bold=True,
                                secondary=True))
+            wired = integration_status(vault_path)
             connect_buttons = []
-            for i, (_target, name) in enumerate(INTEGRATION_TARGETS):
+            for i, (target, name) in enumerate(INTEGRATION_TARGETS):
                 b = NSButton.buttonWithTitle_target_action_(
-                    name, self, "connectAgent:")
+                    f"{name} ✓" if wired.get(target) else name,
+                    self, "connectAgent:")
                 b.setTag_(i)
+                b.setEnabled_(self.connect_busy is None)
                 connect_buttons.append(b)
             views.append(row(*connect_buttons, _spacer()))
+            # A click used to change one line of small grey text and nothing
+            # else, which is indistinguishable from a button that does not
+            # work. It now says it is working while it works, and the tick on
+            # the button says what the answer was.
             views.append(label(
                 self.connect_note or
                 "Registers memory with the agent, writes its instructions "
                 "and turns on capture. The same as running `compartment "
-                "integrate claude` in a terminal.", 10, secondary=True,
+                "integrate claude` in a terminal.",
+                11 if self.connect_note else 10,
+                bold=bool(self.connect_note), secondary=not self.connect_note,
                 wrap=True))
             views.append(divider())
 
@@ -928,11 +1108,35 @@ def run(vault: str | None = None, show: bool = False,
             self.rebuild()
 
         def connectAgent_(self, sender):
+            """Say it is working, then work.
+
+            Wiring takes a second or two, and AppKit paints nothing while a
+            handler is running. Doing the work here would freeze the panel
+            for that second and then change one line, which is exactly what
+            a dead button looks like. Painting first and working on the next
+            turn of the run loop costs nothing and shows the user their click
+            landed."""
             try:
-                target = INTEGRATION_TARGETS[int(sender.tag())][0]
-            except (IndexError, ValueError):
+                target, name = INTEGRATION_TARGETS[int(sender.tag())]
+            except (IndexError, ValueError, AttributeError):
                 return
-            _ok, msg = integrate(vault_path, target)
+            if self.connect_busy is not None:
+                return                          # one at a time
+            self.connect_busy = target
+            self.connect_note = f"Connecting {name}…"
+            self.rebuild()
+            self.performSelector_withObject_afterDelay_(
+                "runConnect:", target, 0.05)
+
+        def runConnect_(self, target):
+            try:
+                _ok, msg = integrate(vault_path, str(target))
+            except Exception as exc:            # noqa: BLE001
+                # Never let this die silently: an exception raised inside an
+                # action is swallowed by the run loop, and the button then
+                # genuinely does nothing.
+                msg = f"could not connect: {exc}"
+            self.connect_busy = None
             self.connect_note = msg
             self.rebuild()
 

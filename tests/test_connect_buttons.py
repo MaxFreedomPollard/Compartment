@@ -85,6 +85,7 @@ def test_it_runs_the_documented_command(monkeypatch):
 
 
 def test_success_tells_the_user_to_restart_the_agent(monkeypatch):
+    monkeypatch.setattr(menubar, "integration_status", lambda v: {})
     monkeypatch.setattr(menubar, "_run", lambda *a, **k: (0, "registered."))
     ok, msg = menubar.integrate("/v", "claude")
     assert ok is True
@@ -94,11 +95,12 @@ def test_success_tells_the_user_to_restart_the_agent(monkeypatch):
 def test_a_missing_agent_is_reported_as_normal_not_as_failure(monkeypatch):
     """Not having Hermes installed is not an error, and must not read as
     one: the wiring that can be done is still done."""
+    monkeypatch.setattr(menubar, "integration_status", lambda v: {})
     monkeypatch.setattr(menubar, "_run",
                         lambda *a, **k: (0, "hermes not found; finish with…"))
     ok, msg = menubar.integrate("/v", "hermes")
     assert ok is True
-    assert "not installed" in msg
+    assert "Could not find Hermes" in msg
 
 
 def test_a_real_failure_surfaces_its_reason(monkeypatch):

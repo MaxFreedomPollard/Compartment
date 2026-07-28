@@ -149,7 +149,8 @@ def test_compartment_bin_never_returns_the_app_launcher(tmp_path, monkeypatch):
     (macos / "python").write_text("", encoding="utf-8")
     monkeypatch.setattr(sys, "executable", str(macos / "python"))
     monkeypatch.setattr(sys, "prefix", str(tmp_path / "nowhere"))
-    monkeypatch.setattr(menubar.shutil, "which", lambda n: "/usr/bin/compartment")
+    monkeypatch.setattr(menubar.shutil, "which",
+                        lambda n, path=None: "/usr/bin/compartment")
     assert menubar.compartment_bin() == "/usr/bin/compartment"
 
 
