@@ -157,14 +157,15 @@ never break your editor - and it stays quiet when the vault is locked.
        alt="The Compartment panel in the Windows notification area.">
 </p>
 
-**A menu bar and system tray app.** Download **Compartment.pkg** from the
-[latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
-and open it - the installer asks whether you also want the menu bar utility,
-and everything (Python included) is self-contained, so there is nothing to
-install first. From a checkout, `pip install 'compartment[menubar]'`
-then `compartment menubar` does the same thing; on Windows,
-`pip install 'compartment[tray]'` then `compartment tray`. Either way it puts
-Compartment in the status bar: click the icon and a
+**A menu bar and system tray app, from the same one install.** `pip install
+compartment && compartment init` sets it up on macOS and on Windows: the app
+starts straight away and comes back at every login. There is no separate
+package, no extra to remember and no second command. On the Mac you can
+instead open **Compartment.pkg** from the
+[latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest),
+which carries Python and every dependency inside it, so there is nothing to
+install first. `compartment init --no-app` skips the app for headless boxes
+and CI. Either way it puts Compartment in the status bar: click the icon and a
 panel shows whether the vault is open, how much it has learned, the three
 settings worth changing day to day (capture hook, whether starter facts join
 searches, auto-lock), and the last five things it remembered. Unlock, lock and

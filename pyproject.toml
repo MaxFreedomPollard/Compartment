@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compartment"
-version = "3.0"
+version = "3.1"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,16 @@ dependencies = [
     "tokenizers>=0.15",
     "numpy>=1.26",
     "mcp>=1.0",
+    # The status bar app ships with every install, on the platforms that have
+    # one. It is not an add-on: unlocking, locking and changing the passphrase
+    # are things people do through the icon, not through a terminal, so an
+    # install that only lays down a CLI is an incomplete install. The markers
+    # keep it honest - nothing macOS-only is fetched on Windows, nothing
+    # Windows-only on macOS, and Linux (which has no status bar app here)
+    # installs neither and compiles nothing.
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pystray>=0.19; sys_platform == 'win32'",
+    "pillow>=10; sys_platform == 'win32'",
 ]
 
 # PyPI is the repo's declared homepage, so it is a real front door - and
@@ -64,16 +74,12 @@ engram = "compartment.cli:main"
 # `pip install` compiles nothing and installs cleanly everywhere; large
 # corpora add it with `pip install compartment[hnsw]`.
 hnsw = ["usearch>=2.9"]
-# The macOS menu bar app. PyObjC is macOS-only and irrelevant to the CLI and
-# MCP server, so it stays out of the default install: `pip install
-# compartment[menubar]`, then `compartment menubar`.
-menubar = ["pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'"]
-# The Windows tray app. tkinter draws the panel and comes with Python itself;
-# pystray owns the notification-area icon and is pure Python, so a Windows
-# install still compiles nothing: `pip install compartment[tray]`, then
-# `compartment tray`.
-tray = ["pystray>=0.19; sys_platform == 'win32'",
-        "pillow>=10; sys_platform == 'win32'"]
+# The status bar app is part of the base install now, so these two are kept
+# only so that an existing `pip install compartment[menubar]` or
+# `compartment[tray]` in someone's notes or script keeps resolving instead of
+# failing on an unknown extra. They add nothing.
+menubar = []
+tray = []
 dev = ["pytest>=8", "usearch>=2.9"]
 
 [tool.setuptools.packages.find]

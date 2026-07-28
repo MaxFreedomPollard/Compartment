@@ -307,7 +307,13 @@ def _app_service():
         from Foundation import NSBundle
     except ImportError:
         return None
-    if not (NSBundle.mainBundle().bundleIdentifier() or "").strip():
+    # It has to be OUR bundle, not merely SOME bundle. A framework Python
+    # reports bundleIdentifier "org.python.python" with a bundle path inside
+    # Python.framework, so a bare "is there an identifier" test passes on an
+    # ordinary pip install. SMAppService would then act on Python.app: status
+    # comes back "not found", and registering would put PYTHON in the user's
+    # login items instead of Compartment.
+    if (NSBundle.mainBundle().bundleIdentifier() or "") != BUNDLE_ID:
         return None
     try:
         objc.loadBundle(
@@ -318,10 +324,66 @@ def _app_service():
         return None
 
 
+# A pip install has no app bundle, and SMAppService can only register one. So
+# the bundle path is used when there is a bundle, and a LaunchAgent otherwise.
+# Without this, `pip install compartment` could never start at login on macOS,
+# which would make the status bar app a second-class citizen of the very
+# install most people use.
+# Must match tools/build_macos_app.py: the identity of the real app bundle.
+BUNDLE_ID = "io.github.maxfreedompollard.compartment"
+LAUNCH_AGENT_LABEL = f"{BUNDLE_ID}.menubar"
+
+
+def _agent_plist() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+
+
+def _launcher_argv() -> list[str]:
+    """How to start the status bar app again later, from wherever we live."""
+    exe = shutil.which("compartment")
+    if exe:
+        return [exe, "menubar"]
+    return [sys.executable, "-m", "compartment.cli", "menubar"]
+
+
+def _set_login_agent(enabled: bool) -> str:
+    plist = _agent_plist()
+    if not enabled:
+        try:
+            subprocess.run(["launchctl", "unload", str(plist)],
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        plist.unlink(missing_ok=True)
+        return "off"
+    argv = _launcher_argv()
+    args = "".join(f"        <string>{a}</string>\n" for a in argv)
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        '  <dict>\n'
+        f'    <key>Label</key><string>{LAUNCH_AGENT_LABEL}</string>\n'
+        '    <key>ProgramArguments</key>\n'
+        f'    <array>\n{args}    </array>\n'
+        '    <key>RunAtLoad</key><true/>\n'
+        '    <key>KeepAlive</key><false/>\n'
+        '  </dict>\n'
+        '</plist>\n', encoding="utf-8")
+    try:
+        subprocess.run(["launchctl", "load", str(plist)],
+                       capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"failed: {exc}"
+    return "on"
+
+
 def login_status() -> str:
     svc = _app_service()
     if svc is None:
-        return "unavailable (not running from Compartment.app)"
+        return "on" if _agent_plist().is_file() else "off"
     return LOGIN_STATUS.get(svc.status(), str(svc.status()))
 
 
@@ -330,7 +392,7 @@ def set_login(enabled: bool) -> str:
     name with its icon instead of an anonymous "legacy agent" entry."""
     svc = _app_service()
     if svc is None:
-        return "unavailable (not running from Compartment.app)"
+        return _set_login_agent(enabled)     # pip install: no bundle to register
     try:
         res = (svc.registerAndReturnError_(None) if enabled
                else svc.unregisterAndReturnError_(None))

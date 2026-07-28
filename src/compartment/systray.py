@@ -23,8 +23,11 @@ Design notes:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
+
+from .home import env, home
 
 from .menubar import (AUTO_LOCK_CHOICES, RECENT_COUNT, auto_lock_label,
                       change_passphrase, claim_first_run, default_vault,
@@ -122,6 +125,24 @@ def _winreg():
     return winreg
 
 
+def _autostart_command(vault: str | None = None) -> str:
+    """What Windows runs at sign-in.
+
+    Two things this has to get right. It launches through the console script
+    or pythonw.exe rather than python.exe, because python.exe opens a console
+    window behind a tray app that has no window, at every single sign-in. And
+    it carries the vault path, because a user running a non-default vault
+    would otherwise silently get the default one back after a reboot.
+    """
+    vault = vault or env("VAULT") or str(home() / "memory.vault")
+    exe = shutil.which("compartment")
+    if exe:
+        return f'"{exe}" --vault "{vault}" tray'
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    runner = str(pyw) if pyw.is_file() else sys.executable
+    return f'"{runner}" -m compartment.cli --vault "{vault}" tray'
+
+
 def login_status() -> str:
     try:
         winreg = _winreg()
@@ -141,7 +162,7 @@ def set_login(enabled: bool) -> str:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
             if enabled:
                 winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ,
-                                  f'"{sys.executable}" -m compartment.cli tray')
+                                  _autostart_command())
                 return "on"
             try:
                 winreg.DeleteValue(k, RUN_VALUE)

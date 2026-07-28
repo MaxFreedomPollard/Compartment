@@ -11,6 +11,8 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -151,8 +153,52 @@ def cmd_init(args) -> None:
               "`compartment lock`")
     st = v.status()
     v.save()
+    if not args.no_app:
+        _start_status_bar_app(path)
     print(f"\nVault ready: {st['records']} records, projected RAM "
           f"~{st['projected_ram_mb']}MB. Run `compartment selftest` to verify.")
+
+
+def _start_status_bar_app(vault: str) -> None:
+    """Put the status bar app up now, and again at every login.
+
+    This runs as part of `init` because the icon is the product for most
+    people: unlocking, locking and changing the passphrase all live there.
+    An install that leaves you with only a terminal command is an install
+    that has not finished. Never fatal - a headless box, an SSH session or a
+    platform with no status bar still gets a perfectly good CLI and MCP
+    server, so a failure here is reported and stepped over.
+    """
+    if sys.platform not in ("darwin", "win32"):
+        return                                   # no status bar app here
+    try:
+        app = _tray_app()
+    except Exception as exc:                     # noqa: BLE001
+        print(f"  status bar app unavailable ({exc}); the CLI is unaffected")
+        return
+    try:
+        state = app.set_login(True)
+        print(f"  start at login: {state}")
+    except Exception as exc:                     # noqa: BLE001
+        print(f"  could not enable start at login ({exc})")
+    try:
+        exe = shutil.which("compartment")
+        argv = ([exe, "--vault", vault, "menubar"] if exe else
+                [sys.executable, "-m", "compartment.cli", "--vault", vault,
+                 "menubar"])
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if sys.platform == "win32":
+            # no console window behind an app that has no window
+            kwargs["creationflags"] = 0x00000008          # DETACHED_PROCESS
+        else:
+            kwargs["start_new_session"] = True            # outlive this shell
+        subprocess.Popen(argv, **kwargs)
+        print("  status bar app started - look for the icon in your "
+              + ("menu bar" if sys.platform == "darwin"
+                 else "notification area"))
+    except Exception as exc:                     # noqa: BLE001
+        print(f"  could not start the status bar app ({exc}); run "
+              "`compartment menubar` yourself")
 
 
 def _ask_yn(q: str) -> bool:
@@ -1047,6 +1093,9 @@ def main(argv: list[str] | None = None) -> None:
                    help="store a reboot-surviving Keychain credential (macOS)")
     p.add_argument("--no-session", action="store_true",
                    help="do not stay unlocked after init")
+    p.add_argument("--no-app", action="store_true",
+                   help="do not start the status bar app or enable it at "
+                        "login (headless installs, CI)")
     p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser(
