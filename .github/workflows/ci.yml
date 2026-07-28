@@ -91,6 +91,22 @@ jobs:
           Set-DisplayResolution -Width 1920 -Height 1080 -Force
           Start-Sleep -Seconds 3
 
+      - name: A second copy stands down instead of adding another icon
+        # `compartment init` above already started the tray app, which is the
+        # whole point of it. So a launch now must hand off and exit 0, and
+        # the copy that was already there must still be running afterwards.
+        shell: pwsh
+        run: |
+          $before = @(Get-Process compartment -ErrorAction SilentlyContinue).Count
+          if ($before -lt 1) { Write-Error "init did not start the tray app"; exit 1 }
+          compartment tray --show
+          if ($LASTEXITCODE -ne 0) { Write-Error "the second copy failed instead of standing down"; exit 1 }
+          $after = @(Get-Process compartment -ErrorAction SilentlyContinue).Count
+          if ($after -ne $before) { Write-Error "second copy changed the count: $before -> $after"; exit 1 }
+          Write-Host "one copy before, one copy after"
+          Get-Process compartment -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+
       - name: Start the tray app and prove it is still alive
         # At the DEFAULT scale, which is what nearly everyone runs. The
         # high-DPI path below must not be the only one exercised.

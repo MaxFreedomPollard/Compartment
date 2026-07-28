@@ -95,6 +95,25 @@ def test_an_unwritable_home_still_gets_an_app(tmp_path, monkeypatch):
     assert handle is None
 
 
+def test_a_lock_that_fails_for_any_other_reason_still_gets_an_app(
+        tmp_path, monkeypatch):
+    """Only a contested lock means another copy. Every other failure has to
+    fail open: the alternative is a machine where the app never starts and
+    says nothing about why."""
+    import errno as _errno
+
+    def boom(*a, **k):
+        raise OSError(_errno.ENOLCK, "no locks available on this filesystem")
+    if sys.platform == "win32":
+        import msvcrt
+        monkeypatch.setattr(msvcrt, "locking", boom)
+    else:
+        import fcntl
+        monkeypatch.setattr(fcntl, "flock", boom)
+    _handle, only = menubar.acquire_instance_lock(str(tmp_path / "v.vault"))
+    assert only is True, "a filesystem without locks must not kill the app"
+
+
 def test_the_handle_is_kept_alive_by_the_module(tmp_path):
     """A file object that gets garbage collected closes its descriptor, and
     that drops the lock. Nothing about this works if the handle is dropped."""

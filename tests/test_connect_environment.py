@@ -118,7 +118,10 @@ def test_the_hook_records_a_findable_compartment(monkeypatch, tmp_path):
     used when there is one; this covers the case where there is not, which
     is where the login item's PATH used to leave a bare "compartment".
     """
-    exe = tmp_path / "bin" / "compartment"
+    # Windows resolves a bare name through PATHEXT, so a file with no
+    # extension is not an executable there.
+    exe = tmp_path / "bin" / ("compartment.exe" if sys.platform == "win32"
+                              else "compartment")
     exe.parent.mkdir(parents=True)
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)

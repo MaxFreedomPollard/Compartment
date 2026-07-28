@@ -19,6 +19,7 @@ Design notes:
 from __future__ import annotations
 
 from .home import env, home
+import errno
 import json
 import os
 import shutil
@@ -94,6 +95,10 @@ def acquire_instance_lock(vault: str):
     global _INSTANCE_LOCK
     try:
         path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+    except (OSError, ValueError):
+        return None, True
+
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fh = open(path, "a+b")                       # noqa: SIM115 - held open
     except OSError:
@@ -106,9 +111,14 @@ def acquire_instance_lock(vault: str):
         else:
             import fcntl
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:                  # another copy holds it
+    except OSError as exc:
         fh.close()
-        return None, False
+        # Contested is the only reason to stand down. Anything else means
+        # the lock could not be taken at all, and refusing to start over
+        # that would trade a spare icon for no icon.
+        contested = exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK,
+                                  errno.EWOULDBLOCK)
+        return (None, False) if contested else (None, True)
     except Exception:                # noqa: BLE001 - no locking here at all
         return fh, True
     _INSTANCE_LOCK = fh
