@@ -279,6 +279,40 @@ def change_passphrase(vault: str, new: str, repeat: str) -> tuple[bool, str]:
     return False, (out[:120] or "could not change the passphrase")
 
 
+#: The agents `compartment integrate` can wire, in the order they are offered.
+#: Kept here rather than in the UI so the menu bar and the tray cannot drift
+#: apart, and so adding a target is one edit.
+INTEGRATION_TARGETS = (("claude", "Claude"),
+                       ("hermes", "Hermes"),
+                       ("openclaw", "OpenClaw"))
+
+
+def integrate(vault: str, target: str) -> tuple[bool, str]:
+    """Connect an agent to this vault, from the panel. Returns (ok, message).
+
+    The same command the README gives, run for you. It is offered here
+    because the terminal step after installing is where people stop: the
+    vault exists, the icon is in the menu bar, and nothing is using it yet
+    because nobody knew there was a second command.
+
+    Wiring an agent edits that agent's own configuration, so this reports
+    what happened rather than assuming - a Claude Code CLI that is not
+    installed is a normal outcome, not an error to hide.
+    """
+    if target not in dict(INTEGRATION_TARGETS):
+        return False, f"unknown target {target!r}"
+    code, out = _run([*_cli_argv(), "--vault", vault, "integrate", target],
+                     timeout=300)
+    text = " ".join(out.split())
+    if code != 0:
+        return False, (text[:200] or f"could not connect {target}")
+    name = dict(INTEGRATION_TARGETS)[target]
+    if "not found" in text.lower():
+        return True, (f"{name} is not installed on this machine yet. "
+                      "Compartment is ready for it when it is.")
+    return True, f"{name} is connected. Restart it to pick up the change."
+
+
 def summarise(state: dict) -> str:
     """One line under the title. Also what --self-check prints."""
     if not state["exists"]:
@@ -592,6 +626,7 @@ def run(vault: str | None = None, show: bool = False,
             self.pw_new = None
             self.pw_repeat = None
             self.change_note = None
+            self.connect_note = None  # what the last Connect button reported
             return self
 
         # ---- building the popover contents -----------------------------
@@ -737,6 +772,27 @@ def run(vault: str | None = None, show: bool = False,
                                10, secondary=True))
             views.append(divider())
 
+            # Installing leaves you with a vault and an icon, and nothing
+            # using either until an agent is wired to it. That step is one
+            # terminal command, which is one command too many for most
+            # people, so it is a button.
+            views.append(label("CONNECT AN AGENT", 10, bold=True,
+                               secondary=True))
+            connect_buttons = []
+            for i, (_target, name) in enumerate(INTEGRATION_TARGETS):
+                b = NSButton.buttonWithTitle_target_action_(
+                    name, self, "connectAgent:")
+                b.setTag_(i)
+                connect_buttons.append(b)
+            views.append(row(*connect_buttons, _spacer()))
+            views.append(label(
+                self.connect_note or
+                "Registers memory with the agent, writes its instructions "
+                "and turns on capture. The same as running `compartment "
+                "integrate claude` in a terminal.", 10, secondary=True,
+                wrap=True))
+            views.append(divider())
+
             views.append(label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,
                                secondary=True))
             if st["locked"]:
@@ -869,6 +925,15 @@ def run(vault: str | None = None, show: bool = False,
         def changeAutoLock_(self, sender):
             idx = int(sender.selectedSegment())
             set_setting(vault_path, "auto_lock_minutes", AUTO_LOCK_CHOICES[idx])
+            self.rebuild()
+
+        def connectAgent_(self, sender):
+            try:
+                target = INTEGRATION_TARGETS[int(sender.tag())][0]
+            except (IndexError, ValueError):
+                return
+            _ok, msg = integrate(vault_path, target)
+            self.connect_note = msg
             self.rebuild()
 
         def refresh_(self, sender):

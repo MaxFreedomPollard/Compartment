@@ -91,7 +91,8 @@ def test_missing_vault_and_errors_are_shown_not_raised():
 def test_settings_toggles_are_exactly_the_three_the_mac_panel_has():
     from compartment import menubar
     rows = systray.panel_rows(_state())
-    keys = {k.split(":", 1)[1] for k, _ in rows if ":" in k}
+    keys = {k.split(":", 1)[1] for k, _ in rows
+            if k.startswith(("toggle:", "choice:"))}
     assert keys == set(menubar.fetch_state("/does/not/exist")["settings"])
 
 

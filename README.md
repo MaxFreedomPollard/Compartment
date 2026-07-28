@@ -197,6 +197,11 @@ network at all.
 One command per platform. Each installs the package, creates your
 encrypted vault, and wires the agent.
 
+Every one of these is also a button in the app. Click the Compartment icon
+in your menu bar or notification area, and under **CONNECT AN AGENT** press
+Claude, Hermes or OpenClaw. The button runs the same `compartment integrate`
+command for you, so nobody has to open a terminal a second time.
+
 **Claude (Code + Desktop)** - macOS / Linux:
 ```bash
 pip install compartment && compartment init && compartment integrate claude

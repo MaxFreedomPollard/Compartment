@@ -29,10 +29,11 @@ from pathlib import Path
 
 from .home import env, home
 
-from .menubar import (AUTO_LOCK_CHOICES, RECENT_COUNT, auto_lock_label,
-                      change_passphrase, claim_first_run, default_vault,
-                      fetch_state, lock_vault, self_check, set_setting,
-                      starter_note, summarise, unlock_vault)
+from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
+                      auto_lock_label, change_passphrase, claim_first_run,
+                      default_vault, fetch_state, integrate, lock_vault,
+                      self_check, set_setting, starter_note, summarise,
+                      unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -106,6 +107,16 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
                  f"{'on' if s['search_starter_facts'] else 'off'}"))
     rows.append(("choice:auto_lock_minutes",
                  f"Auto-lock: {auto_lock_label(s['auto_lock_minutes'])}"))
+    # Installing leaves you with a vault that nothing is using until an agent
+    # is wired to it. One button per agent, so that step is not a terminal
+    # command someone has to know about.
+    rows.append(("heading", "CONNECT AN AGENT"))
+    for target, name in INTEGRATION_TARGETS:
+        rows.append((f"connect:{target}", name))
+    rows.append(("note", state.get("connect_note") or
+                 "Registers memory with the agent, writes its instructions "
+                 "and turns on capture. The same as running "
+                 "`compartment integrate claude` in a terminal."))
     rows.append(("heading", f"LAST {RECENT_COUNT} MEMORIES"))
     recent = state.get("recent") or []
     if not recent:
@@ -336,12 +347,35 @@ def run(vault: str | None = None, show: bool = False,
                        command=set_lock).pack(side="right")
 
         ttk.Separator(frame).pack(fill="x", pady=10)
+        ttk.Label(frame, text="CONNECT AN AGENT",
+                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
+
+        def connect(target):
+            _ok, note = integrate(vault_path, target)
+            panel["connect_note"] = note
+            refresh()
+
+        connect_row = ttk.Frame(frame)
+        connect_row.pack(fill="x", pady=(6, 0))
+        for _target, _name in INTEGRATION_TARGETS:
+            ttk.Button(connect_row, text=_name,
+                       command=lambda t=_target: connect(t)
+                       ).pack(side="left", padx=(0, 6))
+        ttk.Label(frame, text=panel.get("connect_note") or
+                  "Registers memory with the agent, writes its instructions "
+                  "and turns on capture. The same as running "
+                  "`compartment integrate claude` in a terminal.",
+                  foreground="#666", wraplength=WRAP,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(frame).pack(fill="x", pady=10)
         ttk.Label(frame, text=f"LAST {RECENT_COUNT} MEMORIES",
                   font=("Segoe UI", 8, "bold")).pack(anchor="w")
         recent = state.get("recent") or []
         if not recent:
-            ttk.Label(frame, text="Nothing yet.",
-                      foreground="#666").pack(anchor="w", pady=(4, 0))
+            ttk.Label(frame, text=starter_note(state), foreground="#666",
+                      wraplength=WRAP,
+                      justify="left").pack(anchor="w", pady=(4, 0))
         for r in recent:
             ttk.Label(frame, text=(r.get("text") or "").strip(),
                       wraplength=WRAP,
