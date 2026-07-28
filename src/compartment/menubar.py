@@ -1020,9 +1020,11 @@ def run(vault: str | None = None, show: bool = False,
             self.hook_switch.setState_(1 if s["capture_hook"] else 0)
             self.hook_switch.setTarget_(self)
             self.hook_switch.setAction_("toggleHook:")
-            views.append(row(label("Capture hook"), _spacer(), self.hook_switch))
-            views.append(label("Save memories Claude Code writes, automatically",
-                               10, secondary=True))
+            # No explanatory line under these two: the switch says what it
+            # does, and a popover cannot grow past the height macOS gives it
+            # without putting the whole panel behind a scrollbar.
+            views.append(row(label("Create memories automatically"), _spacer(),
+                             self.hook_switch))
 
             self.starter_switch = NSSwitch.alloc().init()
             self.starter_switch.setState_(1 if s["search_starter_facts"] else 0)
@@ -1030,8 +1032,6 @@ def run(vault: str | None = None, show: bool = False,
             self.starter_switch.setAction_("toggleStarter:")
             views.append(row(label("Search starter facts"), _spacer(),
                              self.starter_switch))
-            views.append(label("Include the built-in reference knowledge",
-                               10, secondary=True))
 
             seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
                 [auto_lock_label(m) for m in AUTO_LOCK_CHOICES], 0, self,
@@ -1063,18 +1063,13 @@ def run(vault: str | None = None, show: bool = False,
                 b.setEnabled_(self.connect_busy is None)
                 connect_buttons.append(b)
             views.append(row(*connect_buttons, _spacer()))
-            # A click used to change one line of small grey text and nothing
-            # else, which is indistinguishable from a button that does not
-            # work. It now says it is working while it works, and the tick on
-            # the button says what the answer was.
-            views.append(label(
-                self.connect_note or
-                "Registers memory with the agent, writes its instructions "
-                "and turns on capture. The same as running `compartment "
-                "integrate claude` in a terminal.",
-                11 if self.connect_note else 10,
-                bold=bool(self.connect_note), secondary=not self.connect_note,
-                wrap=True))
+            # Only ever the result of a click. The heading and the buttons
+            # already say what this does, and a standing explanation here
+            # cost three lines the popover does not have: past the height
+            # macOS allows, the whole panel goes behind a scrollbar.
+            if self.connect_note:
+                views.append(label(self.connect_note, 11, bold=True,
+                                   wrap=True))
             views.append(divider())
 
             views.append(label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,

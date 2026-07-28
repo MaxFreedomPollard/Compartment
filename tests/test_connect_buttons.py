@@ -143,10 +143,12 @@ def test_the_tray_panel_heads_the_section():
     assert ("heading", "CONNECT AN AGENT") in rows
 
 
-def test_the_tray_panel_explains_what_the_buttons_do():
+def test_the_panel_carries_no_standing_explanation():
+    """The heading and the buttons say what this is. A permanent paragraph
+    under them cost three lines, and a macOS popover that grows past the
+    height the system allows puts the whole panel behind a scrollbar."""
     rows = systray.panel_rows(_state())
-    note = [t for k, t in rows if k == "note"][0]
-    assert "integrate claude" in note
+    assert [t for k, t in rows if k == "note"] == []
 
 
 def test_the_tray_panel_shows_the_last_result_once_there_is_one():

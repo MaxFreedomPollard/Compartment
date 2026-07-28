@@ -102,7 +102,8 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     s = state["settings"]
     rows.append(("heading", "SETTINGS"))
     rows.append(("toggle:capture_hook",
-                 f"Capture hook: {'on' if s['capture_hook'] else 'off'}"))
+                 "Create memories automatically: "
+                 f"{'on' if s['capture_hook'] else 'off'}"))
     rows.append(("toggle:search_starter_facts",
                  f"Search starter facts: "
                  f"{'on' if s['search_starter_facts'] else 'off'}"))
@@ -116,10 +117,11 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     for target, name in INTEGRATION_TARGETS:
         rows.append((f"connect:{target}",
                      f"{name} ✓" if wired.get(target) else name))
-    rows.append(("note", state.get("connect_note") or
-                 "Registers memory with the agent, writes its instructions "
-                 "and turns on capture. The same as running "
-                 "`compartment integrate claude` in a terminal."))
+    # Only the result of a click. The heading and the buttons say the rest,
+    # and a standing explanation here made the panel taller than it is
+    # allowed to be.
+    if state.get("connect_note"):
+        rows.append(("note", state["connect_note"]))
     rows.append(("heading", f"LAST {RECENT_COUNT} MEMORIES"))
     recent = state.get("recent") or []
     if not recent:
@@ -449,7 +451,8 @@ def run(vault: str | None = None, show: bool = False,
             set_setting(vault_path, key, bool(var.get()))
             refresh()
 
-        ttk.Checkbutton(frame, text="Capture hook", variable=hook,
+        ttk.Checkbutton(frame, text="Create memories automatically",
+                        variable=hook,
                         command=lambda: toggle("capture_hook", hook)
                         ).pack(anchor="w", pady=(6, 0))
         ttk.Checkbutton(frame, text="Search starter facts", variable=starter,
@@ -509,13 +512,9 @@ def run(vault: str | None = None, show: bool = False,
                               else "normal"),
                        command=lambda t=_target, n=_name: connect(t, n)
                        ).pack(side="left", padx=(0, 6))
-        ttk.Label(frame, text=panel.get("connect_note") or
-                  "Registers memory with the agent, writes its instructions "
-                  "and turns on capture. The same as running "
-                  "`compartment integrate claude` in a terminal.",
-                  foreground=("#000" if panel.get("connect_note") else "#666"),
-                  wraplength=WRAP,
-                  justify="left").pack(anchor="w", pady=(4, 0))
+        if panel.get("connect_note"):        # only the result of a click
+            ttk.Label(frame, text=panel["connect_note"], wraplength=WRAP,
+                      justify="left").pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(frame).pack(fill="x", pady=10)
         ttk.Label(frame, text=f"LAST {RECENT_COUNT} MEMORIES",
