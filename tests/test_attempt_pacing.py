@@ -35,10 +35,14 @@ def test_the_shipped_interval_is_five_seconds():
 
 
 def test_first_attempt_is_not_delayed(vault_path, fast):
+    """State, not stopwatch. Wall clock cannot express "was not paced": the
+    unlock itself runs Argon2, which is meant to be slow, and on a loaded CI
+    runner that alone outlasts any small bound. Asserting no pacing is
+    pending says exactly what is meant and cannot flake."""
     Vault.create(vault_path, PASS, creator="t").lock()
-    start = time.monotonic()
+    assert crypto._last_failed_attempt is None
     Vault.unlock(vault_path, passphrase=PASS).lock()
-    assert time.monotonic() - start < fast
+    assert crypto._last_failed_attempt is None
 
 
 def test_a_failed_attempt_paces_the_next_one(vault_path, fast):
@@ -80,10 +84,11 @@ def test_a_correct_attempt_clears_the_pacing(vault_path, fast):
     Vault.create(vault_path, PASS, creator="t").lock()
     with pytest.raises((TamperError, CryptoError)):
         Vault.unlock(vault_path, passphrase="wrong")
+    assert crypto._last_failed_attempt is not None, "a failure must pace"
     Vault.unlock(vault_path, passphrase=PASS).lock()   # pays the wait once
-    start = time.monotonic()
-    Vault.unlock(vault_path, passphrase=PASS).lock()   # and not again
-    assert time.monotonic() - start < fast
+    # the next attempt is not paced, which is a fact about state rather than
+    # about how long an Argon2 unlock happens to take on a busy machine
+    assert crypto._last_failed_attempt is None
 
 
 def test_the_user_is_told_why_it_is_waiting(vault_path, fast, capsys):
