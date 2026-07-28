@@ -1111,8 +1111,17 @@ def run(vault: str | None = None, show: bool = False,
                                                                "lockNow:")
                 change = NSButton.buttonWithTitle_target_action_(
                     "Change password", self, "startChangePw:")
-                views.append(row(refresh, lock, _spacer(), quit_b))
-                views.append(row(change, _spacer()))
+                # All four on one row, with Quit holding the right edge. A
+                # popover has a height ceiling, and a row carrying a single
+                # button spends that ceiling on empty space.
+                #
+                # Measure this by RENDERING it, not by asking a button how
+                # wide it would like to be: sizeToFit() on a standalone
+                # NSButton reports well over what the same button occupies
+                # once the stack view lays it out, which is enough to make a
+                # row that fits comfortably look like it overflows.
+                views.append(row(refresh, lock, change, _spacer(), quit_b,
+                                 spacing=6))
             else:
                 views.append(row(refresh, _spacer(), quit_b))
 

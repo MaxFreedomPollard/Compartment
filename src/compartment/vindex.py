@@ -57,7 +57,15 @@ class BruteForceIndex(VectorIndex):
         if not self._keys:
             return []
         sims = self._mat @ vec.astype(np.float32)
-        top = np.argsort(-sims)[:k]
+        k = min(k, sims.shape[0])
+        # Partition first, sort only the k that survive. A full argsort orders
+        # all n vectors to report k of them, which at 20k records is most of
+        # the cost of a search spent arranging results nobody will read.
+        if k < sims.shape[0]:
+            top = np.argpartition(-sims, k - 1)[:k]
+            top = top[np.argsort(-sims[top])]
+        else:
+            top = np.argsort(-sims)
         return [(self._keys[i], float(sims[i])) for i in top]
 
     def __len__(self) -> int:

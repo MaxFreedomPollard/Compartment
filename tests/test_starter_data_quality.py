@@ -26,12 +26,20 @@ def test_every_line_is_valid_json_with_the_expected_schema():
             rec = json.loads(line)
         except json.JSONDecodeError as exc:
             raise AssertionError(f"line {n} is not valid JSON: {exc}") from None
-        assert set(rec) == {"id", "tags", "text"}, f"line {n} schema: {set(rec)}"
+        # `importance` is optional: a starting memory carries the 0.5 default
+        # unless it is deliberately weighted, and build_starter_pack passes it
+        # through to the pack.
+        assert set(rec) <= {"id", "tags", "text", "importance"}, \
+            f"line {n} schema: {set(rec)}"
+        assert {"id", "tags", "text"} <= set(rec), f"line {n} missing keys"
         assert isinstance(rec["id"], str) and rec["id"], f"line {n} bad id"
         assert isinstance(rec["text"], str) and rec["text"].strip(), \
             f"line {n} bad text"
         assert isinstance(rec["tags"], list) and \
             all(isinstance(t, str) for t in rec["tags"]), f"line {n} bad tags"
+        if "importance" in rec:
+            assert isinstance(rec["importance"], (int, float)) and \
+                0.0 <= rec["importance"] <= 1.0, f"line {n} bad importance"
 
 
 def test_ids_are_unique():

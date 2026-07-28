@@ -210,8 +210,8 @@ def _importance(value: float) -> float:
 
     Out-of-range values are clamped rather than rejected, so a mis-scaled
     argument still stores the memory. Unclamped, a value like 10 would swamp
-    ranking through IMPORTANCE_WEIGHT and land outside every dashboard bucket.
-    A non-number falls back to the default."""
+    the importance prior and land outside every dashboard bucket. A non-number
+    falls back to the default."""
     try:
         v = float(value)
     except (TypeError, ValueError):

@@ -28,14 +28,18 @@ import sqlite3
 import time
 from pathlib import Path
 
+import math
+
 import numpy as np
 
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, Embedder
 
-RRF_K = 60           # identical to vault.search fusion
-COSINE_WEIGHT = 0.02
-CANDIDATES = 50
+# The benchmark scores the PRODUCT, so it imports the product's ranking rather
+# than restating it. A benchmark with its own copy of the formula measures the
+# copy, and the number stops meaning anything the moment the two drift.
+from .ranking import (CANDIDATE_POOL, evidence, information_coverage,
+                      p_from_cosine)
 
 VARIANTS = {
     "s": "longmemeval_s",
@@ -90,12 +94,11 @@ def _fts_ranks(texts: list[str], query: str, limit: int) -> dict[int, int]:
         con.execute("CREATE VIRTUAL TABLE fts USING fts5(text)")
         con.executemany("INSERT INTO fts (rowid, text) VALUES (?, ?)",
                         list(enumerate(texts)))
-        safe = " ".join('"' + t.replace('"', "") + '"'
-                        for t in query.split() if t.replace('"', ""))
-        if not safe:
+        terms = [t.replace('"', "") for t in query.split() if t.replace('"', "")]
+        if not terms:
             return {}
         # OR the terms: a memory query rarely matches every word of a question
-        safe = safe.replace('" "', '" OR "')
+        safe = " OR ".join(f'"{t}"' for t in terms)
         try:
             rows = con.execute(
                 "SELECT rowid, rank FROM fts WHERE fts MATCH ? ORDER BY rank "
@@ -135,16 +138,27 @@ def _score_question(inst: dict, embedder: Embedder,
     t0 = time.perf_counter()
     qvec = embedder.embed_query(inst["question"])
     sims = mat @ qvec
-    order = np.argsort(-sims)[:CANDIDATES]
-    fts = _fts_ranks(turn_texts, inst["question"], CANDIDATES)
+    order = np.argsort(-sims)[:CANDIDATE_POOL]
+    fts = _fts_ranks(turn_texts, inst["question"], CANDIDATE_POOL)
 
+    # Self-information per query term over this question's turn corpus, the
+    # same measure the vault uses: how unlikely was this match by chance.
+    n_turns = max(1, len(turn_texts))
+    lowered = [t.lower() for t in turn_texts]
+    term_info: dict[str, float] = {}
+    for t in dict.fromkeys(w.replace('"', "") for w in inst["question"].split()):
+        if not t:
+            continue
+        df = sum(1 for x in lowered if t.lower() in x)
+        if df:
+            term_info[t] = math.log(n_turns / (1.0 + df))
+
+    v_rank = {int(ti): r for r, ti in enumerate(order)}
     fused: dict[int, float] = {}
-    for rank, ti in enumerate(order):
-        ti = int(ti)
-        fused[ti] = (fused.get(ti, 0.0) + 1.0 / (RRF_K + rank + 1)
-                     + COSINE_WEIGHT * float(sims[ti]))
-    for ti, rank in fts.items():
-        fused[ti] = fused.get(ti, 0.0) + 1.0 / (RRF_K + rank + 1)
+    for ti in set(v_rank) | set(fts):
+        fused[ti] = evidence(p_from_cosine(float(sims[ti])),
+                             information_coverage(term_info, turn_texts[ti]),
+                             v_rank.get(ti), fts.get(ti))
 
     sess_score: dict[int, float] = {}
     for ti, sc in fused.items():

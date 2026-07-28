@@ -8,6 +8,7 @@ serialized image genuinely no longer contains the content.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -35,6 +36,20 @@ CREATE TABLE IF NOT EXISTS records (
     accessed REAL NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, text);
+-- One row per EMBEDDING WINDOW. A record longer than the encoder's 512-token
+-- input is embedded as several overlapping windows and scored by its best
+-- one, so a long memory is searchable all the way through instead of only by
+-- its opening. `records.vec` stays the first window, which is what a vault
+-- written before this table contained, so an older image opens unchanged and
+-- `all_vectors` falls back to it while this table is empty.
+CREATE TABLE IF NOT EXISTS vecs (
+    ikey INTEGER PRIMARY KEY,       -- index key, unique across every window
+    id   TEXT NOT NULL,             -- the record this window belongs to
+    seq  INTEGER NOT NULL,          -- window number within that record
+    vec  BLOB NOT NULL,
+    dim  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS vecs_by_id ON vecs(id);
 CREATE TABLE IF NOT EXISTS relations (
     id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -80,6 +95,10 @@ class Store:
         self.conn = sqlite3.connect(":memory:", isolation_level=None,
                                     check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # Document frequencies are read once per term per session: they change
+        # only when records are written, and a search asks for the same handful
+        # of terms repeatedly while scoring.
+        self._df_cache: dict[str, int] = {}
         if image is not None:
             self.conn.deserialize(image)
             # idempotent schema upgrade: vaults sealed by older versions gain
@@ -101,8 +120,36 @@ class Store:
     # -- records ------------------------------------------------------------
 
     def next_ikey(self) -> int:
-        row = self.conn.execute("SELECT COALESCE(MAX(ikey), 0) + 1 AS n FROM records").fetchone()
+        # Across BOTH tables: window keys and record keys share one space, so
+        # a key can never be handed out twice and mean two different things.
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(k), 0) + 1 AS n FROM ("
+            "  SELECT MAX(ikey) k FROM records UNION ALL SELECT MAX(ikey) FROM vecs)"
+        ).fetchone()
         return int(row["n"])
+
+    def set_vectors(self, record_id: str, vecs: np.ndarray) -> list[int]:
+        """Replace every embedding window for one record. Returns the ikeys."""
+        vecs = np.atleast_2d(np.asarray(vecs, dtype=np.float32))
+        self.conn.execute("DELETE FROM vecs WHERE id = ?", (record_id,))
+        keys = []
+        for seq in range(vecs.shape[0]):
+            k = self.next_ikey()
+            self.conn.execute(
+                "INSERT INTO vecs (ikey, id, seq, vec, dim) VALUES (?,?,?,?,?)",
+                (k, record_id, seq, vecs[seq].tobytes(), int(vecs.shape[1])))
+            keys.append(k)
+        return keys
+
+    def vector_keys(self, record_id: str) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT ikey FROM vecs WHERE id = ? ORDER BY seq", (record_id,)).fetchall()
+        return [int(r["ikey"]) for r in rows]
+
+    def vector_counts(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT id, COUNT(*) c FROM vecs GROUP BY id").fetchall()
+        return {r["id"]: r["c"] for r in rows}
 
     def insert(self, *, record_id: str | None, ns: str, text: str, vec: np.ndarray,
                tags: list[str], importance: float, quarantined: bool, pack: str | None,
@@ -112,15 +159,21 @@ class Store:
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
                          aad=wire.record_body(rid)[0])
         now = time.time()
+        # `vec` may be one window or several. The first is stored on the record
+        # itself so the row keeps the shape every older vault has; all of them
+        # go to `vecs`, which is what the index is built from.
+        allv = np.atleast_2d(np.asarray(vec, dtype=np.float32))
+        head = allv[0]
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
             " quarantined, pack, prov, created, accessed)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, self.next_ikey(), ns, ct, wrapped,
-             vec.astype(np.float32).tobytes(), int(vec.shape[0]),
+             head.tobytes(), int(head.shape[0]),
              json.dumps(tags), float(importance), int(quarantined), pack,
              json.dumps(prov), created or now, now),
         )
+        self.set_vectors(rid, allv)
         self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)", (rid, text))
         return rid
 
@@ -164,6 +217,10 @@ class Store:
         and the per-record key is destroyed with the row."""
         cur = self.conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
         self.conn.execute("DELETE FROM fts WHERE id = ?", (record_id,))
+        # Every embedding window goes with it. A window left behind would keep
+        # answering searches for text the vault no longer holds, which is the
+        # one thing forget() must never do.
+        self.conn.execute("DELETE FROM vecs WHERE id = ?", (record_id,))
         if cur.rowcount == 0:
             return False
         if shred:
@@ -175,7 +232,18 @@ class Store:
                           (time.time(), record_id))
 
     def all_vectors(self) -> tuple[list[str], list[int], np.ndarray]:
-        rows = self.conn.execute("SELECT id, ikey, vec, dim FROM records ORDER BY ikey").fetchall()
+        """Every embedding window, as (record ids, index keys, matrix).
+
+        `ids` is parallel to `ikeys` and repeats: several windows of one long
+        record each map back to the same record. A vault written before the
+        `vecs` table existed has none, so it falls back to the single vector on
+        each record, which is exactly what it used to search.
+        """
+        rows = self.conn.execute(
+            "SELECT id, ikey, vec FROM vecs ORDER BY ikey").fetchall()
+        if not rows:
+            rows = self.conn.execute(
+                "SELECT id, ikey, vec FROM records ORDER BY ikey").fetchall()
         ids = [r["id"] for r in rows]
         ikeys = [r["ikey"] for r in rows]
         if not rows:
@@ -193,18 +261,82 @@ class Store:
             "SELECT ns, COUNT(*) c FROM records GROUP BY ns ORDER BY ns").fetchall()
         return [{"namespace": r["ns"], "records": r["c"]} for r in rows]
 
-    def fts_search(self, query: str, limit: int) -> list[tuple[str, float]]:
-        """BM25 keyword search. Returns (id, rank) best-first."""
-        safe = " ".join(
-            '"' + t.replace('"', "") + '"' for t in query.split() if t.replace('"', "")
-        )
-        if not safe:
+    @staticmethod
+    def _terms(query: str) -> list[str]:
+        seen, out = set(), []
+        for t in query.split():
+            t = t.replace('"', "")
+            if t and t.lower() not in seen:
+                seen.add(t.lower())
+                out.append(t)
+        return out
+
+    def _match(self, expr: str, limit: int) -> list[tuple[str, float]]:
+        if not expr:
             return []
-        rows = self.conn.execute(
-            "SELECT id, rank FROM fts WHERE fts MATCH ? ORDER BY rank LIMIT ?",
-            (safe, limit),
-        ).fetchall()
+        try:
+            rows = self.conn.execute(
+                "SELECT id, rank FROM fts WHERE fts MATCH ? ORDER BY rank LIMIT ?",
+                (expr, limit)).fetchall()
+        except sqlite3.OperationalError:      # unparseable query, never fatal
+            return []
         return [(r["id"], float(r["rank"])) for r in rows]
+
+    def doc_frequency(self, term: str) -> int:
+        """How many records contain this term. Cached for the session."""
+        key = term.lower()
+        if key in self._df_cache:
+            return self._df_cache[key]
+        try:
+            n = self.conn.execute(
+                "SELECT count(*) c FROM fts WHERE fts MATCH ?",
+                ('"' + term.replace('"', "") + '"',)).fetchone()["c"]
+        except sqlite3.OperationalError:
+            n = 0
+        self._df_cache[key] = n
+        return n
+
+    def fts_search(self, query: str, limit: int,
+                   common_fraction: float = 0.10) -> list[tuple[str, float]]:
+        """BM25 keyword search, best-first. Returns (id, rank); rank is -bm25.
+
+        FTS5's default operator is implicit AND, so a nine-word question had to
+        appear in a record word for word or the keyword channel returned
+        nothing at all - which is to say it went silent on exactly the long,
+        specific questions an agent actually asks.
+
+        Falling back to plain OR trades that for the opposite failure: "how",
+        "the" and "what" match a large share of the vault and the results fill
+        with records sharing nothing but function words. So the fallback ORs
+        only the terms that carry information, dropping any that appear in more
+        than `common_fraction` of records. That ceiling is measured from this
+        vault rather than taken from an English stopword list, so it behaves
+        the same for a vault full of code, names, or another language.
+        """
+        terms = self._terms(query)
+        if not terms:
+            return []
+        hits = self._match(" ".join(f'"{t}"' for t in terms), limit)
+        if hits:
+            return hits
+        total = self.count()
+        ceiling = max(1, int(total * common_fraction))
+        keep = [t for t in terms if self.doc_frequency(t) <= ceiling] or terms
+        return self._match(" OR ".join(f'"{t}"' for t in keep), limit)
+
+    def term_information(self, query: str) -> dict[str, float]:
+        """Self-information log(N/(1+df)) per query term, in nats.
+
+        This is what makes a literal match comparable to a semantic one: it
+        measures how surprising the match is, not how strong it looks.
+        """
+        total = max(1, self.count())
+        info = {}
+        for t in self._terms(query):
+            df = self.doc_frequency(t)
+            if df > 0:
+                info[t] = math.log(total / (1.0 + df))
+        return info
 
     # -- relations (the memory graph) ---------------------------------------
 

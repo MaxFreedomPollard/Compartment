@@ -18,6 +18,28 @@ from .crypto import CryptoError, sha256
 
 DEFAULT_MODEL = "bge-small-en-v1.5-int8"
 DEFAULT_DIM = 384
+
+# BGE is trained asymmetrically: passages are embedded bare, queries are
+# embedded behind this instruction. Leaving it off costs retrieval accuracy on
+# exactly the short-query-to-long-passage case a memory vault is made of. It
+# applies to the QUERY side only, so turning it on changes no stored vector and
+# no existing vault needs rebuilding.
+BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
+
+# The model reads 512 tokens and no more. Text past that is not "weighted less"
+# by the encoder, it is not seen at all, so a long memory used to be searchable
+# only by its opening. Records are therefore embedded as OVERLAPPING WINDOWS
+# and scored by their best window.
+#
+# The window is 448 rather than 512 to leave room for [CLS]/[SEP] and for a
+# query instruction, and the stride is 384 so consecutive windows share 64
+# tokens - a fact that straddles a boundary still sits whole inside one of
+# them. MAX_CHUNKS caps a pathological record at ~24k tokens of vectors;
+# beyond that the tail stays keyword-searchable, which is the honest tradeoff
+# rather than an unbounded index.
+CHUNK_WINDOW = 448
+CHUNK_STRIDE = 384
+MAX_CHUNKS = 64
 # Pinned hashes of the bundled model files (recorded at bundling time).
 BUNDLED_HASHES = {
     "model_quantized.onnx": "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
@@ -94,7 +116,8 @@ class Embedder:
         if model_name == DEFAULT_MODEL:
             _verify_hashes(d, BUNDLED_HASHES, "bundled model")
             self.dim = DEFAULT_DIM
-            self.prefix_query = self.prefix_passage = ""
+            self.prefix_query = BGE_QUERY_INSTRUCTION
+            self.prefix_passage = ""
             onnx_file = d / "model_quantized.onnx"
         else:
             pin_file = d / "HASHES.json"
@@ -138,3 +161,39 @@ class Embedder:
 
     def embed_query(self, text: str) -> np.ndarray:
         return self._run([self.prefix_query + text])[0]
+
+    def chunk(self, text: str, window: int = CHUNK_WINDOW,
+              stride: int = CHUNK_STRIDE, max_chunks: int = MAX_CHUNKS) -> list[str]:
+        """Split text into overlapping windows measured in MODEL tokens.
+
+        Measured in tokens, not characters: a character budget is a guess that
+        is wrong by a factor of three between prose and a hex digest, and being
+        wrong here means silently dropping the tail of a memory. The tokenizer
+        already knows the answer, and its offsets map every window back to a
+        clean character span so no chunk starts mid-word.
+        """
+        if not text:
+            return [text]
+        self.tok.no_truncation()
+        try:
+            enc = self.tok.encode(text, add_special_tokens=False)
+        finally:
+            self.tok.enable_truncation(max_length=512)
+            self.tok.enable_padding()
+        ids = enc.ids
+        if len(ids) <= window:
+            return [text]
+        offs = enc.offsets
+        out: list[str] = []
+        start = 0
+        while start < len(ids) and len(out) < max_chunks:
+            end = min(start + window, len(ids))
+            out.append(text[offs[start][0]:offs[end - 1][1]])
+            if end >= len(ids):
+                break
+            start += stride
+        return out
+
+    def embed_record(self, text: str) -> np.ndarray:
+        """(n_chunks, dim) for one record. Row 0 is always its opening."""
+        return self.embed_passages(self.chunk(text))

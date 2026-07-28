@@ -31,8 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .acl import AclError
 from .crypto import CryptoError
-from .vault import (CANDIDATES, COSINE_WEIGHT, IMPORTANCE_WEIGHT, RRF_K,
-                    Vault, VaultLockedError)
+from .ranking import CANDIDATE_POOL
+from .vault import Vault, VaultLockedError
 
 TAG_HIDE_PREFIX = "id:"          # seed ids would swamp the tag cloud
 
@@ -212,30 +212,16 @@ def snapshot_search(v: Vault, query: str, caller: str = "dash",
     Vault.search charges the vault for every query: db.touch on each hit
     (which re-ranks the record by having been looked at) and one audit row
     per search. A dashboard that redraws itself would rewrite the vault's
-    history simply by being open, so the fusion below is repeated here
-    against the same constants, minus those two writes. If Vault.search ever
-    grows a "do not record this read" switch, delete this and call it.
+    history simply by being open. So it borrows the vault's own scorer and
+    skips only those two writes: the ranking here is the product's ranking,
+    not a copy of it that can drift.
     """
     with v._oplock:
         v._require_open()
         allowed = set(v._readable_namespaces(caller))
         qvec = v.embedder.embed_query(query)
-        vec_hits = v.index.search(qvec, CANDIDATES)
-        fts_hits = v.db.fts_search(query, CANDIDATES)
-
-        scores: dict[str, float] = {}
-        vec_score: dict[str, float] = {}
-        for rank, (ikey, s) in enumerate(vec_hits):
-            rid = v._id_by_ikey.get(ikey)
-            if rid:
-                scores[rid] = scores.get(rid, 0) + 1.0 / (RRF_K + rank + 1)
-                vec_score[rid] = s
-        for rank, (rid, _) in enumerate(fts_hits):
-            scores[rid] = scores.get(rid, 0) + 1.0 / (RRF_K + rank + 1)
-        boosted = {rid: s
-                   + COSINE_WEIGHT * vec_score.get(rid, 0.0)
-                   + IMPORTANCE_WEIGHT * v._importance_of(rid)
-                   for rid, s in scores.items()}
+        boosted, vec_score, scores = v._rank_candidates(query, qvec,
+                                                        CANDIDATE_POOL)
 
         results = []
         for rid in sorted(boosted, key=boosted.get, reverse=True):
@@ -245,7 +231,7 @@ def snapshot_search(v: Vault, query: str, caller: str = "dash",
             text = v.db.decrypt_text(row, v._master)
             results.append({
                 "id": rid, "namespace": row["ns"], "text": text,
-                "score": round(scores[rid], 5),
+                "score": round(boosted[rid], 5),
                 "cosine": round(vec_score.get(rid, 0.0), 4),
                 "importance": row["importance"], "created": row["created"],
                 "quarantined": bool(row["quarantined"]),

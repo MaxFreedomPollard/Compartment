@@ -18,8 +18,8 @@ import time
 import zipfile
 from pathlib import Path
 
-from . import (__version__, audit, claude_desktop, claude_hooks, claude_memory,
-               offline_guard, packs, selftest, session)
+from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
+               claude_memory, offline_guard, packs, selftest, session)
 from .acl import VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, user_model_dir
@@ -398,6 +398,15 @@ def cmd_uninstall(args) -> None:
             print("  Claude Code capture hook removed")
     except Exception as exc:                             # noqa: BLE001
         print(f"  capture hook: {exc}")
+    # Installing wrote a file into each agent's own skills directory, so
+    # uninstalling takes it back. Only the skill file itself: a backup of an
+    # edited copy stays, and so does the directory if anything else is in it.
+    for _t in agent_skill.SKILL_TARGETS:
+        try:
+            if agent_skill.remove(_t):
+                print(f"  /compartmentalize skill removed from {_t}")
+        except Exception as exc:                         # noqa: BLE001
+            print(f"  {_t} skill: {exc}")
     from .home import LEGACY_NAME, NAME
     for name in (NAME, LEGACY_NAME):
         try:
@@ -848,6 +857,14 @@ def cmd_reindex(args) -> None:
         precision = v.config.settings.get("index_precision", "f32")
     v.config.settings["index_precision"] = precision
     v.config.save(args.vault)
+    # A rebuild is the right moment to give long records the embedding windows
+    # they are missing: a vault written before windows existed is searchable
+    # only by the opening of each memory, and this is what repairs that.
+    w = v.rebuild_windows(caller=args.caller)
+    if w["rebuilt"]:
+        print(f"re-embedded {w['rebuilt']} long records "
+              f"(+{w['windows_added']} embedding windows) so they are "
+              "searchable past their opening")
     v._rebuild_index()
     v.save()
     n = len(v.index)
@@ -1141,8 +1158,49 @@ def _install_capture_hook(vault: str, skip: bool = False) -> None:
           "Restart Claude Code to load it; `compartment hook uninstall` removes it.")
 
 
+def _install_agent_skill(target: str) -> None:
+    """Write /compartmentalize into this agent's skills directory.
+
+    Announced, never silent: this puts a file inside the user's own agent
+    configuration, which is a larger thing to do than register a server, and
+    `compartment uninstall` takes it back. An edited copy is backed up rather
+    than overwritten, because a skill someone has rewritten is their writing.
+
+    Never fatal. The wiring that matters is the MCP registration; a skills
+    directory that cannot be written costs the user a convenience, not their
+    memory.
+    """
+    if target not in agent_skill.SKILL_TARGETS:
+        return
+    try:
+        r = agent_skill.install(target)
+    except (OSError, ValueError) as exc:
+        print(f"\n  ! could not install the /compartmentalize skill ({exc})")
+        return
+    if r["action"] == "unchanged":
+        print(f"\n  ✓ /compartmentalize skill already current at {r['path']}")
+        return
+    verb = {"written": "installed", "updated": "updated",
+            "replaced": "updated"}[r["action"]]
+    print(f"\n  ✓ /compartmentalize skill {verb} → {r['path']}")
+    if r["backup"]:
+        print(f"    (your edited copy was kept at {r['backup']})")
+    print("    Type /compartmentalize before compacting to sweep the whole "
+          "conversation into the vault.")
+
+
 def cmd_integrate(args) -> None:
-    """One-command wiring into an agent ecosystem (hermes / claude)."""
+    """One-command wiring into an agent ecosystem (claude/hermes/openclaw)."""
+    try:
+        _integrate_target(args)
+    finally:
+        # Written whichever way the wiring above went, including the paths
+        # that return early. The skill is a file in the agent's own skills
+        # directory; it does not depend on the MCP registration landing.
+        _install_agent_skill(args.target)
+
+
+def _integrate_target(args) -> None:
     import shutil
     import subprocess as sp
     target = args.target

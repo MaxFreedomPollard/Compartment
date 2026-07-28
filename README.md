@@ -9,7 +9,7 @@ on your own computer. Hermes, Claude, OpenClaw and other AI Agents can
 install in one command. One fully-transferable memory store is shared
 simultaneously by all agents on the computer. 100% offline: no network, no
 API key, no cloud account, no telemetry. The embedding model ships inside
-the package, and a full search returns in under 9 ms, beating the round-trip
+the package, and a full search returns in about 12 ms, beating the round-trip
 a hosted memory charges you for. Every byte at rest is AEAD-encrypted, the
 embedding vectors included, and only your passphrase opens it.
 
@@ -56,7 +56,18 @@ Then connect it to the agent you use:
 compartment integrate claude
 ```
 
-`claude`, `hermes` and `openclaw` are the three auto-connect targets.
+`claude`, `hermes` and `openclaw` are the three auto-connect targets. Each one
+also gets the **`/compartmentalize`** skill installed into its own skills
+directory.
+
+**`/compartmentalize` saves the conversation before it is thrown away.** Every
+agent eventually compacts or summarizes a long session, and the summary is
+written by a pass that has no tools, so nothing can be stored from inside it:
+whatever the model did not think to save is simply gone. Type
+`/compartmentalize` and the whole conversation is swept into the vault first -
+people and contacts, credentials and where they live, URLs and hosts, decisions
+and the reasoning behind them, and a narrative of the session itself. Then
+compact, and nothing is lost. It works on its own at any point too.
 
 **One click install (for people not good with command line).** Download
 **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
@@ -83,6 +94,8 @@ of the box. Every option is in [Configuration](#configuration).
   bar, the Windows notification area, a window on Linux.
 - Every feature toggles in that panel instead of a config file:
   model-independent capture, starter facts in search, auto-lock.
+- `/compartmentalize` is installed into every agent it connects, so one command
+  banks a whole conversation before compaction throws it away.
 - Your vault ships full. The 6,718 seeded facts are ordinary memories,
   editable and forgettable, and one switch keeps them out of search.
 - Runs under what you already use: Hermes ("no setup needed"), Claude Code
@@ -105,7 +118,7 @@ of the box. Every option is in [Configuration](#configuration).
 
 **Search that beats a network call**
 
-- 0.68 ms vector search. 8.8 ms for the full hybrid pipeline. A cloud memory
+- 0.68 ms vector search. About 12 ms for the full hybrid pipeline. A cloud memory
   spends longer than that saying hello.
 - Exact below 20k records: recall = 1.0 by construction, not an
   approximation.
@@ -153,11 +166,12 @@ user say to email the client?"* later retrieves exactly that record.
 **Deterministic importance tiers rank recall**: decisions/consent 0.90,
 personal facts and preferences 0.80, the user's machine and configuration
 0.75, other substantive statements 0.55, pleasantries 0.20 (kept, ranked
-last). The fused score is
-`RRF(vector) + RRF(keyword) + 0.02·cosine + 0.006·importance`: cosine
-magnitude keeps the genuinely best match on top, importance settles
-near-ties in favor of what matters. The agent learns the user and the
-computer first, the world second, and forgets nothing.
+last). Importance multiplies a match rather than adding to it, so it settles
+near-ties in favour of what matters and can never surface a memory for a
+question it has nothing to do with. The whole scoring model, and the numbers
+it was chosen against, are in [The mathematics](#the-mathematics). The agent
+learns the user and the computer first, the world second, and forgets
+nothing.
 
 **One memory, not two.** Agent hosts increasingly ship a memory of their
 own - Claude Code keeps per-project Markdown files with an auto-loaded
@@ -221,6 +235,173 @@ capture, encryption, and total recall. That split is what makes the
 offline guarantee absolute and every decision reproducible. Pair Compartment
 with an offline LLM and the whole agent stack can run usefully with no
 network at all.
+
+## The mathematics
+
+Everything below lives in one file, [`src/compartment/ranking.py`](src/compartment/ranking.py),
+which the vault, the dashboard and the benchmark all import. A benchmark score
+is therefore a measurement of the product and not of a copy of it that has
+drifted.
+
+### Storage: a memory is embedded in windows, not truncated
+
+The encoder reads 512 tokens. Text past that is not weighted less, it is not
+seen at all, so a long memory used to be searchable only by its opening. On a
+real 6,705-memory vault, 40% of records ran past the window and **57.6% of the
+whole corpus was invisible to semantic search**.
+
+So a record is embedded as overlapping windows of `W = 448` tokens at a stride
+of `S = 384`, giving 64 tokens of overlap so no fact is cut in half by a
+boundary, and the record is scored by its best window:
+
+```
+windows(d) = ceil( max(0, tokens(d) - W) / S ) + 1        capped at 64
+
+s_vec(d)   = max over windows w of d :  cos(q, w)
+```
+
+Max-pooling, not averaging: a memory is relevant if **any** part of it is, and
+an average would punish a long memory for the parts that are about something
+else. With one window per record it reduces exactly to the old behaviour, so it
+can never be worse for a short memory. The cost is small because most memories
+are short: on that vault, 6,705 records produced 6,785 windows.
+
+Windows are measured in model tokens, never characters. A character budget is
+wrong by a factor of three between prose and a hex digest, and being wrong here
+means silently dropping the end of a memory.
+
+### Recall: two channels, combined as evidence rather than added
+
+Two indexes look for a memory and they answer different questions. The vector
+index answers *what does this mean*. The keyword index answers *what does this
+say*. Their scores are not denominated in the same thing, and combining them is
+the entire difficulty.
+
+The obvious move, and what Compartment shipped until now, is to add them.
+Adding is the wrong operation: it lets a merely-good semantic match outvote
+conclusive literal evidence. Searching a real vault for a commit sha occurring
+in exactly one memory out of 6,705 returned that memory **below ten paraphrases
+of it** - the keyword index had ranked it first and the sum buried it.
+
+The two channels are not addends, they are **alternatives**: either one alone
+can establish relevance. That is a soft OR over independent evidence,
+
+```
+P(relevant) = 1 - (1 - p_vec)(1 - p_lex)
+```
+
+and the score is its logarithm, which ranks identically while continuing to
+spread results apart near the top instead of saturating at 1:
+
+```
+score(d) = - w_vec · log(1 - p_vec(d))  -  w_lex · log(1 - p_lex(d))
+
+w_vec = 0.75      w_lex = 0.25
+```
+
+Either channel approaching certainty carries the memory on its own, and neither
+can veto the other.
+
+**Reading a cosine as a probability.** An L2-normalized encoder gives cosines
+that are comparable *across* queries, so they map through fixed bounds.
+Per-query min-max normalization is the obvious alternative and it is a trap: it
+rescales the best hit of a hopeless query up to 1.0 and throws that calibration
+away.
+
+```
+p_vec(d) = clamp( (cos(q, d) - 0.25) / (0.85 - 0.25),  0,  0.88 )
+```
+
+That ceiling of 0.88 is doing real work. A cosine is a similarity, never an
+identity: an encoder can say *this is about the same thing*, but it can never
+say *this is the record you named*. A literal match on a string unique to one
+memory can say exactly that. So the semantic channel is capped below the
+certainty the literal channel may reach, and the bound is forced rather than
+chosen - the literal channel tops out at `0.25 · -log(1 - 0.999) = 1.727`, so
+the cap must satisfy `0.75 · -log(1 - cap) < 1.727`, giving `cap < 0.90`.
+
+**Reading a keyword hit as a probability, and deliberately not with BM25.**
+BM25 answers *how well does this match*, which is not what settles a contest
+against a semantic hit. What settles it is how unlikely the match was by
+chance. So each query term carries its self-information over the vault, and a
+memory scores the **fraction of the query's information it accounts for**:
+
+```
+I(t)     = log( N / (1 + df(t)) )                     N = records in the vault
+
+p_lex(d) = ( Σ I(t) for query terms t present in d ) / ( Σ I(t) for all t )
+```
+
+A term unique to one memory is near-conclusive evidence. A term appearing in a
+tenth of the vault is nearly none, whatever its BM25 happens to be. This is the
+piece that makes a literal hit and a semantic hit comparable at all.
+
+The keyword index is queried as AND first, since an exact phrase match is the
+strongest signal available. FTS5's implicit AND means a nine-word question has
+to appear word for word, so when AND finds nothing it falls back to OR over
+only the terms carrying information - anything appearing in more than 10% of
+records is dropped. That ceiling is measured from the vault rather than taken
+from an English stopword list, so it behaves the same for a vault full of code,
+of names, or of another language.
+
+A small rank-agreement residue is added, the one thing reciprocal-rank fusion is
+genuinely good at, sized to break ties rather than decide them:
+
+```
++ w_rrf · k · [ 1/(k + rank_vec) + 1/(k + rank_lex) ]      w_rrf = 0.10, k = 20
+```
+
+### Importance ranking: priors multiply, they never add
+
+```
+final(d) = score(d) · ( 1 + w_imp · (2·importance(d) - 1)
+                          + w_rec · 2^( -age_days(d) / 180 ) )
+
+w_imp = 0.15      w_rec = 0.10
+```
+
+**Multiplicative, so a prior can only reorder a memory that already matched.**
+An additive prior lets a very important memory surface for a question it has
+nothing to do with, which is how a memory system starts feeling haunted. A
+memory that matched nothing scores zero, and nothing can lift it off zero.
+
+**Centred on the 0.5 default**, which is why `2·importance - 1` appears rather
+than `importance`. Every unweighted memory carries 0.5, including the thousands
+of starting facts a vault ships with. Uncentred, they all collect the same
+silent boost, which is another way of saying importance did nothing at all.
+Centred, an unweighted memory is exactly neutral and a deliberate weight is the
+only thing that moves.
+
+The tiers the capture path writes: decisions and consent 0.90, personal facts
+and preferences 0.80, the user's machine and configuration 0.75, other
+substantive statements 0.55, pleasantries 0.20. Recency halves every 180 days.
+
+### Retrieval order, and why the pool is wide
+
+Namespace, tag, date and starter-fact filters run *after* ranking, so a
+candidate pool sized to the number of results requested can be emptied by them
+while matching memories sit just past the cut. The pool starts at 200 per
+channel and widens up to three times when filtering leaves too few.
+
+### Measured
+
+Against the previous scorer, end to end through `Vault.search`, on a real
+6,705-memory vault with 44 queries in four families:
+
+| | before | after |
+|---|---|---|
+| Recall@1 | 0.523 | **0.773** |
+| Recall@5 | 0.705 | **0.977** |
+| MRR@10 | 0.601 | **0.845** |
+| nDCG@10 | 0.627 | **0.878** |
+| exact identifiers found in top 5 | 4/10 | **10/10** |
+| facts past the encoder window | 0/6 | **5/6** |
+| paraphrases | 16/16 | 16/16 |
+| median search latency | 4.4 ms | 11.6 ms |
+
+Nothing regressed in any family. The weights were chosen from a sensitivity
+sweep and are deliberately round: the result is flat around them, because a
+ranker that only works at `w_lex = 0.37` is a ranker that does not work.
 
 ## Wiring each agent
 
@@ -313,11 +494,11 @@ and `compartment bench`.
 |---|---|
 | Fresh install → open vault, offline | seconds, zero network |
 | Vector search, 20k records (HNSW) | p95 0.68 ms |
-| Full hybrid search (embed + vector + BM25 + fuse) | p95 8.8 ms |
+| Full hybrid search (embed + windows + BM25 + evidence fusion) | median 11.6 ms, p95 14.7 ms |
 | Peak RSS, model + vault + index resident | 319 MB |
 | Store one memory (embed + encrypt + fsync journal) | ~40 ms |
 | Wheel size, model included | ~30 MB |
-| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash) | 249 tests, ~60 s |
+| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash, ranking) | 566 tests, ~110 s |
 
 A single network round-trip to a cloud memory API costs more than this
 entire pipeline. The property that makes Compartment secure (no plaintext
@@ -455,7 +636,7 @@ which on Linux is the applications menu entry.
 | `search` / `recent` | find things. `--namespace`, `--tag`, `--top-k`, `--limit`, `--all`, `--json` |
 | `link` / `relations` / `unlink` | the relation graph, with validity windows (`--from`, `--to`, `--as-of`) |
 | `panel` (`menubar`, `tray`) | the app. `--show`, `--self-check`, `--render`, `--login` |
-| `integrate <agent>` | wire claude, hermes or openclaw. `--no-import`, `--no-hooks` |
+| `integrate <agent>` | wire claude, hermes or openclaw, and install `/compartmentalize` for it. `--no-import`, `--no-hooks` |
 | `hook` | capture hook: `install --pin-vault`, `uninstall`, `status`, `capture` |
 | `serve` | the MCP server, over stdio |
 | `dash` | read the vault in a browser: 127.0.0.1, one-time token, GET only |
@@ -465,7 +646,7 @@ which on Linux is the applications menu entry.
 | `2fa` | `enable`, `disable`, `status` - a keyfile as a second factor |
 | `audit` | `verify`, `repair` the hash-chained history |
 | `pack` | `build`, `install`, `remove`, `list`, `export` signed memory packs (`--trusted-key`) |
-| `reindex` | `--int8`, `--f32`, `--re-embed`, `--model` |
+| `reindex` | rebuild the index, and give long records the embedding windows they are missing. `--int8`, `--f32`, `--re-embed`, `--model` |
 | `bench` | `--records`, `--longmemeval`, `--variant`, `--limit` |
 | `setup` | `download-model`, `download-longmemeval`, `airgap-bundle` |
 | `update` | upgrade in place. `--source` takes GitHub main, `--no-app` skips the restart |
@@ -473,6 +654,24 @@ which on Linux is the applications menu entry.
 
 Global flags, before the command: `--vault PATH`, `--caller NAME`,
 `--keyfile PATH`, `--assert-offline`, `--version`.
+
+### The /compartmentalize skill
+
+`compartment integrate <agent>` writes one file into that agent's own skills
+directory, and `compartment uninstall` takes it back:
+
+| Agent | Path |
+|---|---|
+| Claude Code | `~/.claude/skills/compartmentalize/SKILL.md` |
+| Hermes | `$HERMES_HOME` or `~/.hermes/skills/compartmentalize/SKILL.md` |
+| OpenClaw | `$OPENCLAW_HOME` or `~/.openclaw/skills/compartmentalize/SKILL.md` |
+
+All three read the same Agent Skills layout, so it is one packaged file. It is
+user-invoked only: no agent runs it on its own guess. Edit your copy freely -
+a later install backs up anything that differs rather than overwriting it, and
+leaves the backup behind when the skill is removed. Invoking it makes the agent
+sweep the conversation and write to the vault, so expect a burst of
+`memory_store` calls; that is the point of it.
 
 ### Settings file
 
