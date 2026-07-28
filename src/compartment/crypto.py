@@ -10,6 +10,9 @@ import hashlib
 import json
 import os
 import secrets
+import sys
+import threading
+import time
 from typing import Any
 
 from argon2.low_level import Type as Argon2Type
@@ -221,33 +224,86 @@ def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
     raise failure if failure is not None else TamperError("Keyslot did not open")
 
 
+# ---------------------------------------------------------------------------
+# Attempt pacing
+# ---------------------------------------------------------------------------
+# A flat wait between passphrase attempts. Deliberately NOT escalating and
+# NOT a lockout: escalation and lockouts turn a guessing attack into a denial
+# of service against the owner, who is the only person who can ever open this
+# file. The clock starts on a FAILED attempt, so a correct passphrase is never
+# delayed, while an attacker - for whom every attempt fails - pays the full
+# interval on every guess.
+ATTEMPT_INTERVAL_SECONDS = 5.0
+
+_attempt_lock = threading.Lock()
+_last_failed_attempt: float | None = None
+
+
+def _pace_attempt() -> None:
+    """Hold a new attempt until the interval since the last failure has passed."""
+    with _attempt_lock:
+        last = _last_failed_attempt
+        if last is None:
+            return
+        remaining = ATTEMPT_INTERVAL_SECONDS - (time.monotonic() - last)
+        if remaining <= 0:
+            return
+        # stderr: stdout carries the MCP transport and the CLI's JSON output
+        print(f"Waiting {remaining:.1f}s before the next passphrase attempt "
+              f"({ATTEMPT_INTERVAL_SECONDS:.0f}s between attempts).",
+              file=sys.stderr, flush=True)
+        time.sleep(remaining)
+
+
+def _record_failed_attempt() -> None:
+    global _last_failed_attempt
+    with _attempt_lock:
+        _last_failed_attempt = time.monotonic()
+
+
+def reset_attempt_pacing() -> None:
+    """Forget the last failure. For tests and for a fresh process only."""
+    global _last_failed_attempt
+    with _attempt_lock:
+        _last_failed_attempt = None
+
+
 def unwrap_master(keyslots: list[dict], secret: str,
                   keyfile: bytes | None = None) -> bytes:
-    """Try the credential(s) against every keyslot; fail loudly if none opens."""
+    """Try the credential(s) against every keyslot; fail loudly if none opens.
+
+    Attempts are paced: see ATTEMPT_INTERVAL_SECONDS."""
+    _pace_attempt()
     needs_keyfile = False
     for slot in keyslots:
         if slot["type"] in ("passphrase", "recovery"):
             try:
-                return open_slot(slot, secret)
+                master = open_slot(slot, secret)
             except TamperError:
                 continue
+            reset_attempt_pacing()   # the credential was right; stop pacing
+            return master
         elif slot["type"] == "passphrase+keyfile":
             if keyfile is None:
                 needs_keyfile = True
                 continue
             if sha256(keyfile)[:16] != slot.get("keyfile_id"):
+                _record_failed_attempt()
                 raise CryptoError(
                     "That is not this vault's keyfile (contents do not match "
                     "the enrolled second factor)")
             try:
-                return open_slot(slot, secret, keyfile)
+                master = open_slot(slot, secret, keyfile)
             except TamperError:
                 continue
+            reset_attempt_pacing()
+            return master
     if needs_keyfile:
         raise CryptoError(
             "Two-factor unlock is enabled on this vault: a keyfile is "
             "required alongside the passphrase (compartment unlock --keyfile "
             "/path/to/compartment-2fa.key)")
+    _record_failed_attempt()
     raise TamperError("Wrong passphrase (no keyslot opened)")
 
 

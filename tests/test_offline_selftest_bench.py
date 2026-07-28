@@ -79,3 +79,93 @@ def test_bench_budgets(seeded_vault):
     out = bench.run(seeded_vault, synthetic_n=5000, queries=20)
     assert out["budgets"]["vector_search_p95_under_100ms"], out
     assert out["budgets"]["rss_under_1gb"], out
+
+
+# --------------------------------------------------------------- bench fixes
+
+def _ns_count(vault, ns="bench"):
+    return vault.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM records WHERE ns = ?", (ns,)).fetchone()["n"]
+
+
+def _audit_ops(vault, op):
+    return [r["detail"] for r in vault.db.conn.execute(
+        "SELECT detail FROM audit WHERE op = ?", (op,))]
+
+
+def test_bench_teardown_spares_user_records_in_bench_namespace(vault):
+    """A user memory stored under the namespace "bench" must survive a run.
+
+    `compartment store --namespace bench` is a supported thing to do, and the
+    old teardown deleted the whole namespace.
+    """
+    from compartment import audit
+
+    keep = vault.store("the spare key lives under the third flowerpot",
+                       caller="user", namespace="bench")
+    assert not keep.get("duplicate")
+
+    out = bench.run(vault, synthetic_n=200, queries=5)
+    assert out["synthetic_records"] == 200
+
+    # the user's record is untouched, content and all
+    assert vault.get(keep["id"], caller="user")["text"] == \
+        "the spare key lives under the third flowerpot"
+    # and it is the ONLY thing left in the namespace: the 20 bench records went
+    assert _ns_count(vault) == 1
+
+    # the deletions went through the audited path, not straight to db.delete
+    forgets = [d for d in _audit_ops(vault, "forget")]
+    assert len(forgets) == 20, forgets
+    assert keep["id"] not in " ".join(forgets)
+    ok, _entries, msg = audit.verify(vault.db.conn)
+    assert ok, msg
+
+
+def test_bench_teardown_runs_when_the_run_fails(vault, monkeypatch):
+    """A crash after the records are written must still clean them up."""
+    def boom(*a, **kw):
+        raise RuntimeError("index build exploded")
+
+    monkeypatch.setattr(bench, "build_index", boom)
+    with pytest.raises(RuntimeError):
+        bench.run(vault, synthetic_n=200, queries=5)
+    assert _ns_count(vault) == 0
+    assert len(_audit_ops(vault, "forget")) == 20
+
+
+def test_bench_rejects_zero_records_before_writing_anything(vault):
+    from compartment.crypto import CryptoError
+
+    with pytest.raises(CryptoError):
+        bench.run(vault, synthetic_n=0)
+    with pytest.raises(CryptoError):
+        bench.run(vault, synthetic_n=-5)
+    with pytest.raises(CryptoError):
+        bench.run(vault, synthetic_n=10, queries=0)
+    assert _ns_count(vault) == 0
+    assert vault.db.count() == 0
+
+
+def test_bench_reports_rss_as_unmeasured_without_the_resource_module(vault,
+                                                                    monkeypatch):
+    """No `resource` module means no measurement, so no passing budget."""
+    monkeypatch.setattr(bench, "resource", None)
+    assert bench._rss_mb() is None
+    out = bench.run(vault, synthetic_n=200, queries=5)
+    assert out["peak_rss_mb"] is None, out
+    assert out["budgets"]["rss_under_1gb"] is None, out
+    assert not out["budgets"]["rss_under_1gb"]      # never truthy when unmeasured
+    assert "peak_rss_mb_note" in out
+
+
+def test_pct_is_nearest_rank_not_the_maximum():
+    xs = [float(i) for i in range(1, 21)]        # 20 samples, as bench uses
+    assert bench._pct(xs, 0.95) == 19.0          # NOT 20.0, the maximum
+    assert bench._pct(xs, 0.50) == 10.0
+    assert bench._pct(xs, 1.00) == 20.0
+    assert bench._pct([7.0], 0.95) == 7.0
+    assert bench._pct([float(i) for i in range(1, 101)], 0.95) == 95.0
+    assert bench._pct([3.0, 1.0, 2.0], 0.50) == 2.0   # sorts first
+    with pytest.raises(ValueError):
+        bench._pct([], 0.95)

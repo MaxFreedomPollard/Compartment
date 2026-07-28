@@ -6,11 +6,17 @@ read-only for every caller, including "*". Violations are hard errors.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field
 
 from .crypto import CryptoError
+
+# The whole grant vocabulary. Anything outside it is not a grant at all, so it
+# denies both reads and writes rather than being waved through as "not rw".
+ALLOWED_GRANTS = ("rw", "ro", "none")
+PERMITTED_GRANTS = ("rw", "ro")
 
 DEFAULT_CONFIG = {
     "callers": {
@@ -32,8 +38,13 @@ class AclError(CryptoError):
 
 @dataclass
 class VaultConfig:
-    callers: dict = field(default_factory=lambda: DEFAULT_CONFIG["callers"].copy())
-    settings: dict = field(default_factory=lambda: DEFAULT_CONFIG["settings"].copy())
+    # Deep copies: a shallow copy would hand every VaultConfig in the process
+    # the same inner grants dict, so editing one vault's ACLs would silently
+    # edit the module default and every other open vault.
+    callers: dict = field(
+        default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["callers"]))
+    settings: dict = field(
+        default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["settings"]))
 
     @staticmethod
     def path_for(vault_path: str) -> str:
@@ -58,34 +69,71 @@ class VaultConfig:
     # -- ACL ---------------------------------------------------------------
 
     def _caller_entry(self, caller: str) -> dict:
-        entry = self.callers.get(caller) or self.callers.get("*")
-        if entry is None:
+        # An entry that EXISTS is used as written, even when it is empty. Only
+        # a missing caller falls back to "*". Writing {"evil": {}} is how a
+        # caller gets locked down, so it must never inherit the wildcard.
+        if caller in self.callers:
+            entry = self.callers[caller]
+        else:
+            entry = self.callers.get("*")
+        if not isinstance(entry, dict):
             raise AclError(f"Caller {caller!r} has no access to this vault")
         return entry
 
     def default_namespace(self, caller: str) -> str:
         return self._caller_entry(caller).get("default_namespace", "main")
 
+    @staticmethod
+    def _match(grants: dict, namespace: str):
+        """The most specific grant for `namespace`, or None if nothing matches.
+
+        Specificity, not dict order, decides. An exact namespace key beats
+        every wildcard, and among wildcards the longest matching prefix wins,
+        so "secret/*" beats "*" and "a/b/*" beats "a/*". Note that "*" is
+        itself a wildcard whose prefix is empty: it is the weakest possible
+        match, never the first one taken.
+        """
+        if not isinstance(grants, dict):
+            return None
+        if namespace in grants:
+            return grants[namespace]
+        best_len = -1
+        best = None
+        for pattern, g in grants.items():
+            if not isinstance(pattern, str) or not pattern.endswith("*"):
+                continue
+            prefix = pattern[:-1]
+            if namespace.startswith(prefix) and len(prefix) > best_len:
+                best_len, best = len(prefix), g
+        return best
+
     def grant_for(self, caller: str, namespace: str) -> str:
-        """Returns 'rw', 'ro', or raises AclError. packs/* is always ro."""
+        """Returns 'rw' or 'ro'. Anything else raises AclError.
+
+        'none' and any value outside the documented rw/ro/none vocabulary deny
+        the namespace outright - reads included. packs/* is always ro.
+        """
         entry = self._caller_entry(caller)
-        grants = entry.get("grants", {})
-        grant = grants.get(namespace)
-        if grant is None:
-            for pattern, g in grants.items():
-                if pattern.endswith("*") and namespace.startswith(pattern[:-1]):
-                    grant = g
-                    break
-        if grant is None:
-            grant = grants.get("*")
+        grant = self._match(entry.get("grants", {}), namespace)
         if grant is None:
             raise AclError(
                 f"Caller {caller!r} is not granted access to namespace {namespace!r}")
+        if grant not in PERMITTED_GRANTS:
+            if grant in ALLOWED_GRANTS:                  # explicit "none"
+                raise AclError(
+                    f"Caller {caller!r} is denied access to namespace "
+                    f"{namespace!r}")
+            raise AclError(
+                f"Caller {caller!r} has an unrecognized grant {grant!r} for "
+                f"namespace {namespace!r}; expected one of "
+                f"{', '.join(ALLOWED_GRANTS)}")
         if namespace.startswith("packs/"):
             return "ro"  # pack namespaces are immutable for everyone
         return grant
 
     def check(self, caller: str, namespace: str, write: bool) -> None:
+        # grant_for already denies reads for 'none' and for unknown values, so
+        # this only has to police the read-only case on writes.
         grant = self.grant_for(caller, namespace)
         if write and grant != "rw":
             raise AclError(

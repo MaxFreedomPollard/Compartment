@@ -15,6 +15,7 @@ from __future__ import annotations
 from .home import env, home
 import base64
 import datetime
+import hmac
 import json
 import os
 import platform
@@ -192,7 +193,18 @@ class Vault:
         rewired = v._migrate_wire_format()
         if entries or loaded.truncated_tail or merged or rewired or slots_migrated:
             if loaded.truncated_tail:
-                print("notice: discarded one unacknowledged (crash-truncated) write")
+                # The tail could not be read. That is expected after a crash
+                # mid-append, and it is also what a corrupt length prefix looks
+                # like from the outside: in that case the bytes being dropped
+                # are not one unacknowledged write but every acknowledged entry
+                # after the corruption. The save below compacts the journal
+                # away, so keep the original bytes first. Nothing is destroyed
+                # on the strength of a guess.
+                kept = v._preserve_torn_file(path, loaded.tail_bytes)
+                print(f"notice: {loaded.tail_bytes} bytes at the end of the "
+                      f"journal could not be read and were not replayed. This "
+                      f"is normal after a crash during a write. The file as it "
+                      f"was is preserved at {kept}")
             v.save()  # compact replayed journal into the payload
         if check_model:
             emb = Embedder(model_name)
@@ -707,9 +719,38 @@ class Vault:
 
     # --------------------------------------------------------------- persist
 
+    @staticmethod
+    def _preserve_torn_file(path: str, tail_bytes: int) -> str:
+        """Copy the vault aside before an unreadable journal tail is compacted.
+
+        The copy is the file exactly as found, so if the tail was corruption
+        rather than a torn write, the entries that could not be located are
+        still there to recover. Owner-only, like the vault, and it is still
+        fully encrypted: it is the same sealed bytes."""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = f"{path}.torn-{stamp}.bak"
+        n = 0
+        while os.path.exists(dest):
+            n += 1
+            dest = f"{path}.torn-{stamp}-{n}.bak"
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(path, "rb") as src, os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = src.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+        return dest
+
     @_synchronized
     def save(self, signing_key=None) -> None:
         self._require_open()
+        # Pin the audit head and length before the payload is serialized, so
+        # the anchor travels inside the sealed image it describes. A tail
+        # truncation is invisible to a forward walk of the chain; this is what
+        # makes it detectable. Vaults written before this simply gain an
+        # anchor on their first save under this build.
+        audit.anchor(self.db.conn)
         self._with_file_lock(lambda: vaultfile.write_vault_file(
             self.path, self.header, {"sqlite": self.db.serialize()},
             self._master, signing_key=signing_key))
@@ -786,8 +827,14 @@ class Vault:
             if keyfile is None:
                 raise CryptoError(
                     "Two-factor unlock is enabled: rekey needs the keyfile "
-                    "too (compartment rekey --keyfile PATH), or disable it first "
+                    "too (compartment --keyfile PATH rekey), or disable it first "
                     "with `compartment 2fa disable`.")
+            # The vault is already open, so nothing here would otherwise check
+            # that this is the ENROLLED keyfile. Without the check, pointing
+            # rekey at the wrong file silently re-enrols that file as the
+            # second factor and the user's real keyfile stops opening the
+            # vault - which, per SECURITY.md, is unrecoverable.
+            self._require_enrolled_keyfile(keyfile)
             slot = crypto.make_keyfile_slot(self._master, new_passphrase,
                                             keyfile)
         else:
@@ -804,6 +851,22 @@ class Vault:
     def twofa_enabled(self) -> bool:
         return any(s["type"] == "passphrase+keyfile"
                    for s in self.header.keyslots)
+
+    def _require_enrolled_keyfile(self, keyfile: bytes) -> None:
+        """Refuse a keyfile that is not the one already enrolled.
+
+        crypto.unwrap_master makes this check on the unlock path, but an
+        already-open vault never goes through it, so every operation that
+        re-wraps a keyslot has to make it for itself."""
+        enrolled = [s.get("keyfile_id") for s in self.header.keyslots
+                    if s["type"] == "passphrase+keyfile"]
+        given = crypto.sha256(keyfile)[:16]
+        if not any(e and hmac.compare_digest(str(e), given) for e in enrolled):
+            raise CryptoError(
+                "That is not the keyfile this vault is enrolled with. "
+                "Re-wrapping the vault around it would leave your real keyfile "
+                "unable to open it, which cannot be undone. Refusing. Use the "
+                "enrolled keyfile, or run `compartment 2fa disable` first.")
 
     @_synchronized
     def twofa_enable(self, passphrase: str, keyfile: bytes) -> None:

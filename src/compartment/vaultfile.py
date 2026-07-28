@@ -29,6 +29,17 @@ from .crypto import CryptoError, TamperError
 MAGIC = b"NUCV"
 FORMAT_VERSION = 1
 
+# The vault holds every memory an agent has, so it is owner-only. The mode is
+# applied to the temp file BEFORE the atomic rename, because the rename gives
+# the target the temp file's mode: creating the temp at the umask default and
+# renaming it over a 0600 vault would silently widen the vault to 0644.
+VAULT_MODE = 0o600
+
+# A journal entry is one sealed record operation. Anything claiming to be
+# larger than this is a corrupt length prefix, not a real entry, and must not
+# be mistaken for a write that was torn off by a crash.
+MAX_JOURNAL_ENTRY = 64 * 1024 * 1024
+
 
 class VaultFormatError(CryptoError):
     """The file is not a valid Compartment vault (or a newer, unknown version)."""
@@ -142,6 +153,7 @@ class LoadedVaultFile:
     payload_ct: bytes
     journal_cts: list[bytes]
     truncated_tail: bool  # a partial (crashed, unacknowledged) final journal entry was discarded
+    tail_bytes: int = 0   # how many bytes that partial tail occupied
 
 
 def read_vault_file(path: str) -> LoadedVaultFile:
@@ -173,18 +185,37 @@ def read_vault_file(path: str) -> LoadedVaultFile:
 
     journal_cts: list[bytes] = []
     truncated_tail = False
+    tail_bytes = 0
     while pos < len(raw):
         if pos + 4 > len(raw):
+            # fewer than four bytes left: a length prefix itself torn in half
             truncated_tail = True
+            tail_bytes = len(raw) - pos
             break
         (elen,) = struct.unpack(">I", raw[pos : pos + 4])
+        if elen > MAX_JOURNAL_ENTRY:
+            # A crash while appending leaves a SHORT entry whose declared
+            # length is honest. A length this large is the prefix itself being
+            # corrupt, and treating it as a torn tail would silently discard
+            # every acknowledged entry after it.
+            raise TamperError(
+                f"Journal entry at byte {pos} declares {elen} bytes, beyond the "
+                f"{MAX_JOURNAL_ENTRY} byte maximum. The length prefix is "
+                "corrupt, so entries after it cannot be located. Refusing to "
+                "open rather than discarding them.")
         entry = raw[pos + 4 : pos + 4 + elen]
         if len(entry) != elen:
-            truncated_tail = True  # crashed mid-append; final entry unacknowledged
+            # Ran out of file mid-entry. Consistent with a crash during append,
+            # so the caller may discard it - but it is also what a corrupt
+            # length prefix looks like, so the caller preserves the original
+            # file before compacting rather than trusting this reading.
+            truncated_tail = True
+            tail_bytes = len(raw) - pos
             break
         journal_cts.append(entry)
         pos += 4 + elen
-    return LoadedVaultFile(header, payload_ct, journal_cts, truncated_tail)
+    return LoadedVaultFile(header, payload_ct, journal_cts, truncated_tail,
+                           tail_bytes)
 
 
 def decrypt_payload(header: VaultHeader, payload_ct: bytes, master_key: bytes) -> dict[str, bytes]:
@@ -230,7 +261,12 @@ def write_vault_file(
         header.manifest = None
     hjson = crypto.canonical_json(header.to_json())
     tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
+    # os.open with an explicit mode, not open(): the temp file's mode becomes
+    # the vault's mode after the rename below, so creating it at the umask
+    # default (commonly 0644) reopens the vault to every local account on
+    # every save, including one the user had chmod'd to 0600.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, VAULT_MODE)
+    with os.fdopen(fd, "wb") as f:
         f.write(MAGIC)
         f.write(struct.pack(">H", FORMAT_VERSION))
         f.write(struct.pack(">I", len(hjson)))
@@ -238,6 +274,9 @@ def write_vault_file(
         f.write(payload_ct)
         f.flush()
         os.fsync(f.fileno())
+    # O_CREAT only sets the mode when it actually creates the file, so a temp
+    # left behind by an earlier run keeps its old mode. Set it either way.
+    os.chmod(tmp, VAULT_MODE)
     _atomic_replace(tmp, path)
 
 
