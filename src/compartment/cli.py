@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -153,10 +154,57 @@ def cmd_init(args) -> None:
               "`compartment lock`")
     st = v.status()
     v.save()
-    if not args.no_app:
+    if args.no_app:
+        print("  command-line only install (--no-app): no status bar app")
+    elif _cli_only_requested():
+        print("  command-line only install: no status bar app, no login item")
+        print("  add it later with `compartment menubar --login on`")
+    else:
         _start_status_bar_app(path)
     print(f"\nVault ready: {st['records']} records, projected RAM "
           f"~{st['projected_ram_mb']}MB. Run `compartment selftest` to verify.")
+
+
+def _cli_only_requested(seconds: float = 5.0) -> bool:
+    """Offer a way out of the GUI, without making anyone wait for it.
+
+    A window, not a question: the install carries on by itself when the time
+    is up, so someone who is not looking at the terminal loses nothing. Only
+    a real keyboard gets asked - a piped or redirected stdin (installer
+    script, CI, `yes | ...`) skips this instantly rather than blocking for
+    five seconds on input that is never coming.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except Exception:                                    # noqa: BLE001
+        return False
+    print('\nThis is a normal install. Press the letter "s" within 5 seconds '
+          'if you want to do a command-line only install.')
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if msvcrt.kbhit():
+                    return msvcrt.getwch().lower() == "s"
+                time.sleep(0.05)
+            return False
+        import select
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)            # single keypress, no Enter needed
+            ready, _, _ = select.select([sys.stdin], [], [], seconds)
+            if not ready:
+                return False
+            return sys.stdin.read(1).lower() == "s"
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    except Exception:                                    # noqa: BLE001
+        return False                     # never let this block an install
 
 
 def _start_status_bar_app(vault: str) -> None:

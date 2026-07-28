@@ -104,3 +104,57 @@ def test_windows_autostart_avoids_a_console_window_and_keeps_the_vault():
     cmd = systray._autostart_command("/tmp/some.vault")
     assert "/tmp/some.vault" in cmd, "the vault path must survive a reboot"
     assert "python.exe" not in cmd.lower() or "pythonw.exe" in cmd.lower()
+
+
+# --- opting out of the GUI at install time ---------------------------------
+
+def test_a_scripted_install_never_waits_for_a_keypress(monkeypatch, capsys):
+    """The window must cost a non-interactive install nothing. A piped stdin
+    (installer script, CI, `yes | ...`) has no keyboard behind it, so waiting
+    five seconds for input that cannot arrive would be five seconds wasted on
+    every automated install."""
+    import time as _time
+    from compartment import cli
+
+    class NotATerminal:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", NotATerminal())
+    start = _time.monotonic()
+    assert cli._cli_only_requested(5.0) is False
+    assert _time.monotonic() - start < 0.5, "a scripted install must not stall"
+    assert "5 seconds" not in capsys.readouterr().out, "and must not be asked"
+
+
+def test_the_offer_survives_a_terminal_that_refuses_raw_mode(monkeypatch):
+    """Some terminals refuse cbreak. The install continues normally rather
+    than dying at the very last step, after the vault already exists."""
+    from compartment import cli
+
+    class Terminal:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise OSError("no fileno here")
+
+    monkeypatch.setattr(cli.sys, "stdin", Terminal())
+    assert cli._cli_only_requested(0.2) is False
+
+
+def test_the_prompt_says_what_max_asked_it_to_say(monkeypatch, capsys):
+    from compartment import cli
+
+    class Terminal:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise OSError("stop here, we only want the text")
+
+    monkeypatch.setattr(cli.sys, "stdin", Terminal())
+    cli._cli_only_requested(0.1)
+    out = capsys.readouterr().out
+    assert 'This is a normal install. Press the letter "s" within 5 seconds' in out
+    assert "command-line only install" in out
