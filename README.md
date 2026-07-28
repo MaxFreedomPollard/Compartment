@@ -150,13 +150,6 @@ backed up first), it exits successfully no matter what - a memory tool must
 never break your editor - and it stays quiet when the vault is locked.
 `compartment hook status | install | uninstall`, or `integrate claude --no-hooks`.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/menubar-panel.png" width="330"
-       alt="The Compartment panel in the macOS menu bar.">
-  <img src="https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/windows-tray-panel.png" width="330"
-       alt="The Compartment panel in the Windows notification area.">
-</p>
-
 **A menu bar and system tray app, from the same one install.** `pip install
 compartment && compartment init` sets it up on macOS and on Windows: the app
 starts straight away and comes back at every login. There is no separate
