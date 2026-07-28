@@ -5,7 +5,6 @@ the icon is in the menu bar, and nothing is using either because the second
 command was never run. The panel offers it directly, and these tests hold the
 two front ends to the same list of agents as the CLI.
 """
-import re
 
 import pytest
 
@@ -43,7 +42,10 @@ def test_no_agent_the_cli_accepts_is_missing_a_button(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         cli.main(["integrate", "no-such-agent"])
     err = capsys.readouterr().err
-    choices = set(re.findall(r"'([a-z]+)'", err.split("choose from")[-1]))
+    # Python 3.11 prints (choose from 'a', 'b'); 3.12 dropped the quotes.
+    # Read it in a way that survives both, and the next change to it.
+    tail = err.split("choose from")[-1].split(")")[0]
+    choices = {c.strip().strip("'\"") for c in tail.split(",") if c.strip()}
     assert choices == {t for t, _ in menubar.INTEGRATION_TARGETS}
 
 
