@@ -80,12 +80,13 @@ def test_pack_signature_and_content_tamper():
         name="t", version="1.0.0", description="", identity=ident,
         records=[{"text": "a"}, {"text": "b"}], vectors=vecs,
         model={"name": "m", "sha256": "x", "dim": 4})
-    packs.read_pack(blob)  # verifies clean
+    trust = [ident["pub_hex"]]                     # author trusted explicitly
+    packs.read_pack(blob, trusted_keys=trust)  # verifies clean
 
     body_bad = bytearray(blob)
     body_bad[-2] ^= 0xFF  # body tamper → content hash mismatch
     with pytest.raises(TamperError):
-        packs.read_pack(bytes(body_bad))
+        packs.read_pack(bytes(body_bad), trusted_keys=trust)
 
     (hlen,) = struct.unpack(">I", blob[6:10])
     header = json.loads(blob[10:10 + hlen])
@@ -94,4 +95,4 @@ def test_pack_signature_and_content_tamper():
     hj = c.canonical_json(header)
     forged = blob[:6] + struct.pack(">I", len(hj)) + hj + blob[10 + hlen:]
     with pytest.raises(TamperError):
-        packs.read_pack(forged)
+        packs.read_pack(forged, trusted_keys=trust)

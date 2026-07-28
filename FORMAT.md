@@ -14,7 +14,7 @@ offset  size  field
 6       4     header_len (u32)
 10      N     header JSON (plaintext, canonical at write time)
 10+N    P     payload ciphertext   (P = header.payload_len)
-…       *     journal entries, each: u32 len | entry ciphertext
+…       *     journal entries, each: u32 len | u32 crc32(len) | ciphertext
 ```
 
 ### Header JSON
@@ -102,9 +102,29 @@ append (acknowledged). Ops:
 {"op":"forget","id":"...","shred":true|false,"audit":AuditRow}
 ```
 
-Reading: a **truncated final** entry (length prefix incomplete or body
-short at EOF) is an unacknowledged crash artifact - discard with notice.
-Any other malformed entry, or any AEAD failure, is a tamper error: abort.
+Each entry is framed `u32 len | u32 crc32(len) | ciphertext`, where the
+checksum covers the four length bytes only. It exists to separate two
+failures that are otherwise identical from the outside, because the length is
+the only thing that says where the next entry begins:
+
+- **intact prefix, short body, nothing after it** - the process died mid
+  append. The entry was never acknowledged, so it is discarded with a notice
+  and nothing confirmed is lost.
+- **prefix fails its own checksum** - corruption. Entries after it cannot be
+  located, so the reader aborts with a tamper error rather than treating the
+  remainder of the journal as a crash artifact and discarding it. A torn
+  write never produces this: an interrupted append leaves the prefix it
+  already wrote intact.
+
+A declared length beyond 64 MiB is a tamper error even with a valid checksum.
+Any AEAD failure on a complete entry is a tamper error: abort.
+
+The audit chain's head hash and length are also pinned in the payload's meta
+table (`audit_anchor_head`, `audit_anchor_count`) at creation and on every
+save. A forward walk of a hash chain cannot detect its own tail being cut
+off, since what remains is still internally consistent, so verification
+requires the chain to extend the anchor. The anchor is mandatory: its absence
+is reported as tampering, not as an older vault.
 
 Compaction (`save`/`lock`): serialize → seal → write `path.tmp` → fsync →
 atomic rename; journal restarts empty.
@@ -143,8 +163,16 @@ Header:
 
 `sig` = Ed25519 over canonical JSON of the header minus `sig`. Because the
 header pins `content_sha256`, the signature covers the body transitively.
-**Verification order on install: signature → content hash → (decrypt) →
-parse.** Any failure aborts before further parsing.
+
+The verifying key comes from the reader's TRUSTED SET, never from the pack.
+`signer_pub` in the header is an identifying hint only: a pack that supplied
+its own verification key would be vouching for itself, which proves nothing,
+since anyone can mint a keypair and sign anything. A conforming reader ships
+the keys it trusts and refuses everything else unless an operator names a key
+deliberately.
+
+**Verification order on install: signature (against a trusted key) → content
+hash → (decrypt) → parse.** Any failure aborts before further parsing.
 
 Body (after optional AEAD unseal with
 `aad="compartment-pack:"+name`): TLV sections

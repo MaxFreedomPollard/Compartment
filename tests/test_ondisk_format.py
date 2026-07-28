@@ -195,7 +195,8 @@ def test_a_legacy_encrypted_pack_still_opens(legacy_wire, monkeypatch, tmp_path)
         identity=identity, passphrase="packpass")
     monkeypatch.undo()
 
-    header, records, _ = packs.read_pack(blob, passphrase="packpass")
+    header, records, _ = packs.read_pack(blob, passphrase="packpass",
+                                         trusted_keys=[identity["pub_hex"]])
     assert records[0]["text"] == "packed memory"
 
 

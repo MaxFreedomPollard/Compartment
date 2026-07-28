@@ -32,8 +32,13 @@ record id) - ciphertexts cannot be transplanted between contexts.
 - **Tampering:** any modified bit fails AEAD authentication loudly.
   Truncating the file, editing the header, splicing journal entries,
   and downgrade-style version games all produce specific errors.
-- **Malicious or modified memory packs:** signature + content hash are
-  verified before anything is parsed further; failure aborts install.
+- **Malicious or modified memory packs:** the Ed25519 signature is checked
+  against a TRUSTED key, never against the `signer_pub` the pack carries.
+  A pack cannot vouch for itself: anyone can mint a keypair and sign
+  anything, so a self-consistent signature proves nothing about authorship.
+  Only the project key ships as trusted; a third party key has to be named
+  deliberately (`compartment pack install --trusted-key HEX`). Signature,
+  then content hash, then decrypt, then parse. Failure aborts install.
 - **Forensic recovery of deleted memories:** `forget --shred` destroys the
   per-record key, deletes the row + FTS entries, VACUUMs, and rewrites the
   payload - the content is gone from the current vault file and its
@@ -89,17 +94,21 @@ record id) - ciphertexts cannot be transplanted between contexts.
 ## Unlock paths, ranked
 
 1. **Boot-session credential (the default).** `compartment unlock` wraps the
-   master key with a key derived from the current boot's kernel timestamp
-   (plus uid + hostname) and stores it 0600 in `~/.compartment/session/`. The
-   vault then stays continuously usable - across processes, logouts, and
-   logins, for weeks or months - and RELOCKS on any restart or power loss:
-   the new boot's derivation can never open the old wrap, and stale files
-   are deleted on sight. This is deliberately a convenience credential -
-   an attacker who can read it on the *running* machine could also read
-   process RAM; once power is lost it is dead ciphertext. (A forensic
-   caveat: the previous boot time may be recoverable from system logs, so
-   on an unencrypted disk a stolen *file pair* is theoretically weaker
-   than the passphrase. Use FileVault/FDE, which you should anyway.)
+   master key under HMAC-SHA256 keyed by a random 32-byte per-boot secret,
+   together with the boot timestamp, uid and machine id, and stores it 0600
+   in `~/.compartment/session/`. The secret is held in a volatile kernel
+   object - a POSIX shared-memory segment on macOS and Linux, a volatile
+   registry key on Windows - and is never written to any filesystem, so a
+   backup, snapshot or disk image does not contain it. A restart destroys it,
+   which is what makes the relock real rather than a policy. On Windows a
+   full logoff relocks as well. A stolen *file* on its own is therefore
+   useless: guessing the boot time, uid and machine id still leaves 32
+   unknown bytes. It remains a convenience credential - anything running as
+   you on the live machine reads the same secret, and could read the master
+   key out of process RAM anyway, and a RAM capture (hibernation image,
+   suspended VM, swap or pagefile) can expose it too. It is not a second
+   factor. Where no volatile holder exists, storing a credential is REFUSED
+   rather than falling back to values an attacker would already hold.
 2. **macOS Keychain** (`compartment unlock --keychain`, explicit opt-in):
    credential guarded by the OS keychain. Stronger against file theft than
    the session credential, but it SURVIVES REBOOTS - choose it only if

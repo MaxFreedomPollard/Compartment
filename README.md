@@ -351,10 +351,12 @@ The default unlock mode is convenience, not a cage: after a normal
 unlock, the vault stays usable across processes, logouts, and logins -
 for weeks or months if you leave it that way - until the next restart or
 power loss, or until you lock it yourself. Restart/power loss always
-locks it: the stored credential is the master key wrapped by a key
-derived from the kernel's boot timestamp plus the stable machine id; a
-new boot can never open the old wrap. That is arithmetic, not a policy
-check.
+locks it: the stored credential is the master key wrapped under a random
+32-byte per-boot secret, held in a volatile kernel object that is never
+written to any filesystem, so a restart destroys it and a new boot can
+never open the old wrap. A copy of the credential file on its own is
+useless, because the key it needs was never on the disk. That is
+arithmetic, not a policy check.
 
 If you prefer reboot-surviving unlock on macOS, that is an explicit
 opt-in (`compartment unlock --keychain`), with the tradeoff documented. At any

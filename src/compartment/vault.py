@@ -151,6 +151,10 @@ class Vault:
         db.set_meta("model_name", model_name)
         db.set_meta("model_sha256", emb.model_sha256)
         audit.append(db.conn, creator, "init", f"vault created (model {model_name})")
+        # Anchor at creation, not just on save: the anchor is mandatory, so a
+        # vault has to carry one from its very first entry onwards or its own
+        # audit log would read as tampered with.
+        audit.anchor(db.conn)
         config = VaultConfig()
         vaultfile.write_vault_file(path, header,
                                    {"sqlite": db.serialize()}, master)
@@ -193,18 +197,16 @@ class Vault:
         rewired = v._migrate_wire_format()
         if entries or loaded.truncated_tail or merged or rewired or slots_migrated:
             if loaded.truncated_tail:
-                # The tail could not be read. That is expected after a crash
-                # mid-append, and it is also what a corrupt length prefix looks
-                # like from the outside: in that case the bytes being dropped
-                # are not one unacknowledged write but every acknowledged entry
-                # after the corruption. The save below compacts the journal
-                # away, so keep the original bytes first. Nothing is destroyed
-                # on the strength of a guess.
-                kept = v._preserve_torn_file(path, loaded.tail_bytes)
-                print(f"notice: {loaded.tail_bytes} bytes at the end of the "
-                      f"journal could not be read and were not replayed. This "
-                      f"is normal after a crash during a write. The file as it "
-                      f"was is preserved at {kept}")
+                # Reaching here means the framing proved this was an
+                # interrupted append: an intact, checksummed length prefix
+                # with a short body and nothing after it. Corruption of the
+                # prefix raises instead of arriving here, so dropping these
+                # bytes provably loses nothing that was ever acknowledged.
+                print(f"notice: {loaded.tail_bytes} bytes of an unfinished "
+                      "write at the end of the journal were discarded. The "
+                      "write was never acknowledged, so nothing confirmed was "
+                      "lost. This is the expected result of a crash or power "
+                      "loss during a store.")
             v.save()  # compact replayed journal into the payload
         if check_model:
             emb = Embedder(model_name)
@@ -718,29 +720,6 @@ class Vault:
         return self.db.entity_degrees(ns_in=allowed, limit=limit)
 
     # --------------------------------------------------------------- persist
-
-    @staticmethod
-    def _preserve_torn_file(path: str, tail_bytes: int) -> str:
-        """Copy the vault aside before an unreadable journal tail is compacted.
-
-        The copy is the file exactly as found, so if the tail was corruption
-        rather than a torn write, the entries that could not be located are
-        still there to recover. Owner-only, like the vault, and it is still
-        fully encrypted: it is the same sealed bytes."""
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        dest = f"{path}.torn-{stamp}.bak"
-        n = 0
-        while os.path.exists(dest):
-            n += 1
-            dest = f"{path}.torn-{stamp}-{n}.bak"
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with open(path, "rb") as src, os.fdopen(fd, "wb") as out:
-            while True:
-                chunk = src.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
-        return dest
 
     @_synchronized
     def save(self, signing_key=None) -> None:

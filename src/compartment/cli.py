@@ -715,7 +715,8 @@ def cmd_pack_install(args) -> None:
     v = _open_vault(args)
     pw = getpass.getpass("Pack passphrase: ") if args.encrypted else None
     out = packs.install_pack(v, Path(args.file).read_bytes(), caller=args.caller,
-                             passphrase=pw, allow_reembed=args.re_embed)
+                             passphrase=pw, allow_reembed=args.re_embed,
+                             trusted_keys=args.trusted_key or None)
     _print(out)
 
 
@@ -733,7 +734,8 @@ def cmd_pack_list(args) -> None:
 def cmd_pack_export(args) -> None:
     """Dump a .mpack's records to editable JSONL (for hand-editing, then
     rebuilding with `compartment pack build`)."""
-    header, records, _vectors = packs.read_pack(Path(args.file).read_bytes())
+    header, records, _vectors = packs.read_pack(
+        Path(args.file).read_bytes(), trusted_keys=args.trusted_key or None)
     out = Path(args.out)
     with open(out, "w", encoding="utf-8") as f:
         for r in records:
@@ -1262,6 +1264,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("file")
     p.add_argument("--re-embed", action="store_true")
     p.add_argument("--encrypted", action="store_true")
+    p.add_argument("--trusted-key", action="append", metavar="HEX",
+                   help="only packs signed by the project are trusted by default. Name an author's 64 hex character public key to trust it deliberately; repeatable")
     p.set_defaults(fn=cmd_pack_install)
     p = pp_sub.add_parser("remove")
     p.add_argument("name")
@@ -1271,6 +1275,8 @@ def main(argv: list[str] | None = None) -> None:
     p = pp_sub.add_parser("export", help="dump a .mpack to editable JSONL")
     p.add_argument("file")
     p.add_argument("out")
+    p.add_argument("--trusted-key", action="append", metavar="HEX",
+                   help="only packs signed by the project are trusted by default. Name an author's 64 hex character public key to trust it deliberately; repeatable")
     p.set_defaults(fn=cmd_pack_export)
 
     p = sub.add_parser("integrate",

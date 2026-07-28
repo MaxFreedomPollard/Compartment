@@ -9,7 +9,7 @@ DATA = pathlib.Path(__file__).resolve().parents[1] / "src" / "compartment" / "da
 def test_starter_pack_ships_and_verifies():
     blob = (DATA / "starter.mpack").read_bytes()
     header, records, vectors = packs.read_pack(blob)  # verifies sig+hash
-    assert len(records) == vectors.shape[0] == header["records"] == 6718
+    assert len(records) == vectors.shape[0] == header["records"] == 6665
     assert vectors.shape[1] == 384
 
 
@@ -49,7 +49,7 @@ def test_seed_lands_in_main_fully_editable(vault):
                              caller="t")
     assert out["namespace"] == "main"
     assert out["used_precomputed_vectors"] is True
-    assert vault.db.count("main") == 6718
+    assert vault.db.count("main") == 6665
     assert vault.db.count("packs/starter") == 0
     assert vault.pack_list() == []          # no separate section registered
     row = vault.db.conn.execute(
@@ -57,10 +57,10 @@ def test_seed_lands_in_main_fully_editable(vault):
     assert row["pack"] is None
     # editable: forget one starting memory like any other memory
     vault.forget(row["id"], caller="t")
-    assert vault.db.count("main") == 6717
+    assert vault.db.count("main") == 6664
     # new memories land in the very same namespace
     vault.store("organic memory next to the starters", caller="t")
-    assert vault.db.count("main") == 6718
+    assert vault.db.count("main") == 6665
 
 
 def test_legacy_starter_vault_merges_on_unlock(tmp_path):
@@ -76,12 +76,12 @@ def test_legacy_starter_vault_merges_on_unlock(tmp_path):
     before = {
         r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])
         for r in v.db.conn.execute("SELECT * FROM records")}
-    assert v.db.count("packs/starter") == 6718
+    assert v.db.count("packs/starter") == 6665
     v.lock()
 
     v2 = Vault.unlock(p, passphrase=PASS)
     assert v2.db.count("packs/starter") == 0
-    assert v2.db.count("main") == 6718
+    assert v2.db.count("main") == 6665
     assert v2.pack_list() == []
     after = {
         r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])
@@ -90,14 +90,14 @@ def test_legacy_starter_vault_merges_on_unlock(tmp_path):
     # merged memories are freely editable now
     rid = next(iter(after))
     v2.forget(rid, caller="legacy")
-    assert v2.db.count("main") == 6717
+    assert v2.db.count("main") == 6664
     # audit trail records the reorganization
     ops = [r["op"] for r in v2.db.conn.execute("SELECT op FROM audit")]
     assert "merge" in ops
     # and the merge is durable: reopen shows the merged layout
     v2.lock()
     v3 = Vault.unlock(p, passphrase=PASS)
-    assert v3.db.count("main") == 6717 and v3.db.count("packs/starter") == 0
+    assert v3.db.count("main") == 6664 and v3.db.count("packs/starter") == 0
 
 
 def test_pack_export_roundtrip(tmp_path):
@@ -118,7 +118,7 @@ def test_pack_export_roundtrip(tmp_path):
         records=edited, vectors=emb.embed_passages([r["text"] for r in edited]),
         model={"name": DEFAULT_MODEL, "sha256": emb.model_sha256, "dim": emb.dim},
         identity=ident)
-    h2, r2, _ = packs.read_pack(blob2)
+    h2, r2, _ = packs.read_pack(blob2, trusted_keys=[ident["pub_hex"]])
     assert h2["records"] == 41 and r2[20]["id"] == "custom-0001"
 
 

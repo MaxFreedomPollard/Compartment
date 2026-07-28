@@ -13,6 +13,12 @@ from conftest import PASS
 def _isolated_session_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "sess"))
     monkeypatch.delenv("COMPARTMENT_PASSPHRASE", raising=False)
+    yield
+    # The per-boot secret lives in the kernel, not under tmp_path, so it
+    # outlives the temporary directory unless it is destroyed here. This is
+    # this test store's secret, never the real one: the env var above is
+    # still in force, and the holder's name is derived from it.
+    session._forget_boot_secret()
 
 
 def test_locked_by_default_without_credential(vault, vault_path):
@@ -43,6 +49,20 @@ def test_restart_invalidates_session_credential(vault, vault_path, monkeypatch):
     # and the stale file was removed - even reverting the clock can't revive it
     monkeypatch.undo()
     assert session.get(vault_path) is None
+
+
+def test_restart_relocks_even_if_the_boot_clock_repeats(vault, vault_path):
+    """Restart invalidation does not rest on the boot timestamp being new.
+
+    Every public value is unchanged here - same boot time, same uid, same
+    machine - and the vault still relocks, because the random per-boot secret
+    the credential was keyed with died with the previous boot."""
+    session.store(vault_path, vault._master)
+    assert session.get(vault_path) is not None
+    session._forget_boot_secret()                   # what a restart does
+    assert session.get(vault_path) is None
+    with pytest.raises(CryptoError):
+        Vault.resolve_credential(vault_path)
 
 
 def test_lock_clears_session_credential(vault, vault_path):

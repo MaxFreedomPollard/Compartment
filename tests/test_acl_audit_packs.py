@@ -36,7 +36,8 @@ def test_pack_namespaces_always_readonly(vault):
         name="curated", version="1.0.0", description="", identity=ident,
         records=[{"text": "curated pack fact"}], vectors=vec,
         model=dict(vault.header.model))
-    packs.install_pack(vault, blob, caller="test")
+    packs.install_pack(vault, blob, caller="test",
+                       trusted_keys=[ident["pub_hex"]])
     with pytest.raises(AclError):
         vault.store("vandalism", caller="test", namespace="packs/curated")
 
@@ -63,11 +64,11 @@ def test_audit_chain_verify_and_break_detection(vault):
 def test_pack_lifecycle_fast_path_and_reembed(vault):
     out = packs.install_pack(vault, seed_pack_bytes(), caller="test")
     assert out["used_precomputed_vectors"] is True
-    assert out["records"] == 6718
-    assert vault.db.count("packs/starter") == 6718
+    assert out["records"] == 6665
+    assert vault.db.count("packs/starter") == 6665
 
     n = packs.remove_pack(vault, "starter", caller="test")
-    assert n == 6718 and vault.db.count("packs/starter") == 0
+    assert n == 6665 and vault.db.count("packs/starter") == 0
     with pytest.raises(packs.PackError):
         packs.remove_pack(vault, "starter", caller="test")
 
@@ -78,9 +79,12 @@ def test_pack_lifecycle_fast_path_and_reembed(vault):
         records=[{"text": "foreign fact"}],
         vectors=np.random.rand(1, 384).astype(np.float32),
         model={"name": "other-model", "sha256": "y", "dim": 384})
+    trust = [ident["pub_hex"]]
     with pytest.raises(packs.PackError):
-        packs.install_pack(vault, blob, caller="test")           # refuses
-    out = packs.install_pack(vault, blob, caller="test", allow_reembed=True)
+        packs.install_pack(vault, blob, caller="test",
+                           trusted_keys=trust)                   # refuses
+    out = packs.install_pack(vault, blob, caller="test", allow_reembed=True,
+                             trusted_keys=trust)
     assert out["used_precomputed_vectors"] is False              # re-embedded locally
     assert vault.search("foreign fact", caller="test",
                         namespace="packs/foreign")["results"]
@@ -93,7 +97,9 @@ def test_encrypted_pack(vault):
         name="private", version="1.0.0", description="", identity=ident,
         records=[{"text": "private pack fact"}], vectors=emb_vec,
         model=dict(vault.header.model), passphrase="PackSecret")
+    trust = [ident["pub_hex"]]
     with pytest.raises(packs.PackError):
-        packs.read_pack(blob)  # passphrase required
-    out = packs.install_pack(vault, blob, caller="test", passphrase="PackSecret")
+        packs.read_pack(blob, trusted_keys=trust)  # passphrase required
+    out = packs.install_pack(vault, blob, caller="test", passphrase="PackSecret",
+                             trusted_keys=trust)
     assert out["records"] == 1

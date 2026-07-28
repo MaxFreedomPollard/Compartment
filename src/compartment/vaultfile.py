@@ -18,6 +18,7 @@ import io
 import json
 import os
 import struct
+import zlib
 import time
 from dataclasses import dataclass, field
 
@@ -39,6 +40,14 @@ VAULT_MODE = 0o600
 # larger than this is a corrupt length prefix, not a real entry, and must not
 # be mistaken for a write that was torn off by a crash.
 MAX_JOURNAL_ENTRY = 64 * 1024 * 1024
+
+# Each journal entry is framed as: u32 length | u32 crc32(length) | ciphertext.
+# The checksum exists to tell two failures apart that otherwise look identical
+# from the outside. A crash during append leaves an intact prefix and a short
+# body. Corruption of the length itself leaves a prefix that fails its own
+# checksum. Without this the reader had to guess, and guessing "crash" meant
+# silently discarding every acknowledged entry that followed.
+JOURNAL_PREFIX = 8
 
 
 class VaultFormatError(CryptoError):
@@ -187,33 +196,44 @@ def read_vault_file(path: str) -> LoadedVaultFile:
     truncated_tail = False
     tail_bytes = 0
     while pos < len(raw):
-        if pos + 4 > len(raw):
-            # fewer than four bytes left: a length prefix itself torn in half
+        remaining = len(raw) - pos
+        if remaining < JOURNAL_PREFIX:
+            # The prefix itself was still being written. Nothing was
+            # acknowledged, so there is nothing to lose.
             truncated_tail = True
-            tail_bytes = len(raw) - pos
+            tail_bytes = remaining
             break
-        (elen,) = struct.unpack(">I", raw[pos : pos + 4])
-        if elen > MAX_JOURNAL_ENTRY:
-            # A crash while appending leaves a SHORT entry whose declared
-            # length is honest. A length this large is the prefix itself being
-            # corrupt, and treating it as a torn tail would silently discard
-            # every acknowledged entry after it.
+        length = raw[pos : pos + 4]
+        (elen,) = struct.unpack(">I", length)
+        (want_crc,) = struct.unpack(">I", raw[pos + 4 : pos + JOURNAL_PREFIX])
+        if (zlib.crc32(length) & 0xFFFFFFFF) != want_crc:
+            # The length is the only thing that says where the NEXT entry
+            # starts, so a corrupt length hides every entry after it. The
+            # checksum is what separates that from an interrupted write: a
+            # torn write leaves a short body behind an intact prefix, never a
+            # prefix that fails its own checksum. Refuse, rather than call
+            # the rest of the journal a crash artifact and discard it.
             raise TamperError(
-                f"Journal entry at byte {pos} declares {elen} bytes, beyond the "
-                f"{MAX_JOURNAL_ENTRY} byte maximum. The length prefix is "
-                "corrupt, so entries after it cannot be located. Refusing to "
-                "open rather than discarding them.")
-        entry = raw[pos + 4 : pos + 4 + elen]
-        if len(entry) != elen:
-            # Ran out of file mid-entry. Consistent with a crash during append,
-            # so the caller may discard it - but it is also what a corrupt
-            # length prefix looks like, so the caller preserves the original
-            # file before compacting rather than trusting this reading.
+                f"Journal length prefix at byte {pos} fails its checksum. "
+                "This is corruption, not an interrupted write, and entries "
+                "after it cannot be located. Refusing to open. The vault is "
+                "not modified; restore from a backup or recover the payload, "
+                "which is intact and sealed independently of the journal.")
+        if elen > MAX_JOURNAL_ENTRY:
+            raise TamperError(
+                f"Journal entry at byte {pos} declares {elen} bytes, beyond "
+                f"the {MAX_JOURNAL_ENTRY} byte maximum, despite a valid "
+                "length checksum. Refusing to open.")
+        body = raw[pos + JOURNAL_PREFIX : pos + JOURNAL_PREFIX + elen]
+        if len(body) != elen:
+            # Intact prefix, short body, and nothing after it: the process
+            # died mid append. The entry was never acknowledged, so dropping
+            # it is correct and provably loses nothing that was confirmed.
             truncated_tail = True
-            tail_bytes = len(raw) - pos
+            tail_bytes = remaining
             break
-        journal_cts.append(entry)
-        pos += 4 + elen
+        journal_cts.append(body)
+        pos += JOURNAL_PREFIX + elen
     return LoadedVaultFile(header, payload_ct, journal_cts, truncated_tail,
                            tail_bytes)
 
@@ -286,8 +306,10 @@ def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, 
         crypto.canonical_json(entry),
         aad=_journal_aad(header.vault_id, seq),
     )
+    length = struct.pack(">I", len(ct))
     with open(path, "ab") as f:
-        f.write(struct.pack(">I", len(ct)))
+        f.write(length)
+        f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
         f.write(ct)
         f.flush()
         os.fsync(f.fileno())

@@ -119,8 +119,15 @@ def verify(conn) -> tuple[bool, int, str]:
 
     anc = read_anchor(conn)
     if anc is None:
-        return True, n, (f"audit chain intact ({n} entries); not yet anchored "
-                         "(written by an older build - the next save anchors it)")
+        # Every vault is anchored at creation and re-anchored on every save.
+        # A missing anchor means the meta rows were removed, which is exactly
+        # the move someone makes to hide a truncation, so it is a failure and
+        # not a tolerated older shape.
+        return False, n, (
+            "audit log has no anchor. Every vault is anchored when it is "
+            "created and on every save, so an absent anchor means the meta "
+            "rows were removed. A truncated log cannot be detected without "
+            "it, so this is reported as tampering.")
     a_head, a_count = anc
     if n < a_count:
         return False, n, (

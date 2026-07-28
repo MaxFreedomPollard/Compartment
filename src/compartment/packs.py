@@ -7,6 +7,13 @@ the vectors were computed with, the body's SHA-256, and a MANDATORY Ed25519
 signature. Body = TLV sections: "records" (JSONL) + "vectors" (raw float32),
 optionally AEAD-sealed with a pack passphrase.
 
+TRUST: a pack cannot vouch for itself. The signature is verified against a
+key from the TRUSTED SET, never against the `signer_pub` the pack carries -
+that field is only an identifying hint. The trusted set is the project's
+own verify key (PROJECT_PACK_KEY, below) plus whatever keys the operator
+passes explicitly as `trusted_keys`. A pack signed by anything else is
+refused, however internally consistent it is.
+
 Install verifies signature + content hash FIRST and rejects loudly on any
 mismatch. Matching model → precomputed vectors load directly (no compute).
 Records land read-only in namespace packs/<name>.
@@ -30,6 +37,51 @@ PACK_VERSION = 1
 
 class PackError(CryptoError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Trust store (who is allowed to sign a pack)
+# ---------------------------------------------------------------------------
+
+#: Ed25519 verify key of the Compartment project's pack-signing identity.
+#: This public half ships in the source tree on purpose - it is what makes the
+#: bundled starter pack verifiable without trusting the file it arrived in.
+#: The private half lives in tools/pack_identity.json, which is gitignored and
+#: never leaves the maintainer's machine.
+PROJECT_PACK_KEY = "2577018190ac8d39185854306ffbce84fd86feb6e2b20ab256c3bdcbff60d91e"
+
+#: Trusted by default, with no way for a pack to add itself.
+TRUSTED_PACK_KEYS: frozenset[str] = frozenset({PROJECT_PACK_KEY})
+
+
+def _normalize_key(key: str) -> str:
+    """A 64-char lowercase hex Ed25519 public key, or a loud error."""
+    if not isinstance(key, str):
+        raise PackError(f"Trusted key must be 64-char hex, got {type(key).__name__}")
+    k = key.strip().lower()
+    try:
+        raw = bytes.fromhex(k)
+    except ValueError:
+        raise PackError(f"Trusted key {key!r} is not hex") from None
+    if len(raw) != 32:
+        raise PackError(f"Trusted key {key!r} is {len(raw)} bytes, "
+                        "expected a 32-byte (64-hex-char) Ed25519 public key")
+    return k
+
+
+def resolve_trusted_keys(trusted_keys: str | list[str] | None = None
+                         ) -> frozenset[str]:
+    """The set of keys allowed to sign a pack for this call.
+
+    Always contains PROJECT_PACK_KEY. `trusted_keys` (a hex key or a list of
+    them) ADDS operator-chosen keys for this call only - that is the one and
+    only way a third-party pack becomes installable.
+    """
+    if trusted_keys is None:
+        return TRUSTED_PACK_KEYS
+    if isinstance(trusted_keys, str):
+        trusted_keys = [trusted_keys]
+    return frozenset(TRUSTED_PACK_KEYS | {_normalize_key(k) for k in trusted_keys})
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +128,8 @@ def build_pack(*, name: str, version: str, description: str, records: list[dict]
         header["salt"] = salt.hex()
     header["content_sha256"] = crypto.sha256(body)
     sk = load_signing_key(identity)
+    # An identifying hint for the reader ("who claims to have signed this").
+    # Readers verify against their trusted set, never against this field.
     header["signer_pub"] = sk.verify_key.encode().hex()
     header["sig"] = sk.sign(crypto.canonical_json(
         {k: v for k, v in header.items() if k != "sig"})).signature.hex()
@@ -89,9 +143,15 @@ def build_pack(*, name: str, version: str, description: str, records: list[dict]
 # Read + verify
 # ---------------------------------------------------------------------------
 
-def read_pack(blob: bytes, passphrase: str | None = None
+def read_pack(blob: bytes, passphrase: str | None = None, *,
+              trusted_keys: str | list[str] | None = None
               ) -> tuple[dict, list[dict], np.ndarray]:
-    """Verify signature + content hash, then return (header, records, vectors)."""
+    """Verify signature + content hash, then return (header, records, vectors).
+
+    The signature is checked against `trusted_keys` + the project key, never
+    against the key inside the pack. `header["verified_by"]` is set to the
+    trusted key that actually verified it.
+    """
     if len(blob) < 10 or blob[:4] != PACK_MAGIC:
         raise PackError("Not a Compartment memory pack (bad magic)")
     (ver,) = struct.unpack(">H", blob[4:6])
@@ -100,15 +160,38 @@ def read_pack(blob: bytes, passphrase: str | None = None
     (hlen,) = struct.unpack(">I", blob[6:10])
     header = json.loads(blob[10:10 + hlen])
     body = blob[10 + hlen:]
+    name = header.get("name", "?")
+    trusted = resolve_trusted_keys(trusted_keys)
 
-    # 1) signature over the header (which pins the content hash)
+    # 1) signature over the header (which pins the content hash), verified with
+    #    a TRUSTED key - header["signer_pub"] is a hint and is never trusted.
+    signed = crypto.canonical_json({k: v for k, v in header.items() if k != "sig"})
     try:
-        VerifyKey(bytes.fromhex(header["signer_pub"])).verify(
-            crypto.canonical_json({k: v for k, v in header.items() if k != "sig"}),
-            bytes.fromhex(header["sig"]))
-    except Exception as exc:
-        raise TamperError(f"Pack {header.get('name','?')!r}: SIGNATURE INVALID - "
+        sig = bytes.fromhex(header["sig"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TamperError(f"Pack {name!r}: signature missing or malformed - "
                           "refusing to install") from exc
+    verified_by = None
+    for key_hex in sorted(trusted):
+        try:
+            VerifyKey(bytes.fromhex(key_hex)).verify(signed, sig)
+        except Exception:
+            continue
+        verified_by = key_hex
+        break
+    if verified_by is None:
+        hint = header.get("signer_pub", "none")
+        raise TamperError(
+            f"Pack {name!r}: NOT SIGNED BY A TRUSTED KEY - refusing to install. "
+            f"It claims signer {hint} (a hint carried inside the pack, never "
+            f"used to verify it); trusted here: {', '.join(sorted(trusted))}. "
+            "A valid signature only proves the pack is self-consistent - "
+            "anyone can mint a key and sign anything. To install a third-party "
+            "pack, get the author's public key over a channel you trust and "
+            "name it deliberately: read_pack(blob, trusted_keys=[\"<64-hex>\"]) "
+            "or install_pack(vault, blob, trusted_keys=[\"<64-hex>\"]). "
+            "See PACKS.md.")
+    header["verified_by"] = verified_by
     # 2) content hash of the body as stored
     if crypto.sha256(body) != header["content_sha256"]:
         raise TamperError(f"Pack {header['name']!r}: content hash mismatch - "
@@ -136,7 +219,8 @@ def read_pack(blob: bytes, passphrase: str | None = None
 # ---------------------------------------------------------------------------
 
 def seed_records(vault, blob: bytes, caller: str = "user",
-                 namespace: str | None = None) -> dict:
+                 namespace: str | None = None, *,
+                 trusted_keys: str | list[str] | None = None) -> dict:
     """Add a pack's contents as ORDINARY memories - the starter path.
 
     The .mpack file is only the delivery container: its signature and content
@@ -145,7 +229,7 @@ def seed_records(vault, blob: bytes, caller: str = "user",
     record goes into the caller's normal namespace (default "main"), fully
     editable and forgettable, as if the agent had stored it. Matching model
     → precomputed vectors load directly (no compute)."""
-    header, records, vectors = read_pack(blob)
+    header, records, vectors = read_pack(blob, trusted_keys=trusted_keys)
     ns = namespace or vault.config.default_namespace(caller)
     model_matches = (header["model"]["name"] == vault.header.model["name"]
                      and header["model"]["sha256"] == vault.header.model["sha256"])
@@ -178,8 +262,10 @@ def seed_records(vault, blob: bytes, caller: str = "user",
 
 def install_pack(vault, blob: bytes, caller: str = "user",
                  passphrase: str | None = None,
-                 allow_reembed: bool = False) -> dict:
-    header, records, vectors = read_pack(blob, passphrase)
+                 allow_reembed: bool = False, *,
+                 trusted_keys: str | list[str] | None = None) -> dict:
+    header, records, vectors = read_pack(blob, passphrase,
+                                         trusted_keys=trusted_keys)
     name = header["name"]
     ns = f"packs/{name}"
     registry = json.loads(vault.db.get_meta("packs", "{}"))
@@ -209,7 +295,8 @@ def install_pack(vault, blob: bytes, caller: str = "user",
                           "session": f"{name}@{header['version']}"},
                     _journal=False)
     registry[name] = {"version": header["version"], "records": len(records),
-                      "signer": header["signer_pub"][:16],
+                      # the key that actually verified it, not the pack's claim
+                      "signer": header["verified_by"][:16],
                       "creator": header["creator"],
                       "description": header.get("description", "")}
     vault.db.set_meta("packs", json.dumps(registry))
