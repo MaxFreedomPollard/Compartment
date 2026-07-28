@@ -154,3 +154,41 @@ def test_rebuild_windows_skips_short_records_without_tokenizing_them(vault):
         vault.store(f"A short memory number {i}.", caller="test",
                     namespace="main")
     assert vault.rebuild_windows(caller="test")["examined"] == 0
+
+
+# --------------------------------------------- upgrading an existing vault ---
+def test_a_partly_upgraded_vault_indexes_every_record(vault):
+    """The regression that shipped in 4 and had to be fixed in 4.1.
+
+    A vault upgraded in place is PARTIAL: records written since the upgrade
+    carry window rows, everything written before does not. Choosing one table
+    over the other dropped every older memory out of the index while it sat
+    safely in the file - 6,728 of 6,839 on a real vault.
+    """
+    old = [vault.store(f"An older memory about topic {i}.", caller="test",
+                       namespace="main")["id"] for i in range(5)]
+    vault.db.conn.execute("DELETE FROM vecs")          # they predate windows
+    new = [vault.store(f"A newer memory about subject {i}.", caller="test",
+                       namespace="main")["id"] for i in range(3)]
+    assert vault.db.conn.execute(
+        "SELECT count(DISTINCT id) c FROM vecs").fetchone()["c"] == 3
+
+    ids, ikeys, mat = vault.db.all_vectors()
+    assert set(old) | set(new) <= set(ids), "every record must reach the index"
+    assert len(ikeys) == len(set(ikeys)), "index keys must stay unique"
+    assert mat.shape[0] == len(ikeys)
+
+    vault._rebuild_index()
+    assert len(vault.index) == len(ikeys)
+    hits = vault.search("older memory about topic", caller="test", top_k=5)
+    assert any(h["id"] in old for h in hits["results"]), \
+        "a record written before the upgrade must still be findable"
+
+
+def test_a_record_with_windows_is_not_also_indexed_by_its_head_vector(vault):
+    r = vault.store("long memory " * 400, caller="test", namespace="main")["id"]
+    ids, ikeys, _ = vault.db.all_vectors()
+    windows = vault.db.vector_keys(r)
+    assert len(windows) > 1
+    assert ids.count(r) == len(windows), \
+        "a windowed record contributes its windows and nothing else"

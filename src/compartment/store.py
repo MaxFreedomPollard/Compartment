@@ -235,15 +235,24 @@ class Store:
         """Every embedding window, as (record ids, index keys, matrix).
 
         `ids` is parallel to `ikeys` and repeats: several windows of one long
-        record each map back to the same record. A vault written before the
-        `vecs` table existed has none, so it falls back to the single vector on
-        each record, which is exactly what it used to search.
+        record each map back to the same record.
+
+        The two sources are UNIONED, never chosen between. A vault upgraded in
+        place is partial by construction - records written since the upgrade
+        carry window rows, every record written before it does not - so
+        "use `vecs` if it has any rows, otherwise use `records`" silently drops
+        every older memory out of the index. On a real vault that was 6,728 of
+        6,839 memories, invisible to search while sitting safely in the file.
+        Each record contributes its windows if it has them and its original
+        single vector if it does not, and the two tables share one key space,
+        so nothing can collide.
         """
-        rows = self.conn.execute(
-            "SELECT id, ikey, vec FROM vecs ORDER BY ikey").fetchall()
-        if not rows:
-            rows = self.conn.execute(
-                "SELECT id, ikey, vec FROM records ORDER BY ikey").fetchall()
+        rows = list(self.conn.execute(
+            "SELECT id, ikey, vec FROM vecs ORDER BY ikey").fetchall())
+        windowed = {r["id"] for r in rows}
+        rows += [r for r in self.conn.execute(
+            "SELECT id, ikey, vec FROM records ORDER BY ikey").fetchall()
+            if r["id"] not in windowed]
         ids = [r["id"] for r in rows]
         ikeys = [r["ikey"] for r in rows]
         if not rows:
