@@ -486,5 +486,17 @@ def run(vault: str | None = None, show: bool = False,
     return 0
 
 
-__all__ = ["run", "self_check", "login_status", "set_login", "panel_rows",
+def quit_running() -> bool:
+    """Stop a running tray app before an update or uninstall replaces it."""
+    import subprocess
+    try:
+        subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
+                       capture_output=True, timeout=30)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+__all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
+           "panel_rows",
            "icon_path"]

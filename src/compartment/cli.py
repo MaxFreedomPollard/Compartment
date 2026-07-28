@@ -249,6 +249,106 @@ def _start_status_bar_app(vault: str) -> None:
               "`compartment menubar` yourself")
 
 
+def _install_kind() -> tuple[str, list[str]]:
+    """How this copy was installed, and the command that upgrades it."""
+    exe = Path(sys.argv[0]).resolve()
+    if "uv/tools" in str(exe) or shutil.which("uv") and "uv/tools" in str(
+            Path(shutil.which("compartment") or "").resolve()):
+        return "uv", ["uv", "tool", "upgrade", "compartment"]
+    return "pip", [sys.executable, "-m", "pip", "install", "--upgrade",
+                   "compartment"]
+
+
+def cmd_update(args) -> None:
+    """Upgrade Compartment in place, then put the app back up."""
+    kind, cmd = _install_kind()
+    if args.source:
+        target = "git+https://github.com/MaxFreedomPollard/Compartment@main"
+        cmd = (["uv", "tool", "install", "--force", target] if kind == "uv"
+               else [sys.executable, "-m", "pip", "install", "--upgrade",
+                     "--force-reinstall", target])
+    print(f"Compartment {__version__} - updating ({kind} install)")
+    print("  " + " ".join(cmd))
+    try:
+        res = subprocess.run(cmd, timeout=1800)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _die(f"update failed to run: {exc}")
+    if res.returncode != 0:
+        _die(f"update failed (exit {res.returncode})")
+    ver = "?"
+    try:
+        out = subprocess.run([shutil.which("compartment") or "compartment",
+                              "--version"], capture_output=True, text=True,
+                             timeout=120)
+        ver = (out.stdout or "").strip() or "?"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    print(f"  updated: now {ver}")
+    print("  your vault and settings are untouched")
+    if not args.no_app and sys.platform in ("darwin", "win32"):
+        _restart_status_bar_app(args.vault)
+
+
+def _restart_status_bar_app(vault: str) -> None:
+    """Stop the running status bar app and start the new build."""
+    try:
+        app = _tray_app()
+        app.quit_running()
+    except Exception:                                    # noqa: BLE001
+        pass
+    _start_status_bar_app(vault)
+
+
+def cmd_uninstall(args) -> None:
+    """Remove Compartment from this machine. The vault is KEPT unless asked."""
+    print(f"Compartment {__version__} - uninstalling")
+    if sys.platform in ("darwin", "win32"):
+        try:
+            app = _tray_app()
+            try:
+                app.quit_running()
+                print("  status bar app stopped")
+            except Exception:                            # noqa: BLE001
+                pass
+            print(f"  start at login: {app.set_login(False)}")
+        except Exception as exc:                         # noqa: BLE001
+            print(f"  status bar app: nothing to remove ({exc})")
+    try:
+        if claude_hooks.is_installed():
+            claude_hooks.uninstall()
+            print("  Claude Code capture hook removed")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  capture hook: {exc}")
+    from .home import LEGACY_NAME, NAME
+    for name in (NAME, LEGACY_NAME):
+        try:
+            r = subprocess.run(["claude", "mcp", "remove", name],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                print(f"  MCP registration removed: {name}")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if args.purge:
+        # only on an explicit --purge: this is the only copy of everything
+        # the agent has ever learned, and it is not recoverable.
+        for f in (args.vault, args.vault + ".config.json",
+                  args.vault + ".flock"):
+            try:
+                os.remove(f)
+                print(f"  deleted {f}")
+            except OSError:
+                pass
+        print("  vault deleted (--purge)")
+    else:
+        print(f"  vault KEPT at {args.vault}")
+        print("  delete it yourself, or re-run with --purge, once you are sure")
+    kind, _ = _install_kind()
+    final = ("uv tool uninstall compartment" if kind == "uv"
+             else f"{sys.executable} -m pip uninstall compartment")
+    print("\nOne step left, which cannot remove itself while it is running:")
+    print(f"  {final}")
+
+
 def _ask_yn(q: str) -> bool:
     if not sys.stdin.isatty():
         return False
@@ -1375,6 +1475,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--trusted-key", action="append", metavar="HEX",
                    help="only packs signed by the project are trusted by default. Name an author's 64 hex character public key to trust it deliberately; repeatable")
     p.set_defaults(fn=cmd_pack_export)
+
+    p = sub.add_parser("update", help="upgrade Compartment in place")
+    p.add_argument("--source", action="store_true",
+                   help="update from the GitHub main branch instead of PyPI")
+    p.add_argument("--no-app", action="store_true",
+                   help="do not restart the status bar app afterwards")
+    p.set_defaults(fn=cmd_update)
+
+    p = sub.add_parser("uninstall",
+                       help="remove Compartment from this machine "
+                            "(the vault is kept unless --purge)")
+    p.add_argument("--purge", action="store_true",
+                   help="ALSO delete the vault and its config, permanently")
+    p.set_defaults(fn=cmd_uninstall)
 
     p = sub.add_parser("integrate",
                        help="one-command wiring into claude, hermes, or openclaw")

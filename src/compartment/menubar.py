@@ -413,6 +413,28 @@ def set_login(enabled: bool) -> str:
     return login_status()
 
 
+def quit_running() -> bool:
+    """Stop a running status bar app, so an update or uninstall does not leave
+    the old build sitting in the menu bar with its binary already gone."""
+    import signal
+    killed = False
+    try:
+        out = subprocess.run(["pgrep", "-f", "compartment.*menubar"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    me = os.getpid()
+    for pid in [int(x) for x in out.split() if x.isdigit()]:
+        if pid == me:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed = True
+        except OSError:
+            pass
+    return killed
+
+
 # ----------------------------------------------------------------- self test
 
 def self_check(vault: str | None = None) -> int:
