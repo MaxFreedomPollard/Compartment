@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compartment"
-version = "3.4.1"
+version = "3.5"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,13 +36,13 @@ dependencies = [
     "tokenizers>=0.15",
     "numpy>=1.26",
     "mcp>=1.0",
-    # The status bar app ships with every install, on the platforms that have
-    # one. It is not an add-on: unlocking, locking and changing the passphrase
-    # are things people do through the icon, not through a terminal, so an
-    # install that only lays down a CLI is an incomplete install. The markers
-    # keep it honest - nothing macOS-only is fetched on Windows, nothing
-    # Windows-only on macOS, and Linux (which has no status bar app here)
-    # installs neither and compiles nothing.
+    # The app ships with every install. It is not an add-on: unlocking,
+    # locking and changing the passphrase are things people do through a
+    # panel, not through a terminal, so an install that only lays down a CLI
+    # is an incomplete install. The markers keep it honest - nothing
+    # macOS-only is fetched on Windows and nothing Windows-only on macOS.
+    # Linux needs neither: its panel is Tk, which is in the standard library,
+    # so nothing here is fetched and nothing is compiled there.
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "pystray>=0.19; sys_platform == 'win32'",
     "pillow>=10; sys_platform == 'win32'",

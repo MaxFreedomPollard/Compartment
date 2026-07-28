@@ -50,8 +50,9 @@ configuration step.
   key, no cloud account, no daemon.
 - On the Mac, open one `.pkg` and you are done. Python, the embedding model
   and every dependency are inside it.
-- A menu bar app runs the whole thing without a terminal: vault state,
-  unlock, lock, and the last five memories it saved.
+- An app runs the whole thing without a terminal on all three systems: vault
+  state, unlock, lock, and the last five memories it saved. The macOS menu
+  bar, the Windows notification area, a window on Linux.
 - Every feature toggles in that panel instead of a config file:
   model-independent capture, starter facts in search, auto-lock.
 - Your vault ships full. The 6,718 seeded facts are ordinary memories,
@@ -150,21 +151,29 @@ backed up first), it exits successfully no matter what - a memory tool must
 never break your editor - and it stays quiet when the vault is locked.
 `compartment hook status | install | uninstall`, or `integrate claude --no-hooks`.
 
-**A menu bar and system tray app, from the same one install.** `pip install
-compartment && compartment init` sets it up on macOS and on Windows: the app
-starts straight away and comes back at every login. There is no separate
-package, no extra to remember and no second command. On the Mac you can
-instead open **Compartment.pkg** from the
+**An app on all three systems, from the same one install.** `pip install
+compartment && compartment init` sets it up on macOS, Windows and Linux.
+There is no separate package, no extra to remember and no second command. On
+the Mac you can instead open **Compartment.pkg** from the
 [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest),
 which carries Python and every dependency inside it, so there is nothing to
 install first. `compartment init --no-app` skips the app for headless boxes
-and CI. Either way it puts Compartment in the status bar: click the icon and a
-panel shows whether the vault is open, how much it has learned, the three
+and CI.
+
+The same panel, in the place each system keeps things like this: the **menu
+bar** on macOS, the **notification area** on Windows, and on **Linux** an
+ordinary window, with Compartment in your applications menu. Linux gets a
+window rather than an icon deliberately. Whether a tray icon appears there
+depends on the desktop, and on GNOME or Wayland it can simply never show up
+with nothing said, which is the worst way for the control that unlocks your
+memories to fail.
+
+The panel shows whether the vault is open, how much it has learned, the three
 settings worth changing day to day (capture hook, whether starter facts join
-searches, auto-lock), and the last five things it remembered. Unlock, lock and
-change your passphrase there too, without opening a terminal. No dock icon,
-no window to manage, and it holds no vault in memory - state comes from the
-CLI, so an idle app costs nothing.
+searches, auto-lock), which agents are connected and buttons to connect them,
+and the last five things it remembered. Unlock, lock and change your
+passphrase there too, without opening a terminal. It holds no vault in
+memory - state comes from the CLI, so an idle app costs nothing.
 
 **See what it just learned.** `compartment recent` lists the newest memories,
 newest last, hiding the thousands of seeded starting facts so the handful

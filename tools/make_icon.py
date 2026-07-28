@@ -157,6 +157,18 @@ def build_tray(out: pathlib.Path) -> pathlib.Path:
     return out
 
 
+def build_app_png(out: pathlib.Path, size: int = 256) -> pathlib.Path:
+    """The icon a Linux desktop entry points at.
+
+    A .desktop file may name an absolute path, which avoids installing into
+    an icon theme and the cache refresh that goes with it. It has to be a
+    PNG: the .ico the Windows tray uses is not something every Linux desktop
+    can draw."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    draw(size).save(out)
+    return out
+
+
 def build(out: pathlib.Path) -> pathlib.Path:
     with tempfile.TemporaryDirectory() as td:
         iconset = pathlib.Path(td) / "compartment.iconset"
@@ -183,6 +195,13 @@ def main() -> int:
     print(f"wrote {tmpl} and its @2x")
     ico = build_tray(data / "tray.ico")
     print(f"wrote {ico} ({ico.stat().st_size:,} bytes)")
+    png = build_app_png(data / "app.png")
+    print(f"wrote {png} ({png.stat().st_size:,} bytes)")
+    # Shipped, not built on demand: a pip install has no app bundle, and the
+    # small one it writes for the login item needs an icon or macOS lists
+    # Compartment as a blank page.
+    icns = build(data / "app.icns")
+    print(f"wrote {icns} ({icns.stat().st_size:,} bytes)")
     preview = out.with_suffix(".preview.png")
     draw(512).save(preview)
     print(f"preview {preview}")

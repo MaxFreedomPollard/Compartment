@@ -46,10 +46,11 @@ def test_the_old_extras_still_resolve():
     assert extras["menubar"] == [] and extras["tray"] == []
 
 
-def test_one_command_covers_both_platforms():
+def test_one_command_covers_every_platform():
     from compartment import cli
-    assert 'aliases=["tray"]' in (ROOT / "src/compartment/cli.py").read_text(
-        encoding="utf-8"), "menubar/tray must stay one command"
+    assert 'aliases=["tray", "panel"]' in (
+        ROOT / "src/compartment/cli.py").read_text(encoding="utf-8"), \
+        "menubar/tray/panel must stay one command"
     assert hasattr(cli, "_start_status_bar_app")
 
 

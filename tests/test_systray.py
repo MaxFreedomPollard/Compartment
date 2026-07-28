@@ -132,8 +132,9 @@ def test_cli_picks_the_front_end_for_the_platform(monkeypatch):
     assert cli._tray_app() is systray
     monkeypatch.setattr(sys, "platform", "darwin")
     assert cli._tray_app() is menubar
+    # Linux draws the same panel as Windows, as a window rather than an icon.
     monkeypatch.setattr(sys, "platform", "linux")
-    assert cli._tray_app() is menubar
+    assert cli._tray_app() is systray
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the Run key is Windows")
@@ -148,11 +149,14 @@ def test_login_toggle_round_trips():
         systray.set_login(before == "on")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="asks for the other OS")
-def test_login_helpers_report_instead_of_raising_off_windows():
-    # No winreg here, so both must degrade to a message, not an exception.
+@pytest.mark.skipif(sys.platform != "darwin", reason="asks for the other OS")
+def test_login_helpers_report_instead_of_raising_on_macos():
+    """macOS has its own front end, so this module's login helpers must
+    report rather than raise - and must never write an XDG desktop entry
+    onto a machine that will never read one."""
     assert isinstance(systray.login_status(), str)
     assert systray.set_login(True).startswith("error:")
+    assert not systray.desktop_entry_path().exists()
 
 
 # The panel used to draw itself at min(content, PANEL_MAX_HEIGHT) and simply

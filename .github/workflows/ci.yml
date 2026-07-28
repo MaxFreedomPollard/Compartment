@@ -33,6 +33,68 @@ jobs:
         # offline guard, so its tests run here with the guard off.
         run: pytest tests/test_dash.py -q
 
+  linux-panel:
+    # Linux has no notification area worth relying on, so it draws the same
+    # panel as an ordinary window. "It opens and stays open" is the failure
+    # unit tests cannot see, and this is a real Linux box, so it is checked
+    # here on a virtual display.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The Tk package, which pip cannot install
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+      - name: Install
+        run: pip install -e .[dev]
+
+      - name: A vault to look at
+        run: |
+          compartment init --passphrase ci-only-not-a-secret --no-app
+          compartment store "Deploys go out Tuesday and Thursday mornings."
+          compartment store "Staging runs Postgres 16 behind pgbouncer."
+
+      - name: The panel, without a display (what it would say)
+        run: compartment panel --self-check
+
+      - name: It opens and stays open
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            timeout 25 compartment panel --show &
+          PID=$!
+          sleep 18
+          if ! kill -0 $PID 2>/dev/null; then
+            echo "the panel exited on its own"; exit 1
+          fi
+          echo "still running after 18s"
+          kill $PID 2>/dev/null || true
+
+      - name: A second copy stands down instead of opening a second window
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            timeout 40 compartment panel --show &
+          sleep 12
+          out=$(xvfb-run -a compartment panel --show 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "already open" || {
+            echo "a second copy did not stand down"; exit 1; }
+          pkill -f "compartment.*panel" || true
+
+      - name: It puts itself in the applications menu
+        run: |
+          compartment panel --login on
+          test -f "$HOME/.local/share/applications/compartment.desktop" \
+            || { echo "no desktop entry"; exit 1; }
+          cat "$HOME/.local/share/applications/compartment.desktop"
+          grep -q "^Type=Application" "$HOME/.local/share/applications/compartment.desktop"
+          grep -q "^Exec=" "$HOME/.local/share/applications/compartment.desktop"
+          desktop-file-validate "$HOME/.local/share/applications/compartment.desktop" \
+            || echo "note: desktop-file-validate not installed or reported style warnings"
+          compartment panel --login off
+          test ! -f "$HOME/.local/share/applications/compartment.desktop"
+
   windows-tray:
     # The tray app has to actually start on Windows, and "it starts" is the
     # failure the unit tests cannot see: the macOS app once launched, ran, and

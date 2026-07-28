@@ -167,10 +167,10 @@ def cmd_init(args) -> None:
     st = v.status()
     v.save()
     if args.no_app:
-        print("  command-line only install (--no-app): no status bar app")
+        print("  command-line only install (--no-app): no app")
     elif _cli_only_requested():
-        print("  command-line only install: no status bar app, no login item")
-        print("  add it later with `compartment menubar --login on`")
+        print("  command-line only install: no app")
+        print("  add it later with `compartment panel --login on`")
     else:
         _start_status_bar_app(path)
     print(f"\nVault ready: {st['records']} records, projected RAM "
@@ -219,6 +219,32 @@ def _cli_only_requested(seconds: float = 5.0) -> bool:
         return False                     # never let this block an install
 
 
+def _linux_has_display() -> bool:
+    """Is there a desktop to draw on?
+
+    Most Linux installs of a memory server are headless: a box over SSH, a
+    container, a CI runner. Starting a window there fails, and an
+    applications menu entry on a machine with no applications menu is
+    litter. Neither is a broken install - it is a server, and the CLI and
+    the MCP server are the whole product on one."""
+    return bool(os.environ.get("DISPLAY")
+                or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _linux_gui_available() -> bool:
+    """Can this Python draw the panel?
+
+    tkinter is in the standard library but not in every Linux distribution's
+    Python package, and pip cannot install it. Checked here so an install
+    says so plainly, rather than a launcher entry that opens nothing.
+    """
+    try:
+        import tkinter                                # noqa: F401
+        return True
+    except Exception:                                 # noqa: BLE001
+        return False
+
+
 def _start_status_bar_app(vault: str) -> None:
     """Put the status bar app up now, and again at every login.
 
@@ -229,18 +255,36 @@ def _start_status_bar_app(vault: str) -> None:
     platform with no status bar still gets a perfectly good CLI and MCP
     server, so a failure here is reported and stepped over.
     """
-    if sys.platform not in ("darwin", "win32"):
-        return                                   # no status bar app here
     try:
         app = _tray_app()
     except Exception as exc:                     # noqa: BLE001
-        print(f"  status bar app unavailable ({exc}); the CLI is unaffected")
+        print(f"  app unavailable ({exc}); the CLI is unaffected")
+        return
+    linux = sys.platform not in ("darwin", "win32")
+    if linux and not _linux_has_display():
+        print("  headless machine (no DISPLAY): no panel and no menu entry.")
+        print("  The CLI and the MCP server are ready, and `compartment "
+              "dash` opens the vault in a browser.")
         return
     try:
         state = app.set_login(True)
-        print(f"  start at login: {state}")
+        # On Linux this is the applications menu entry. Nothing starts at
+        # login there: without a tray icon to sit quietly in, an app that
+        # started itself would just be a window in your face at every
+        # sign-in.
+        print(f"  {'applications menu entry' if linux else 'start at login'}"
+              f": {state}")
     except Exception as exc:                     # noqa: BLE001
-        print(f"  could not enable start at login ({exc})")
+        print(f"  could not register the app ({exc})")
+    if linux and not _linux_gui_available():
+        print("  the panel needs tkinter, which this Python does not have.")
+        print("  Quickest fix, a Python that includes it:")
+        print("    uv tool install compartment")
+        print("  or install your distribution's package (Debian/Ubuntu: "
+              "python3-tk, Fedora: python3-tkinter).")
+        print("  Everything else works now: the CLI, the MCP server, and "
+              "`compartment dash`.")
+        return
     try:
         exe = shutil.which("compartment")
         argv = ([exe, "--vault", vault, "menubar"] if exe else
@@ -253,12 +297,17 @@ def _start_status_bar_app(vault: str) -> None:
         else:
             kwargs["start_new_session"] = True            # outlive this shell
         subprocess.Popen(argv, **kwargs)
-        print("  status bar app started - look for the icon in your "
-              + ("menu bar" if sys.platform == "darwin"
-                 else "notification area"))
+        if sys.platform == "darwin":
+            print("  app started - look for the icon in your menu bar")
+        elif sys.platform == "win32":
+            print("  app started - look for the icon in your notification "
+                  "area")
+        else:
+            print("  app started - its window is open, and Compartment is "
+                  "in your applications menu")
     except Exception as exc:                     # noqa: BLE001
-        print(f"  could not start the status bar app ({exc}); run "
-              "`compartment menubar` yourself")
+        print(f"  could not start the app ({exc}); run "
+              "`compartment panel` yourself")
 
 
 def _install_kind() -> tuple[str, list[str]]:
@@ -314,17 +363,29 @@ def _restart_status_bar_app(vault: str) -> None:
 def cmd_uninstall(args) -> None:
     """Remove Compartment from this machine. The vault is KEPT unless asked."""
     print(f"Compartment {__version__} - uninstalling")
-    if sys.platform in ("darwin", "win32"):
+    try:
+        app = _tray_app()
         try:
-            app = _tray_app()
-            try:
-                app.quit_running()
-                print("  status bar app stopped")
-            except Exception:                            # noqa: BLE001
-                pass
-            print(f"  start at login: {app.set_login(False)}")
+            app.quit_running()
+            print("  app stopped")
+        except Exception:                                # noqa: BLE001
+            pass
+        linux = sys.platform not in ("darwin", "win32")
+        print(f"  {'applications menu entry' if linux else 'start at login'}"
+              f": {app.set_login(False)}")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  app: nothing to remove ({exc})")
+    if sys.platform == "darwin":
+        # Only the small bundle a pip install writes for its own login item.
+        # A .pkg install is left alone: that one was not ours to create and
+        # its receipt is what removes it.
+        try:
+            from .menubar import USER_APP_BUNDLE, _is_generated
+            if _is_generated(USER_APP_BUNDLE):
+                shutil.rmtree(USER_APP_BUNDLE, ignore_errors=True)
+                print(f"  removed {USER_APP_BUNDLE}")
         except Exception as exc:                         # noqa: BLE001
-            print(f"  status bar app: nothing to remove ({exc})")
+            print(f"  login bundle: {exc}")
     try:
         if claude_hooks.is_installed():
             claude_hooks.uninstall()
@@ -486,14 +547,20 @@ def cmd_recent(args) -> None:
 
 
 def _tray_app():
-    """The platform's front end: the macOS menu bar item, or the Windows tray
-    icon. Both are thin shells over the same data layer in `menubar`, so the
-    command is the same everywhere and only the widgets differ."""
-    if sys.platform == "win32":
-        from . import systray
-        return systray
-    from . import menubar
-    return menubar
+    """The platform's front end: the macOS menu bar item, the Windows tray
+    icon, or on Linux the same panel as an ordinary window. All three are
+    thin shells over the same data layer in `menubar`, so the command is the
+    same everywhere and only the widgets differ.
+
+    Linux gets a window rather than an icon on purpose. Whether a tray icon
+    appears there depends on the desktop, and on GNOME or Wayland it can
+    simply never show up with nothing said - which is the worst way for the
+    control that unlocks your memories to fail."""
+    if sys.platform == "darwin":
+        from . import menubar
+        return menubar
+    from . import systray
+    return systray
 
 
 def cmd_menubar(args) -> None:
@@ -1316,19 +1383,23 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_recent)
 
-    p = sub.add_parser("menubar", aliases=["tray"],
-                       help="menu bar app on macOS, tray app on Windows "
-                            "(settings + recent memories)")
+    # One command, three front ends. "panel" is the name that is true on
+    # every platform, and the older names keep working.
+    p = sub.add_parser("menubar", aliases=["tray", "panel"],
+                       help="the app: menu bar on macOS, notification area "
+                            "on Windows, a window on Linux (unlock, "
+                            "settings, connect an agent, recent memories)")
     p.add_argument("--show", action="store_true",
-                   help="open the popover immediately on launch")
+                   help="open the panel immediately on launch")
     p.add_argument("--self-check", action="store_true",
-                   help="print what the popover would show, no window")
+                   help="print what the panel would show, no window")
     p.add_argument("--render", metavar="PNG",
-                   help="write the popover to a PNG and exit (macOS, UI check)")
+                   help="write the panel to a PNG and exit (macOS, UI check)")
     p.add_argument("--login", nargs="?", const="status",
                    choices=["on", "off", "status"],
                    help="start Compartment at login or sign-in (on/off), or "
-                        "show the state")
+                        "show the state. On Linux this is the applications "
+                        "menu entry, since there is no icon to start")
     p.set_defaults(fn=cmd_menubar)
 
     ph = sub.add_parser("hook", help="Claude Code capture hook (deterministic "

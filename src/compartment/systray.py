@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -156,7 +157,83 @@ def _autostart_command(vault: str | None = None) -> str:
     return f'"{runner}" -m compartment.cli --vault "{vault}" tray'
 
 
+# --- the Linux application entry --------------------------------------------
+# A Linux desktop has no tray to leave an icon in, so being findable means
+# being in the applications menu. The entry is per-user, needs no root, and
+# names an absolute icon path so nothing has to be installed into an icon
+# theme or a cache rebuilt.
+
+DESKTOP_FILE = "compartment.desktop"
+
+
+def desktop_entry_path() -> Path:
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "applications" / DESKTOP_FILE
+
+
+def app_icon_path() -> Path:
+    return Path(__file__).resolve().parent / "data" / "app.png"
+
+
+def _panel_command(vault: str | None = None) -> str:
+    exe = shutil.which("compartment")
+    vault = vault or env("VAULT") or str(home() / "memory.vault")
+    if exe:
+        return f'"{exe}" --vault "{vault}" panel'
+    return f'"{sys.executable}" -m compartment.cli --vault "{vault}" panel'
+
+
+def install_desktop_entry(vault: str | None = None) -> str:
+    """Put Compartment in the applications menu. Returns what happened."""
+    path = desktop_entry_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        icon = app_icon_path()
+        path.write_text(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Compartment\n"
+            "Comment=Encrypted memory for AI agents\n"
+            f"Exec={_panel_command(vault)}\n"
+            + (f"Icon={icon}\n" if icon.is_file() else "")
+            + "Terminal=false\n"
+            "Categories=Utility;Security;\n"
+            "Keywords=memory;vault;mcp;agent;\n",
+            encoding="utf-8")
+        path.chmod(0o644)
+    except OSError as exc:
+        return f"error: {exc}"
+    # Best effort: most desktops notice a new file by themselves, and the
+    # ones that want telling are not worth failing an install over.
+    try:
+        subprocess.run(["update-desktop-database", str(path.parent)],
+                       capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return str(path)
+
+
+def remove_desktop_entry() -> bool:
+    try:
+        desktop_entry_path().unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _is_linux() -> bool:
+    """This module draws the panel on Windows and on everything that is not
+    macOS. Only the latter uses desktop entries, and macOS must never get
+    one: it has its own front end, and writing into an XDG directory there
+    would litter a machine that will never read it."""
+    return sys.platform not in ("win32", "darwin")
+
+
 def login_status() -> str:
+    if _is_linux():
+        # No tray to sit in, so nothing worth starting at login: the panel is
+        # opened when it is wanted, from the applications menu.
+        return "on" if desktop_entry_path().is_file() else "off"
     try:
         winreg = _winreg()
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
@@ -170,6 +247,13 @@ def login_status() -> str:
 
 def set_login(enabled: bool) -> str:
     """Register or drop the Run entry. Returns what actually happened."""
+    if _is_linux():
+        if not enabled:
+            return "off" if remove_desktop_entry() else "error"
+        out = install_desktop_entry()
+        return "on" if not out.startswith("error") else out
+    if sys.platform != "win32":
+        return "error: start at login is handled by the menu bar app here"
     try:
         winreg = _winreg()
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
@@ -200,36 +284,60 @@ def panel_geometry(content: int, maximum: int) -> tuple[int, bool]:
 
 # --- the app ---------------------------------------------------------------
 
+def has_tray() -> bool:
+    """Is there a notification area to put an icon in?
+
+    Windows has one everywhere. Linux does not: whether a tray icon appears
+    depends on the desktop, and on GNOME or Wayland it can simply never show
+    up, with nothing said. Silent absence is the worst possible failure for
+    the control that unlocks your memories, so Linux gets the same panel as
+    an ordinary window instead of an icon that may or may not exist.
+    """
+    return sys.platform == "win32"
+
+
 def run(vault: str | None = None, show: bool = False,
         render_to: str | None = None) -> int:
     vault_path = vault or default_vault()
+    tray = has_tray()
+    where = "notification area" if tray else "window"
     if render_to:                                     # parity with --render
         print("error: --render is macOS only", file=sys.stderr)
         return 2
 
-    # One icon per vault, however each copy was started: the Run key at
-    # sign-in, `compartment init`, or a person launching it again by hand.
+    # One copy per vault, however each was started: the Run key at sign-in,
+    # `compartment init`, a launcher entry, or a person running it again.
     _lock, only = acquire_instance_lock(vault_path)
     if not only:
-        print("Compartment is already running - open it from the "
-              "notification area")
+        if tray:
+            print("Compartment is already running - open it from the "
+                  "notification area")
+        else:
+            print("Compartment is already open - look for its window")
         return 0
 
     try:
         import tkinter as tk
         from tkinter import ttk
     except ImportError:
-        print("error: this Python has no tkinter, which the tray panel needs.\n"
-              "  The python.org installer ships it; some minimal builds do not.",
+        print("error: this Python has no tkinter, which the "
+              f"{'tray panel' if tray else 'panel'} needs.\n"
+              "  The quickest fix is to install Compartment with uv, which\n"
+              "  brings its own Python with tkinter already in it:\n"
+              "    uv tool install compartment\n"
+              "  Otherwise install your distribution's Python Tk package\n"
+              "  (Debian/Ubuntu: python3-tk, Fedora: python3-tkinter).",
               file=sys.stderr)
         return 3
-    try:
-        import pystray
-        from PIL import Image
-    except ImportError:
-        print("error: the tray app needs pystray and Pillow.\n"
-              "  pip install 'compartment[tray]'", file=sys.stderr)
-        return 3
+    pystray = Image = None
+    if tray:
+        try:
+            import pystray
+            from PIL import Image
+        except ImportError:
+            print("error: the tray app needs pystray and Pillow.\n"
+                  "  pip install 'compartment[tray]'", file=sys.stderr)
+            return 3
 
     # Read the DPI (and declare awareness) before the first window exists.
     S = ui_scale()
@@ -238,7 +346,15 @@ def run(vault: str | None = None, show: bool = False,
     PMH = int(PANEL_MAX_HEIGHT * S)
     TBM = int(TASKBAR_MARGIN * S)
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        # A machine with no desktop: SSH, a container, a CI runner. Say so
+        # in one line rather than showing a Tk stack trace.
+        print(f"error: no graphical display to draw the panel on ({exc}).\n"
+              "  On a headless machine use the CLI, or `compartment dash` to\n"
+              "  read the vault in a browser.", file=sys.stderr)
+        return 4
     if S != 1.0:
         # Tk sizes fonts in points; this is what turns a point into a pixel.
         # 1.3333 is the 96-DPI baseline Tk already assumes on Windows.
@@ -480,14 +596,20 @@ def run(vault: str | None = None, show: bool = False,
             panel["scroll_w"] = 0
 
     def place(win) -> None:
-        """Bottom right, above the taskbar, where the tray icon is."""
+        """Where the panel sits: by the tray icon, or centred without one."""
         win.update_idletasks()
         # The scrollbar sits beside the content, so widen the window by it
         # rather than letting it eat a strip off the right of every line.
         w = PW + panel.get("scroll_w", 0)
         h = min(win.winfo_reqheight(), PMH)
-        x = win.winfo_screenwidth() - w - 12
-        y = win.winfo_screenheight() - h - TBM
+        if tray:
+            x = win.winfo_screenwidth() - w - 12      # above the taskbar
+            y = win.winfo_screenheight() - h - TBM
+        else:
+            # No icon to point at, so the bottom right corner would be an
+            # odd place for the only window the app has.
+            x = (win.winfo_screenwidth() - w) // 2
+            y = (win.winfo_screenheight() - h) // 3
         win.geometry(f"{w}x{h}+{max(x, 0)}+{max(y, 0)}")
 
     def show_panel() -> None:
@@ -496,13 +618,18 @@ def run(vault: str | None = None, show: bool = False,
             win = tk.Toplevel(root)
             win.title("Compartment")
             win.resizable(False, False)
-            win.attributes("-topmost", True)
+            if tray:
+                win.attributes("-topmost", True)
             if icon_path().is_file():
                 try:
                     win.iconbitmap(str(icon_path()))
                 except Exception:                     # noqa: BLE001
                     pass                              # an icon is a nicety
-            win.protocol("WM_DELETE_WINDOW", win.withdraw)
+            # With an icon in the tray, closing the window hides it and the
+            # app lives on. Without one, a hidden window is an app with no
+            # way back to it, so closing means quitting.
+            win.protocol("WM_DELETE_WINDOW",
+                         win.withdraw if tray else quit_app)
             panel["win"] = win
         build(win)
         place(win)
@@ -517,36 +644,41 @@ def run(vault: str | None = None, show: bool = False,
             place(win)
 
     def quit_app() -> None:
-        try:
-            icon.stop()
-        except Exception:                             # noqa: BLE001
-            pass
+        icon = panel.get("icon")
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:                         # noqa: BLE001
+                pass
         root.quit()
 
     # Tray callbacks arrive on pystray's thread; hand them to Tk's.
     def from_tray(fn):
         return lambda *_: root.after(0, fn)
 
-    image = (Image.open(icon_path()) if icon_path().is_file()
-             else Image.new("RGBA", (32, 32), (240, 234, 224, 255)))
-    icon = pystray.Icon(
-        "compartment", image, "Compartment",
-        menu=pystray.Menu(
-            pystray.MenuItem("Open Compartment", from_tray(show_panel),
-                             default=True),
-            pystray.MenuItem("Lock now",
-                             from_tray(lambda: (lock_vault(vault_path),
-                                                panel.update(note=None),
-                                                refresh()))),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", from_tray(quit_app)),
-        ))
-    icon.run_detached()
+    if tray:
+        image = (Image.open(icon_path()) if icon_path().is_file()
+                 else Image.new("RGBA", (32, 32), (240, 234, 224, 255)))
+        icon = pystray.Icon(
+            "compartment", image, "Compartment",
+            menu=pystray.Menu(
+                pystray.MenuItem("Open Compartment", from_tray(show_panel),
+                                 default=True),
+                pystray.MenuItem("Lock now",
+                                 from_tray(lambda: (lock_vault(vault_path),
+                                                    panel.update(note=None),
+                                                    refresh()))),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", from_tray(quit_app)),
+            ))
+        panel["icon"] = icon
+        icon.run_detached()
 
     # First launch opens the panel by itself. A tray icon nobody has seen
     # before is indistinguishable from an app that failed to start, which is
-    # the single most expensive failure this app can have.
-    if show or claim_first_run(vault_path):
+    # the single most expensive failure this app can have. Without an icon
+    # there is nothing else to look at, so the window always opens.
+    if show or not tray or claim_first_run(vault_path):
         root.after(200, show_panel)
 
     root.mainloop()
@@ -554,14 +686,35 @@ def run(vault: str | None = None, show: bool = False,
 
 
 def quit_running() -> bool:
-    """Stop a running tray app before an update or uninstall replaces it."""
-    import subprocess
+    """Stop a running panel before an update or uninstall replaces it."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
+                           capture_output=True, timeout=30)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+    import signal
+    killed = False
     try:
-        subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
-                       capture_output=True, timeout=30)
-        return True
+        out = subprocess.run(
+            ["pgrep", "-f", "compartment.*(panel|tray|menubar)"],
+            capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
         return False
+    for line in out.split():
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed = True
+        except OSError:
+            pass
+    return killed
 
 
 __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
