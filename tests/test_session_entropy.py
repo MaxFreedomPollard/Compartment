@@ -180,6 +180,9 @@ def test_clear_keeps_the_secret_while_another_vault_still_needs_it():
 
 # --- file permissions ------------------------------------------------------
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="POSIX mode bits: Windows reports 0o666 for any "
+                           "writable file whatever mode os.open was given")
 def test_the_file_is_created_0600_under_any_umask():
     old = os.umask(0o000)                     # the friendliest possible umask
     try:
@@ -189,6 +192,8 @@ def test_the_file_is_created_0600_under_any_umask():
     assert oct(p.stat().st_mode & 0o777) == "0o600"
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="POSIX mode bits: see above")
 def test_an_existing_wider_file_is_narrowed_by_the_write():
     """os.open with a mode does nothing to a file that already exists, so the
     write has to narrow it as well as create it narrow."""

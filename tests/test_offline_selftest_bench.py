@@ -78,7 +78,14 @@ def test_index_add_remove():
 def test_bench_budgets(seeded_vault):
     out = bench.run(seeded_vault, synthetic_n=5000, queries=20)
     assert out["budgets"]["vector_search_p95_under_100ms"], out
-    assert out["budgets"]["rss_under_1gb"], out
+    # None means the platform cannot measure RSS at all (no `resource`
+    # module, ie. Windows). It must never read as a pass, and it must not be
+    # asserted as one either.
+    rss = out["budgets"]["rss_under_1gb"]
+    if out["peak_rss_mb"] is None:
+        assert rss is None, out
+    else:
+        assert rss, out
 
 
 # --------------------------------------------------------------- bench fixes
