@@ -42,6 +42,34 @@ forces the index into RAM, and a RAM-resident index is also the fastest one
 there is. Secure and fast are the same choice here, and neither costs you a
 configuration step.
 
+## Install
+
+**One line install, works on all operating systems.**
+
+```bash
+pip install compartment && compartment init
+```
+
+Then connect it to the agent you use:
+
+```bash
+compartment integrate claude
+```
+
+`claude`, `hermes` and `openclaw` are the three auto-connect targets.
+
+**One click install (for people not good with command line).** Download
+**Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
+and open it. Python, the embedding model and every dependency are inside it.
+macOS only.
+
+After install, everything is managed from the app: the **menu bar** on macOS,
+the **notification area** on Windows, and a **window** from your applications
+menu on Linux.
+
+Compartment is an MCP server, so it works with all MCP capable agentic AI out
+of the box. Every option is in [Configuration](#configuration).
+
 #### What sets it apart
 
 **Install it in one step**
@@ -194,7 +222,7 @@ offline guarantee absolute and every decision reproducible. Pair Compartment
 with an offline LLM and the whole agent stack can run usefully with no
 network at all.
 
-## Install
+## Wiring each agent
 
 One command per platform. Each installs the package, creates your
 encrypted vault, and wires the agent.
@@ -400,6 +428,79 @@ compartment lock
 scp ~/.compartment/memory.vault other-machine:
 compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 ```
+
+## Configuration
+
+Nothing here is required. Compartment installs configured, and this is the
+whole surface if you want to change something.
+
+### In the app
+
+The panel behind the icon: **Unlock** and **Lock**, **Change password**,
+**Create memories automatically** (the capture hook), **Search starter
+facts**, **Auto-lock** (15, 30, 60 minutes or never), the **CONNECT AN
+AGENT** buttons for Claude, Hermes and OpenClaw, **Refresh** and **Quit**.
+
+`compartment panel --login on | off | status` controls starting at login,
+which on Linux is the applications menu entry.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `init` | create the vault. `--passphrase`, `--creator`, `--keychain`, `--no-session`, `--no-app` |
+| `unlock` / `lock` | open or close it. `--passphrase-stdin`, `--keyfile`, `--keychain`, `--once`; `lock --sign --identity` |
+| `status` / `verify` / `selftest` | what is in it, is it intact, does it work |
+| `store` / `get` / `forget` | one memory. `--namespace`, `--tag`, `--importance`, `--quarantined`, `forget --shred` |
+| `search` / `recent` | find things. `--namespace`, `--tag`, `--top-k`, `--limit`, `--all`, `--json` |
+| `link` / `relations` / `unlink` | the relation graph, with validity windows (`--from`, `--to`, `--as-of`) |
+| `panel` (`menubar`, `tray`) | the app. `--show`, `--self-check`, `--render`, `--login` |
+| `integrate <agent>` | wire claude, hermes or openclaw. `--no-import`, `--no-hooks` |
+| `hook` | capture hook: `install --pin-vault`, `uninstall`, `status`, `capture` |
+| `serve` | the MCP server, over stdio |
+| `dash` | read the vault in a browser: 127.0.0.1, one-time token, GET only |
+| `export` / `import` | `export --plaintext` writes it unencrypted; `import` reads it back |
+| `import-claude` | pull in what Claude Code already wrote. `--dir`, `--namespace`, `--dry-run` |
+| `rekey` | change the passphrase. `--new-passphrase-stdin` |
+| `2fa` | `enable`, `disable`, `status` - a keyfile as a second factor |
+| `audit` | `verify`, `repair` the hash-chained history |
+| `pack` | `build`, `install`, `remove`, `list`, `export` signed memory packs (`--trusted-key`) |
+| `reindex` | `--int8`, `--f32`, `--re-embed`, `--model` |
+| `bench` | `--records`, `--longmemeval`, `--variant`, `--limit` |
+| `setup` | `download-model`, `download-longmemeval`, `airgap-bundle` |
+| `update` | upgrade in place. `--source` takes GitHub main, `--no-app` skips the restart |
+| `uninstall` | remove it. The vault is kept unless you pass `--purge` |
+
+Global flags, before the command: `--vault PATH`, `--caller NAME`,
+`--keyfile PATH`, `--assert-offline`, `--version`.
+
+### Settings file
+
+`<vault>.config.json`, beside the vault, holding grants per caller and:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `auto_lock_minutes` | `30` | idle time before it locks. `0` never locks |
+| `search_starter_facts` | `true` | whether the seeded facts join search results |
+| `include_packs_in_search` | `true` | the same, for installed packs |
+| `duplicate_threshold` | `0.97` | cosine similarity at which a store is a duplicate |
+| `index_precision` | `"f32"` | `"int8"` uses a quarter of the RAM |
+| `unlock_tool_enabled` | `false` | lets an agent unlock the vault. Off because the passphrase would cross the model's context |
+
+### Environment
+
+`COMPARTMENT_VAULT` which vault to use, `COMPARTMENT_PASSPHRASE` for scripts
+and CI, `COMPARTMENT_SESSION_DIR` where the unlock credential lives,
+`COMPARTMENT_UI_SCALE` panel scale, `COMPARTMENT_ASSERT_OFFLINE` abort on any
+network attempt. `HERMES_HOME`, `OPENCLAW_HOME` and `XDG_DATA_HOME` are read
+where they apply. Anything exported as `ENGRAM_*` still works.
+
+### MCP tools
+
+`memory_search`, `memory_store`, `memory_get`, `memory_recent`,
+`memory_forget`, `memory_link`, `memory_relations`, `memory_unlink`,
+`memory_list_namespaces`, `memory_status`, `memory_lock`, `memory_selftest`.
+`memory_unlock` exists but is off unless you turn it on above.
 
 ## Documentation
 
