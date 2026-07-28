@@ -131,7 +131,8 @@ def test_the_hook_records_a_findable_compartment(monkeypatch, tmp_path):
     monkeypatch.setattr(menubar.sys, "executable", str(empty / "python3"))
     monkeypatch.setenv("PATH", LAUNCHD_PATH)
     monkeypatch.setattr(menubar, "user_path", lambda: str(exe.parent))
-    assert menubar.compartment_bin() == str(exe)
+    # Windows hands back the extension in the casing PATHEXT uses (.EXE).
+    assert menubar.compartment_bin().lower() == str(exe).lower()
 
 
 def test_without_the_path_fix_it_would_have_written_a_bare_name(monkeypatch,
