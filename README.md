@@ -1,5 +1,7 @@
 # Compartment
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
+
 ### Superior agentic memory, encrypted at rest.
 
 Your AI agent forgets you the moment the session ends. Compartment ends
