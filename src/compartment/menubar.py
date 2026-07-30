@@ -664,11 +664,12 @@ def _launcher_argv() -> list[str]:
 def _set_login_agent(enabled: bool) -> str:
     plist = _agent_plist()
     if not enabled:
-        try:
-            subprocess.run(["launchctl", "unload", str(plist)],
-                           capture_output=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        # bootout first: with KeepAlive set, a running copy that is still
+        # registered would be restarted by launchd after the plist was
+        # deleted, and the icon would come back from a file that no longer
+        # exists. Unload stays as the fallback for older macOS.
+        _launchctl("bootout", f"{_gui_domain()}/{LAUNCH_AGENT_LABEL}")
+        _launchctl("unload", str(plist))
         plist.unlink(missing_ok=True)
         return "off"
     argv = _launcher_argv()
@@ -684,15 +685,62 @@ def _set_login_agent(enabled: bool) -> str:
         '    <key>ProgramArguments</key>\n'
         f'    <array>\n{args}    </array>\n'
         '    <key>RunAtLoad</key><true/>\n'
-        '    <key>KeepAlive</key><false/>\n'
+        # KeepAlive was <false/>, which made this a one-shot: launchd started
+        # the app at login and then never looked at it again. Anything that
+        # ended the process - a crash, an ObjC exception, macOS reclaiming
+        # memory, an upgrade replacing the binary underneath it - took the
+        # icon out of the menu bar until the next login, with nothing said.
+        # A status bar app is meant to sit there for as long as the machine
+        # is up.
+        #
+        # SuccessfulExit false is the form that means "bring it back if it
+        # died, leave it alone if it left". Quit calls NSApp.terminate_, which
+        # exits 0, so the one way to remove the icon is still the one the user
+        # asked for. A crash exits non-zero and comes straight back.
+        '    <key>KeepAlive</key>\n'
+        '    <dict>\n'
+        '      <key>SuccessfulExit</key><false/>\n'
+        '    </dict>\n'
         '  </dict>\n'
         '</plist>\n', encoding="utf-8")
+    return _bootstrap_agent(plist)
+
+
+def _launchctl(*argv: str) -> tuple[int, str]:
+    """Run launchctl and actually look at what it said."""
     try:
-        subprocess.run(["launchctl", "load", str(plist)],
-                       capture_output=True, timeout=10)
+        r = subprocess.run(["launchctl", *argv], capture_output=True,
+                           text=True, timeout=15)
     except (OSError, subprocess.SubprocessError) as exc:
-        return f"failed: {exc}"
-    return "on"
+        return 1, str(exc)
+    return r.returncode, (r.stderr or r.stdout or "").strip()
+
+
+def _gui_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def _bootstrap_agent(plist: Path) -> str:
+    """Load the agent, and report a refusal as one.
+
+    The old code ran `launchctl load` and threw the result away, so a plist
+    that was written but never loaded reported "on" and started nothing at
+    the next login - which is exactly the state a machine ends up in when
+    the label is already bootstrapped and load quietly refuses.
+
+    `bootstrap` is the modern verb and the only one that reports properly.
+    An existing registration is booted out first so this is idempotent, and
+    `load` remains as the fallback for macOS versions that predate it.
+    """
+    domain = _gui_domain()
+    _launchctl("bootout", f"{domain}/{LAUNCH_AGENT_LABEL}")   # ok if absent
+    code, msg = _launchctl("bootstrap", domain, str(plist))
+    if code == 0:
+        return "on"
+    code, msg2 = _launchctl("load", "-w", str(plist))         # older macOS
+    if code == 0:
+        return "on"
+    return f"failed: {msg or msg2 or 'launchctl refused the agent'}"
 
 
 def login_status() -> str:

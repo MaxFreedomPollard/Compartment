@@ -223,6 +223,52 @@ def remove_desktop_entry() -> bool:
         return False
 
 
+# --- starting at login on Linux ---------------------------------------------
+# An entry in the applications menu makes Compartment findable. It does not
+# make it run, and the two were being treated as one thing: `login_status`
+# answered "on" whenever the menu entry existed, so a desktop that had never
+# started Compartment at login reported that it did. The autostart directory
+# is a different directory with a different meaning, and this is it.
+
+def autostart_entry_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "autostart" / DESKTOP_FILE
+
+
+def install_autostart_entry(vault: str | None = None) -> str:
+    """Start Compartment at login, the way every XDG desktop reads it."""
+    path = autostart_entry_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        icon = app_icon_path()
+        path.write_text(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Compartment\n"
+            "Comment=Encrypted memory for AI agents\n"
+            f"Exec={_panel_command(vault)}\n"
+            + (f"Icon={icon}\n" if icon.is_file() else "")
+            + "Terminal=false\n"
+            # GNOME and KDE both read these, and without them a session can
+            # decide an autostart entry is stale and skip it.
+            "X-GNOME-Autostart-enabled=true\n"
+            "Hidden=false\n"
+            "NoDisplay=false\n",
+            encoding="utf-8")
+        path.chmod(0o644)
+    except OSError as exc:
+        return f"error: {exc}"
+    return str(path)
+
+
+def remove_autostart_entry() -> bool:
+    try:
+        autostart_entry_path().unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def _is_linux() -> bool:
     """This module draws the panel on Windows and on everything that is not
     macOS. Only the latter uses desktop entries, and macOS must never get
@@ -233,9 +279,10 @@ def _is_linux() -> bool:
 
 def login_status() -> str:
     if _is_linux():
-        # No tray to sit in, so nothing worth starting at login: the panel is
-        # opened when it is wanted, from the applications menu.
-        return "on" if desktop_entry_path().is_file() else "off"
+        # The autostart entry, not the applications-menu entry. Reading the
+        # menu entry meant this said "on" for a machine that had never
+        # started Compartment at login in its life.
+        return "on" if autostart_entry_path().is_file() else "off"
     try:
         winreg = _winreg()
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
@@ -251,9 +298,15 @@ def set_login(enabled: bool) -> str:
     """Register or drop the Run entry. Returns what actually happened."""
     if _is_linux():
         if not enabled:
+            remove_autostart_entry()
             return "off" if remove_desktop_entry() else "error"
+        # Both, and they are not the same thing: the menu entry is how the
+        # app is found, the autostart entry is how it comes up at login.
         out = install_desktop_entry()
-        return "on" if not out.startswith("error") else out
+        if out.startswith("error"):
+            return out
+        auto = install_autostart_entry()
+        return "on" if not auto.startswith("error") else auto
     if sys.platform != "win32":
         return "error: start at login is handled by the menu bar app here"
     try:
@@ -262,6 +315,13 @@ def set_login(enabled: bool) -> str:
             if enabled:
                 winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ,
                                   _autostart_command())
+                # Read it back. A write that the registry accepted and then
+                # dropped - a policy, a locked hive, a roaming profile - used
+                # to report "on" and start nothing at the next sign-in.
+                try:
+                    winreg.QueryValueEx(k, RUN_VALUE)
+                except FileNotFoundError:
+                    return "error: the Run entry did not survive the write"
                 return "on"
             try:
                 winreg.DeleteValue(k, RUN_VALUE)
@@ -718,4 +778,6 @@ def quit_running() -> bool:
 
 __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
            "panel_rows",
+           "autostart_entry_path", "install_autostart_entry",
+           "remove_autostart_entry",
            "icon_path"]

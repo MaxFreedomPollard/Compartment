@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compartment"
-version = "4.2"
+version = "4.3"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
