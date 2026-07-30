@@ -19,7 +19,8 @@ import zipfile
 from pathlib import Path
 
 from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
-               claude_memory, offline_guard, packs, selftest, session)
+               claude_memory, clients, offline_guard, packs, selftest,
+               session)
 from .acl import VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, user_model_dir
@@ -1189,15 +1190,107 @@ def _install_agent_skill(target: str) -> None:
           "conversation into the vault.")
 
 
+#: The three that get the full treatment - an MCP registration, the
+#: /compartmentalize skill in their own skills directory, and for Claude the
+#: capture hook and the file-memory import. Everything in `clients.CLIENTS`
+#: gets the MCP registration, which is the part that makes memory work.
+DEEP_TARGETS = ("claude", "hermes", "openclaw")
+
+
 def cmd_integrate(args) -> None:
-    """One-command wiring into an agent ecosystem (claude/hermes/openclaw)."""
-    try:
-        _integrate_target(args)
-    finally:
-        # Written whichever way the wiring above went, including the paths
-        # that return early. The skill is a file in the agent's own skills
-        # directory; it does not depend on the MCP registration landing.
-        _install_agent_skill(args.target)
+    """One-command wiring into an agent ecosystem."""
+    if getattr(args, "list", False):
+        _integrate_list(args)
+        return
+    if getattr(args, "all", False):
+        _integrate_all(args)
+        return
+    if not args.target:
+        print("name an agent, or use --list to see every one this knows and "
+              "--all to wire every one that is installed.")
+        return
+
+    if args.target in DEEP_TARGETS:
+        try:
+            _integrate_target(args)
+        finally:
+            # Written whichever way the wiring above went, including the paths
+            # that return early. The skill is a file in the agent's own skills
+            # directory; it does not depend on the MCP registration landing.
+            _install_agent_skill(args.target)
+        return
+
+    client = clients.resolve(args.target)
+    if client is None:
+        known = ", ".join(sorted(set(DEEP_TARGETS) | set(clients.CLIENTS)))
+        print(f"unknown agent {args.target!r}. Known: {known}")
+        return
+    _integrate_client(client, args)
+
+
+def _integrate_list(args) -> None:
+    """Every client this knows, and where each one stands on this machine."""
+    rows = clients.status()
+    here = [r for r in rows if r["present"]]
+    width = max(len(r["display"]) for r in rows)
+    print(f"{len(rows)} clients known, {len(here)} installed here\n")
+    for r in rows:
+        if r["registered"]:
+            mark, state = "✓", "connected"
+        elif r["present"]:
+            mark, state = "•", "installed, not connected"
+        else:
+            mark, state = " ", "not found"
+        manual = "" if r["writes"] else "  (paste, not written)"
+        print(f" {mark} {r['display']:<{width}}  {state}{manual}")
+        if r["present"]:
+            print(f"   {' ' * width}  {r['config']}")
+    print(f"\nwire one:  compartment integrate <name>"
+          f"\nwire all:  compartment integrate --all")
+
+
+def _integrate_all(args) -> None:
+    """Wire every client that is actually on this machine.
+
+    Deliberately only the ones found: writing configuration for programs
+    nobody has installed leaves litter and connects nothing.
+    """
+    found = clients.detected()
+    if not found:
+        print("no MCP clients found on this machine.")
+        return
+    print(f"{len(found)} client(s) found\n")
+    for c in found:
+        _integrate_client(c, args, brief=True)
+    print("\nrestart any client that was running to pick it up.")
+
+
+def _integrate_client(client, args, brief: bool = False) -> None:
+    """Register compartment with one MCP client, or say why not."""
+    if getattr(args, "remove", False):
+        gone = clients.unregister(client)
+        print(f"{'removed from' if gone else 'was not in'} "
+              f"{client.display} ({client.config_path()})")
+        return
+
+    res = clients.register(client, args.vault)
+    if res["written"]:
+        print(f"✓ {client.display} → {res['config']}"
+              + (f"  (backup: {Path(res['backup']).name})"
+                 if res["backup"] else ""))
+        if res["note"]:
+            print(f"   {res['note']}")
+    else:
+        print(f"• {client.display}: {res['reason']}")
+        if res["note"]:
+            print(f"   {res['note']}")
+        print(f"   {res['config']}")
+        for line in (res["snippet"] or "").splitlines():
+            print(f"   {line}")
+
+    if not brief and not os.path.exists(args.vault):
+        print(f"\n! no vault at {args.vault} - run `compartment init` to "
+              "create one")
 
 
 def _integrate_target(args) -> None:
@@ -1739,8 +1832,21 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_uninstall)
 
     p = sub.add_parser("integrate",
-                       help="one-command wiring into claude, hermes, or openclaw")
-    p.add_argument("target", choices=["claude", "hermes", "openclaw"])
+                       help="one-command wiring into any MCP client "
+                            "(--list to see them all)")
+    # choices still does the rejecting, so a typo is an error rather than a
+    # config written for a client that does not exist. metavar keeps the
+    # usage line to one word now that the list is thirty long; argparse still
+    # names every accepted spelling when it turns one down.
+    p.add_argument("target", nargs="?", default=None, metavar="AGENT",
+                   choices=sorted(set(DEEP_TARGETS) | set(clients.ALIASES)),
+                   help="claude, hermes, openclaw, or any client from --list")
+    p.add_argument("--list", action="store_true",
+                   help="every client this knows, and whether it is here")
+    p.add_argument("--all", action="store_true",
+                   help="wire every client found on this machine")
+    p.add_argument("--remove", action="store_true",
+                   help="take compartment back out of that client")
     p.add_argument("--no-import", action="store_true",
                    help="do not import existing Claude Code file memories")
     p.add_argument("--no-hooks", action="store_true",

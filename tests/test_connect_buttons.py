@@ -8,7 +8,7 @@ two front ends to the same list of agents as the CLI.
 
 import pytest
 
-from compartment import cli, menubar, systray
+from compartment import cli, clients, menubar, systray
 
 
 def _state(**over):
@@ -34,10 +34,17 @@ def test_every_button_names_a_target_the_cli_accepts(monkeypatch, target,
     assert seen["target"] == target
 
 
-def test_no_agent_the_cli_accepts_is_missing_a_button(monkeypatch, capsys):
-    """The other direction: adding a target to the CLI and forgetting the
-    button leaves an agent nobody can reach from the app. argparse names
-    every choice it accepts when it rejects one, so ask it."""
+def test_the_cli_accepts_every_button_and_every_known_client(monkeypatch,
+                                                             capsys):
+    """The other direction: a button the CLI rejects is a button that cannot
+    work, and a client `--list` advertises that the CLI rejects is a lie.
+    argparse names every choice it accepts when it rejects one, so ask it.
+
+    Containment is one-way now. The panel offers the three agents that get
+    the deep treatment - a skill file, a hook, an import - while the CLI
+    accepts every MCP client as well. Thirty buttons would not fit in a
+    popover, so the panel is a subset on purpose.
+    """
     monkeypatch.setattr(cli, "cmd_integrate", lambda args: None)
     with pytest.raises(SystemExit):
         cli.main(["integrate", "no-such-agent"])
@@ -46,7 +53,8 @@ def test_no_agent_the_cli_accepts_is_missing_a_button(monkeypatch, capsys):
     # Read it in a way that survives both, and the next change to it.
     tail = err.split("choose from")[-1].split(")")[0]
     choices = {c.strip().strip("'\"") for c in tail.split(",") if c.strip()}
-    assert choices == {t for t, _ in menubar.INTEGRATION_TARGETS}
+    assert {t for t, _ in menubar.INTEGRATION_TARGETS} <= choices
+    assert set(clients.ALIASES) <= choices
 
 
 def test_the_agents_are_offered_in_a_fixed_order():
