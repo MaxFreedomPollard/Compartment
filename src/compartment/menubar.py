@@ -717,7 +717,12 @@ def _launchctl(*argv: str) -> tuple[int, str]:
 
 
 def _gui_domain() -> str:
-    return f"gui/{os.getuid()}"
+    """launchd's per-user domain. `os.getuid` is POSIX-only and this module
+    is imported on every platform, so it is asked for rather than assumed:
+    an AttributeError here would take down anything that merely touched the
+    login-agent code on Windows."""
+    uid = getattr(os, "getuid", None)
+    return f"gui/{uid() if uid else 0}"
 
 
 def _bootstrap_agent(plist: Path) -> str:

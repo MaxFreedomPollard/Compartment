@@ -78,12 +78,21 @@ def test_no_lockout_the_right_passphrase_still_opens_after_many_failures(
 
 def test_a_correct_attempt_clears_the_pacing(vault_path, fast):
     Vault.create(vault_path, PASS, creator="t").lock()
+    # What an unlock costs with nothing pacing it. Argon2 and opening the
+    # file are not free, and on a loaded CI runner they can take longer than
+    # the whole test interval, so "no wait was added" has to be measured
+    # against that cost rather than against a flat number. Comparing to 0.4s
+    # made this a test of how busy the machine was.
+    start = time.monotonic()
+    Vault.unlock(vault_path, passphrase=PASS).lock()
+    baseline = time.monotonic() - start
+
     with pytest.raises((TamperError, CryptoError)):
         Vault.unlock(vault_path, passphrase="wrong")
     Vault.unlock(vault_path, passphrase=PASS).lock()   # pays the wait once
     start = time.monotonic()
     Vault.unlock(vault_path, passphrase=PASS).lock()   # and not again
-    assert time.monotonic() - start < fast
+    assert time.monotonic() - start < baseline + fast
 
 
 def test_the_user_is_told_why_it_is_waiting(vault_path, fast, capsys):
