@@ -85,7 +85,16 @@ def test_bench_budgets(seeded_vault):
     if out["peak_rss_mb"] is None:
         assert rss is None, out
     else:
-        assert rss, out
+        # What is checked is that the budget agrees with the measurement, not
+        # that this machine came in under it. getrusage reports the peak RSS
+        # of the whole process for its whole life, so run inside the suite
+        # this reading is every earlier test's allocations - the ONNX
+        # sessions, the seeded vaults, the index builds - and not the bench
+        # at all. It passes alone and fails after six hundred tests, which
+        # makes it a measurement of the runner. `compartment bench` still
+        # computes and prints the budget, and standalone is where that number
+        # means something.
+        assert rss == (out["peak_rss_mb"] < 1024), out
 
 
 # --------------------------------------------------------------- bench fixes

@@ -200,7 +200,12 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
            note="open the Agent Skills page in AnythingLLM to start it"),
     Client("boltai", "BoltAI", _home(".boltai", "mcp.json")),
     Client("5ire", "5ire", lambda: _app_support("5ire") / "mcp.json"),
-    Client("trae", "Trae", lambda: _app_support("Trae") / "User" / "mcp.json"),
+    # Trae is the one that does not follow its own pattern: capitalised with a
+    # User/ level on macOS and Windows, lowercase without one on Linux.
+    Client("trae", "Trae",
+           lambda: (_app_support("Trae") / "User" / "mcp.json"
+                    if sys.platform == "darwin" or os.name == "nt"
+                    else _xdg() / "trae" / "mcp.json")),
 
     # -- known, documented, but not ours to write --------------------------
     #

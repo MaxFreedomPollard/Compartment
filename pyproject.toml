@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compartment"
-version = "4.1"
+version = "4.2"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -37,7 +37,11 @@ dependencies = [
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
     "numpy>=1.26",
-    "mcp>=1.0",
+    # Ceiling, not caution. mcp 2.0 (2026-07-28) removed mcp.server.fastmcp,
+    # which server.py imports, so an unbounded `mcp>=1.0` resolves to a
+    # release where `compartment serve` raises at import and the MCP server
+    # never starts. Lifting this means porting to mcp.server.mcpserver first.
+    "mcp>=1.0,<2",
     # The app ships with every install. It is not an add-on: unlocking,
     # locking and changing the passphrase are things people do through a
     # panel, not through a terminal, so an install that only lays down a CLI
