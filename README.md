@@ -466,6 +466,11 @@ backup), then: `openclaw gateway restart` and confirm with
 pip install compartment && compartment init
 ```
 
+`compartment integrate --list` names the thirty MCP clients it knows - Cursor,
+VS Code, Cline, Roo Code, Zed, OpenCode, Codex CLI, Gemini CLI, LM Studio,
+AnythingLLM, BoltAI and the rest - and `compartment integrate --all` writes the
+block below into every one of them that is installed here.
+
 Then add the server to your client's MCP config (stdio transport, no API
 key, no environment variables):
 

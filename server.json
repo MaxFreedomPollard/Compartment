@@ -7,13 +7,13 @@
     "url": "https://github.com/MaxFreedomPollard/Compartment",
     "source": "github"
   },
-  "version": "4.1.0",
+  "version": "4.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "compartment",
-      "version": "4.1",
+      "version": "4.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
