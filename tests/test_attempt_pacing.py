@@ -34,11 +34,20 @@ def test_the_shipped_interval_is_five_seconds():
     assert crypto.ATTEMPT_INTERVAL_SECONDS == 5.0
 
 
-def test_first_attempt_is_not_delayed(vault_path, fast):
+def test_first_attempt_is_not_delayed(vault_path, fast, monkeypatch):
+    """Nothing is made to wait before the first attempt.
+
+    This used to time the unlock and assert it finished inside the interval,
+    which measured Argon2 and the machine rather than the pacing - a loaded
+    Windows runner spent 422ms against a 400ms bound and failed a build that
+    was correct. The question is whether a wait is imposed at all, so watch
+    for the wait itself rather than for the clock.
+    """
     Vault.create(vault_path, PASS, creator="t").lock()
-    start = time.monotonic()
+    slept = []
+    monkeypatch.setattr(crypto.time, "sleep", lambda seconds: slept.append(seconds))
     Vault.unlock(vault_path, passphrase=PASS).lock()
-    assert time.monotonic() - start < fast
+    assert slept == [], f"the first attempt was paced for {slept}s"
 
 
 def test_a_failed_attempt_paces_the_next_one(vault_path, fast):
