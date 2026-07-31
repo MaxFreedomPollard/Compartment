@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.MaxFreedomPollard/compartment",
   "title": "Compartment",
-  "description": "Fully offline, encrypted-at-rest vector memory for AI agents. AEAD-encrypted vectors, no cloud.",
+  "description": "Durable agentic memory, encrypted at rest. Fully offline: no network, no API key, no cloud.",
   "repository": {
     "url": "https://github.com/MaxFreedomPollard/Compartment",
     "source": "github"
