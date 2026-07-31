@@ -1,0 +1,45 @@
+name: Publish to MCP Registry
+
+# Publishes server.json to the official MCP registry
+# (registry.modelcontextprotocol.io) whenever a GitHub Release is published,
+# so the registry entry never drifts behind PyPI the way it did before this
+# existed. Authentication is GitHub Actions OIDC: the registry checks this
+# workflow's own identity token against the io.github.MaxFreedomPollard/*
+# namespace it owns, so no token is stored anywhere. Same arrangement as the
+# PyPI Trusted Publishing in publish.yml, for the same reason.
+
+on:
+  release:
+    types: [published]
+  # The registry rejects a version it already holds, so a manual run only does
+  # something once server.json's version has moved on. That is the case when a
+  # release went out before this workflow existed and only the registry entry
+  # still needs to catch up.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write        # required for OIDC authentication to the registry
+
+jobs:
+  publish-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz"
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher --version
+
+      # Fail on a malformed server.json before touching the registry, rather
+      # than half-way through a publish.
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
