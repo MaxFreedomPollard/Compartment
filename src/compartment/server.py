@@ -474,9 +474,15 @@ def memory_lock() -> str:
 @mcp.tool()
 @_offload
 def memory_unlock(passphrase: str) -> str:
-    """DISABLED by default: passing the passphrase through the agent exposes it
-    to the host's context. Enable it only if the user accepts that exposure, by
-    setting settings.unlock_tool_enabled = true in the vault config."""
+    """Unlock the vault for this session so the other memory tools can use it
+    again; while it is locked they all fail and tell the user to run
+    `compartment unlock`. DISABLED by default: passing the passphrase through
+    the agent exposes it to the host's context, so prefer that command on the
+    machine, and enable this tool only if the user accepts that exposure, by
+    setting settings.unlock_tool_enabled = true in the vault config.
+    `passphrase` is the vault's own passphrase, verbatim; a two-factor vault
+    also needs its keyfile present on the machine. Returns the resulting lock
+    state."""
     try:
         from .acl import VaultConfig
         cfg = VaultConfig.load(_state["path"])
