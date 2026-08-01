@@ -35,9 +35,8 @@ from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, default_vault,
                       fetch_state, integrate, lock_vault,
-                      relaunch_detached, release_instance_lock, self_check,
-                      set_setting, starter_note, started_from_a_terminal,
-                      summarise, unlock_vault)
+                      release_instance_lock, self_check,
+                      set_setting, starter_note, summarise, unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -804,14 +803,13 @@ def run(vault: str | None = None, show: bool = False,
               "has the panel - systemd puts it back if it ever dies.")
         return 0
 
-    # Nothing to hand to, so at least cut the tie to the terminal this was
-    # typed in. Otherwise closing that window takes the panel with it.
-    if started_from_a_terminal() and relaunch_detached(vault_path, show):
-        print("Compartment is running on its own now, so closing this "
-              "terminal will not stop it.\n"
-              "  To have it come back at every sign-in: compartment panel "
-              "--login on")
-        return 0
+    # No detaching from the terminal here, unlike the macOS menu bar app.
+    # `compartment tray` and `compartment panel` are expected to BE the
+    # running app: start one from a console or a script and that process is
+    # the panel, until it is stopped. Re-launching detached and exiting zero
+    # would look, to anything holding the handle, exactly like the app dying
+    # on its own. Start at sign-in is what survives the session here, and on
+    # Linux and Windows that is now supervised.
 
     try:
         import tkinter as tk

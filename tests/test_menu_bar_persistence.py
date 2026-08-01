@@ -1017,8 +1017,12 @@ def test_run_detaches_from_the_terminal(monkeypatch):
     assert "relaunch_detached(vault_path, show)" in body
     tray = (menubar.Path(systray.__file__).read_text(encoding="utf-8")
             .split("def run(", 1)[1])
-    assert "started_from_a_terminal()" in tray
     assert "hand_over_to_supervisor(vault_path)" in tray
+    # And deliberately NOT the detach. `compartment tray` and `compartment
+    # panel` are expected to BE the running app: whoever started one holds
+    # its handle, and a copy that re-launched itself and exited zero is
+    # indistinguishable, from there, from the app dying on its own.
+    assert "relaunch_detached" not in tray
 
 
 # --- the vault the user actually asked for ----------------------------------
