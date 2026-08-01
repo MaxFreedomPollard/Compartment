@@ -501,8 +501,7 @@ def test_windows_run_entry_is_checked_by_value_and_not_only_by_name(
     """A policy or a roaming profile can leave somebody else's command under
     our name. That is not this app starting at sign-in."""
     reg = _FakeWinreg()
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(systray, "_is_linux", lambda: False)
+    _as_windows(monkeypatch)
     monkeypatch.setattr(systray, "_winreg", lambda: reg)
     monkeypatch.setattr(systray, "_autostart_command",
                         lambda *a: '"C:\\ours\\compartment.exe" tray')
@@ -519,8 +518,7 @@ def test_windows_a_good_write_still_reports_on(monkeypatch, tmp_path):
     exe = tmp_path / "compartment.exe"
     exe.write_text("", encoding="utf-8")
     reg = _FakeWinreg()
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(systray, "_is_linux", lambda: False)
+    _as_windows(monkeypatch, str(exe))
     monkeypatch.setattr(systray, "_winreg", lambda: reg)
     monkeypatch.setattr(systray, "_autostart_command", lambda *a: f'"{exe}" tray')
     assert systray.set_login(True) == "on"
@@ -532,8 +530,7 @@ def test_windows_a_run_entry_naming_a_program_that_is_gone_is_not_on(
     """An uninstalled Python or a moved virtualenv leaves the entry behind,
     and it starts nothing at the next sign-in."""
     reg = _FakeWinreg({systray.RUN_VALUE: f'"{tmp_path / "gone.exe"}" tray'})
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(systray, "_is_linux", lambda: False)
+    _as_windows(monkeypatch)
     monkeypatch.setattr(systray, "_winreg", lambda: reg)
     assert systray.login_status() != "on"
 
@@ -709,9 +706,23 @@ def test_no_unit_means_nothing_is_enabled_behind_the_user(as_linux,
 
 # --- Windows supervision: a scheduled task ----------------------------------
 
-def _as_windows(monkeypatch):
+WINDOWS_EXE = "C:\\Program Files\\Compartment\\compartment.exe"
+
+
+def _as_windows(monkeypatch, exe=WINDOWS_EXE):
+    """Windows, from any machine.
+
+    `shutil` is replaced as well as sys.platform, and not for convenience.
+    From Python 3.12 `shutil.which` asks `_winapi` whenever sys.platform
+    says win32, and `_winapi` is None everywhere else - so the real function
+    raises AttributeError on the two platforms these tests actually run on,
+    for code that has nothing wrong with it.
+    """
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(systray, "_is_linux", lambda: False)
+    monkeypatch.setattr(systray, "shutil",
+                        type("S", (), {"which": staticmethod(lambda n: exe)}))
+    return exe
 
 
 def test_the_task_restarts_a_panel_that_failed(monkeypatch):
@@ -957,13 +968,11 @@ def test_the_scheduled_task_carries_the_vault_it_was_given(monkeypatch):
 
 
 def test_the_run_key_carries_the_vault_it_was_given(monkeypatch, tmp_path):
-    _as_windows(monkeypatch)
     exe = tmp_path / "compartment.exe"
     exe.write_text("", encoding="utf-8")
+    _as_windows(monkeypatch, str(exe))
     reg = _FakeWinreg()
     monkeypatch.setattr(systray, "_winreg", lambda: reg)
-    monkeypatch.setattr(systray, "shutil",
-                        type("S", (), {"which": staticmethod(lambda n: str(exe))}))
     monkeypatch.setattr(systray, "_schtasks",
                         lambda *a: (1, "ERROR: Access is denied."))
     systray.set_login(True, "C:\\second\\memory.vault")
