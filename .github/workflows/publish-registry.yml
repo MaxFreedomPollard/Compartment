@@ -39,6 +39,30 @@ jobs:
       - name: Validate server.json
         run: ./mcp-publisher validate
 
+      # The registry checks that the PyPI version in server.json really
+      # exists before it will register it, and publish.yml is uploading that
+      # version to PyPI on the same trigger, in a sibling workflow this one
+      # cannot wait on with `needs`. So it raced, lost, and every release
+      # failed here with "version '<v>' was not found (status: 404)" while
+      # PyPI was still processing the upload seconds later.
+      - name: Wait for the version to reach PyPI
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('server.json'))['packages'][0]['version'])")
+          echo "waiting for compartment $version on PyPI"
+          for attempt in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+                   "https://pypi.org/pypi/compartment/$version/json" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "compartment $version is on PyPI after $attempt attempt(s)"
+              exit 0
+            fi
+            echo "attempt $attempt: PyPI answered $code"
+            sleep 10
+          done
+          echo "::error::compartment $version never appeared on PyPI; \
+          publish it first, then re-run this workflow"
+          exit 1
+
       - name: Publish
         run: |
           ./mcp-publisher login github-oidc
