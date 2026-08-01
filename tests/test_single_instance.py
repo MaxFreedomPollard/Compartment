@@ -26,8 +26,14 @@ HOLDER = textwrap.dedent("""
 
 
 def _src_dir():
+    """The directory `compartment` is a package inside, for a subprocess that
+    has to import it. parents[1], not parents[2]: menubar.py lives at
+    <root>/src/compartment/menubar.py, so parents[2] is the repository root
+    and a child given that path cannot import compartment at all. It only
+    ever passed on a machine where compartment happened to be pip-installed
+    into the interpreter running the tests."""
     import pathlib
-    return str(pathlib.Path(menubar.__file__).resolve().parents[2])
+    return str(pathlib.Path(menubar.__file__).resolve().parents[1])
 
 
 @pytest.fixture()

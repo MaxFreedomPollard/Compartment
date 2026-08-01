@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .home import env, home
@@ -33,8 +34,10 @@ from .home import env, home
 from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, default_vault,
-                      fetch_state, integrate, lock_vault, self_check,
-                      set_setting, starter_note, summarise, unlock_vault)
+                      fetch_state, integrate, lock_vault,
+                      relaunch_detached, release_instance_lock, self_check,
+                      set_setting, starter_note, started_from_a_terminal,
+                      summarise, unlock_vault)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -150,13 +153,21 @@ def _autostart_command(vault: str | None = None) -> str:
     it carries the vault path, because a user running a non-default vault
     would otherwise silently get the default one back after a reboot.
     """
+    exe, args = _autostart_parts(vault)
+    return f'"{exe}" {args}'
+
+
+def _autostart_parts(vault: str | None = None) -> tuple[str, str]:
+    """The same command, split. A scheduled task wants the program and its
+    arguments in separate XML elements, and re-parsing a quoted command line
+    to get them back would be a second place for the quoting to be wrong."""
     vault = vault or env("VAULT") or str(home() / "memory.vault")
     exe = shutil.which("compartment")
     if exe:
-        return f'"{exe}" --vault "{vault}" tray'
+        return exe, f'--vault "{vault}" tray'
     pyw = Path(sys.executable).with_name("pythonw.exe")
     runner = str(pyw) if pyw.is_file() else sys.executable
-    return f'"{runner}" -m compartment.cli --vault "{vault}" tray'
+    return runner, f'-m compartment.cli --vault "{vault}" tray'
 
 
 # --- the Linux application entry --------------------------------------------
@@ -269,6 +280,318 @@ def remove_autostart_entry() -> bool:
         return False
 
 
+# --- being put back when it dies --------------------------------------------
+# An autostart entry and a Run key both start the panel once at sign-in and
+# then stop caring, which is the fault macOS had before KeepAlive: anything
+# that ends the process - a crash, an exception, an upgrade replacing the
+# binary underneath it - took the icon away until the next sign-in, with
+# nothing said. Both systems do have a supervisor; neither of them is the
+# mechanism that was being used.
+#
+# The rule for both is the one launchd already follows: bring back a copy
+# that DIED, leave alone a copy that LEFT. systemd spells that
+# `Restart=on-failure` and Task Scheduler spells it `RestartOnFailure`; Quit
+# exits zero under either, so the button stays the only way to remove the
+# icon for the rest of the session.
+#
+# One starter at a time, never two. Two things starting the panel at login
+# means one of them loses the single-instance lock and stands down with exit
+# zero, and exit zero is exactly the exit a supervisor is built to leave
+# alone - so a redundant autostart entry does not add a safety net, it
+# quietly removes the one that was there.
+
+SYSTEMD_UNIT = "compartment.service"
+SCHEDULED_TASK = "Compartment"
+
+
+def _systemctl(*argv: str) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["systemctl", "--user", *argv], capture_output=True,
+                           text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, str(exc)
+    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+
+
+def systemd_unit_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "systemd" / "user" / SYSTEMD_UNIT
+
+
+def systemd_available() -> bool:
+    """Is there a systemd user manager on the other end of systemctl?
+
+    Not "is this a systemd distribution". A container, a bare X session or an
+    ssh login can have systemd running the machine and no user manager to
+    talk to, and installing a unit into that is writing a file nothing will
+    ever read.
+    """
+    if not shutil.which("systemctl"):
+        return False
+    _code, out = _systemctl("is-system-running")
+    low = out.lower()
+    # "degraded" exits non-zero and is a perfectly usable manager. Only being
+    # unable to reach one at all is a no.
+    return not ("failed to connect" in low or "offline" in low
+                or "no medium" in low or not out)
+
+
+def systemd_unit_text(vault: str | None = None) -> str:
+    return (
+        "[Unit]\n"
+        "Description=Compartment - encrypted memory for AI agents\n"
+        "Documentation=https://github.com/MaxFreedomPollard/Compartment\n"
+        "PartOf=graphical-session.target\n"
+        # A user manager with no display can never draw the panel. Five tries
+        # and it stops, rather than restarting for ever on a machine where it
+        # cannot possibly work.
+        "StartLimitIntervalSec=120\n"
+        "StartLimitBurst=5\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={_panel_command(vault)}\n"
+        # The Linux half of KeepAlive SuccessfulExit=false: back if it died,
+        # left alone if it left. Quit exits zero.
+        "Restart=on-failure\n"
+        "RestartSec=3\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=graphical-session.target\n")
+
+
+def systemd_enabled() -> bool:
+    """Does systemd say the unit starts at login? It is the authority."""
+    if not systemd_unit_path().is_file():
+        return False
+    code, out = _systemctl("is-enabled", SYSTEMD_UNIT)
+    first = out.splitlines()[0].strip() if out else ""
+    return code == 0 and first == "enabled"
+
+
+def systemd_active() -> bool:
+    return _systemctl("is-active", SYSTEMD_UNIT)[0] == 0
+
+
+def install_systemd_unit(vault: str | None = None) -> str:
+    """Write the unit, enable it, start it, and check every step."""
+    path = systemd_unit_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(systemd_unit_text(vault), encoding="utf-8")
+        path.chmod(0o644)
+    except OSError as exc:
+        return f"error: {exc}"
+    _systemctl("daemon-reload")
+    code, out = _systemctl("enable", "--now", SYSTEMD_UNIT)
+    if code != 0:
+        return f"error: {out or 'systemd refused the unit'}"
+    if not systemd_enabled():
+        return "error: the unit did not stay enabled"
+    return "on"
+
+
+def remove_systemd_unit() -> bool:
+    _systemctl("disable", "--now", SYSTEMD_UNIT)
+    try:
+        systemd_unit_path().unlink(missing_ok=True)
+    except OSError:
+        return False
+    _systemctl("daemon-reload")
+    return not systemd_enabled()
+
+
+def _schtasks(*argv: str) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["schtasks", *argv], capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, str(exc)
+    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+
+
+def _xml(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def scheduled_task_xml(vault: str | None = None) -> str:
+    """A logon task that restarts the panel if it fails.
+
+    Written as XML rather than assembled from `schtasks` flags because the
+    restart-on-failure setting - the entire reason for preferring a task to
+    the Run key - has no flag.
+    """
+    exe, args = _autostart_parts(vault)
+    user = os.environ.get("USERNAME") or ""
+    domain = os.environ.get("USERDOMAIN") or ""
+    who = f"{domain}\\{user}" if domain and user else user
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/'
+        '2004/02/mit/task">\n'
+        "  <RegistrationInfo>\n"
+        "    <Description>Compartment - encrypted memory for AI agents"
+        "</Description>\n"
+        "  </RegistrationInfo>\n"
+        "  <Triggers>\n"
+        "    <LogonTrigger>\n"
+        "      <Enabled>true</Enabled>\n"
+        f"      <UserId>{_xml(who)}</UserId>\n"
+        "    </LogonTrigger>\n"
+        "  </Triggers>\n"
+        "  <Principals>\n"
+        '    <Principal id="Author">\n'
+        f"      <UserId>{_xml(who)}</UserId>\n"
+        # Without an interactive token the task runs in a session that has no
+        # desktop, and a tray icon there is an icon nobody can ever see.
+        "      <LogonType>InteractiveToken</LogonType>\n"
+        "      <RunLevel>LeastPrivilege</RunLevel>\n"
+        "    </Principal>\n"
+        "  </Principals>\n"
+        "  <Settings>\n"
+        # The Windows half of KeepAlive SuccessfulExit=false. Task Scheduler
+        # counts a non-zero exit as a failure and starts it again; Quit exits
+        # zero and is left alone.
+        "    <RestartOnFailure>\n"
+        "      <Interval>PT1M</Interval>\n"
+        "      <Count>3</Count>\n"
+        "    </RestartOnFailure>\n"
+        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+        "    <StartWhenAvailable>true</StartWhenAvailable>\n"
+        # A panel is meant to sit there. A time limit would have Task
+        # Scheduler kill it after three days.
+        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+        "    <Enabled>true</Enabled>\n"
+        "    <Hidden>false</Hidden>\n"
+        "  </Settings>\n"
+        '  <Actions Context="Author">\n'
+        "    <Exec>\n"
+        f"      <Command>{_xml(exe)}</Command>\n"
+        f"      <Arguments>{_xml(args)}</Arguments>\n"
+        "    </Exec>\n"
+        "  </Actions>\n"
+        "</Task>\n")
+
+
+def scheduled_task_registered() -> bool:
+    """Does Task Scheduler have the task? It is the authority."""
+    return _schtasks("/query", "/tn", SCHEDULED_TASK)[0] == 0
+
+
+def install_scheduled_task(vault: str | None = None) -> str:
+    import tempfile
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".xml")
+        os.close(fd)
+        # UTF-16 with a BOM: schtasks reads the encoding the declaration
+        # names, and rejects the file outright when the two disagree.
+        Path(tmp).write_text(scheduled_task_xml(vault), encoding="utf-16")
+    except OSError as exc:
+        return f"error: {exc}"
+    try:
+        code, out = _schtasks("/create", "/tn", SCHEDULED_TASK,
+                              "/xml", tmp, "/f")
+    finally:
+        try:
+            Path(tmp).unlink()
+        except OSError:
+            pass
+    if code != 0:
+        return f"error: {out or 'Task Scheduler refused the task'}"
+    if not scheduled_task_registered():
+        return "error: the task did not survive being created"
+    return "on"
+
+
+def remove_scheduled_task() -> bool:
+    _schtasks("/end", "/tn", SCHEDULED_TASK)
+    _schtasks("/delete", "/tn", SCHEDULED_TASK, "/f")
+    return not scheduled_task_registered()
+
+
+def supervisor_status() -> str | None:
+    """"on" if a supervisor has this, a reason if it has it broken, or None
+    if there is no supervisor in play and the older mechanism answers."""
+    if _is_linux():
+        if not systemd_unit_path().is_file():
+            return None
+        return "on" if systemd_enabled() else "off (the unit is not enabled)"
+    if sys.platform == "win32" and scheduled_task_registered():
+        return "on"
+    return None
+
+
+def start_supervised() -> bool:
+    """Start the panel through its supervisor, so that the copy which comes
+    up is the copy that will be brought back if it dies."""
+    if _is_linux():
+        return systemd_enabled() and _systemctl("start", SYSTEMD_UNIT)[0] == 0
+    if sys.platform == "win32":
+        return (scheduled_task_registered()
+                and _schtasks("/run", "/tn", SCHEDULED_TASK)[0] == 0)
+    return False
+
+
+def restart_supervised() -> bool:
+    """Stop and start the panel in one operation by the supervisor.
+
+    What an upgrade needs, and for the same reason macOS uses `kickstart -k`:
+    killing the process by hand races the supervisor, which relaunches the
+    copy that exited non-zero while the caller is starting a replacement.
+    """
+    if _is_linux():
+        return systemd_enabled() and _systemctl("restart", SYSTEMD_UNIT)[0] == 0
+    if sys.platform == "win32":
+        if not scheduled_task_registered():
+            return False
+        _schtasks("/end", "/tn", SCHEDULED_TASK)
+        return _schtasks("/run", "/tn", SCHEDULED_TASK)[0] == 0
+    return False
+
+
+def _is_supervised() -> bool:
+    """Was this copy started by the supervisor?
+
+    systemd sets INVOCATION_ID for every service it runs, so a copy under the
+    unit can be told apart from one started by hand. Task Scheduler leaves no
+    such mark, so this is always false on Windows - see
+    `hand_over_to_supervisor`, which is Linux-only for that reason.
+    """
+    return bool(os.environ.get("INVOCATION_ID")) if _is_linux() else False
+
+
+def hand_over_to_supervisor(vault: str, timeout: float = 15.0) -> bool:
+    """Let the supervised copy have the panel, and prove that it took it.
+
+    The same precedence as macOS: a copy started by hand is not watched by
+    anything, and while it holds the lock the supervisor's own copy stands
+    down with exit zero - which `Restart=on-failure` reads as a deliberate
+    exit, so systemd never starts it again either.
+
+    Only ever hands over to a unit that is already enabled. A machine with no
+    unit is either one that never had start at login or one where the user
+    switched it off, and neither is ours to overrule.
+    """
+    if not _is_linux() or _is_supervised() or not systemd_enabled():
+        return False
+    before = set(running_pids())
+    release_instance_lock()
+    if _systemctl("start", SYSTEMD_UNIT)[0] == 0:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if set(running_pids()) - before:
+                return True
+            time.sleep(0.2)
+    # Nothing came up, so take the panel back rather than leave the user with
+    # none. Unless the lock has gone in the meantime, which means the
+    # handover happened after all, just slower than we waited.
+    _handle, only = acquire_instance_lock(vault)
+    return not only
+
+
 def _is_linux() -> bool:
     """This module draws the panel on Windows and on everything that is not
     macOS. Only the latter uses desktop entries, and macOS must never get
@@ -277,51 +600,140 @@ def _is_linux() -> bool:
     return sys.platform not in ("win32", "darwin")
 
 
+def autostart_is_enabled() -> bool:
+    """Whether the autostart entry would actually start anything.
+
+    There is no launchd here to ask, so the file is the authority - but the
+    file says more than "I exist". Switching Compartment off in GNOME Tweaks
+    or KDE's Autostart rewrites this same entry with `Hidden=true` rather
+    than deleting it, and an entry carrying `X-GNOME-Autostart-enabled=false`
+    is skipped in the same way. Reading only the filename reports "on" for
+    both, which is the desktop equivalent of a plist that was never loaded.
+    """
+    path = autostart_entry_path()
+    try:
+        lines = [ln.strip().lower()
+                 for ln in path.read_text(encoding="utf-8",
+                                          errors="replace").splitlines()]
+    except OSError:
+        return False
+    if "hidden=true" in lines:
+        return False
+    return "x-gnome-autostart-enabled=false" not in lines
+
+
 def login_status() -> str:
+    # A supervisor, where one is in play, is the authority on its own job -
+    # the same reason macOS asks launchd instead of looking for the plist.
+    supervised = supervisor_status()
+    if supervised is not None:
+        return supervised
     if _is_linux():
         # The autostart entry, not the applications-menu entry. Reading the
         # menu entry meant this said "on" for a machine that had never
         # started Compartment at login in its life.
-        return "on" if autostart_entry_path().is_file() else "off"
+        return "on" if autostart_is_enabled() else "off"
     try:
         winreg = _winreg()
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            winreg.QueryValueEx(k, RUN_VALUE)
-        return "on"
+            value, _kind = winreg.QueryValueEx(k, RUN_VALUE)
     except FileNotFoundError:
         return "off"
     except Exception as exc:                          # noqa: BLE001
         return f"unknown ({exc})"
+    # A Run entry naming a program that is not there starts nothing at the
+    # next sign-in, and an uninstalled Python or a moved virtualenv leaves
+    # exactly that behind. The registry is the authority on the entry; the
+    # filesystem is the authority on whether it points at anything.
+    exe = _autostart_target(value)
+    if exe and not Path(exe).is_file():
+        return "off (the program it names is gone)"
+    return "on"
 
 
-def set_login(enabled: bool) -> str:
-    """Register or drop the Run entry. Returns what actually happened."""
+def _autostart_target(command: str) -> str | None:
+    """The executable out of a Run command line, or None if it cannot be
+    read confidently. `_autostart_command` always quotes it; anything else
+    was written by something other than us and is not ours to second-guess."""
+    command = (command or "").strip()
+    if not command.startswith('"'):
+        return None
+    end = command.find('"', 1)
+    return command[1:end] if end > 1 else None
+
+
+def _delete_run_value() -> None:
+    """Drop the Run entry, if there is one. Used when the scheduled task
+    takes over from it, so the two never start a copy each."""
+    try:
+        winreg = _winreg()
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.DeleteValue(k, RUN_VALUE)
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
+def set_login(enabled: bool, vault: str | None = None) -> str:
+    """Register or drop start at sign-in. Returns what actually happened.
+
+    The vault is carried through every mechanism. It used to be dropped at
+    this door: `_autostart_command` and `install_autostart_entry` both take
+    one and take care to keep it, and this called them with nothing - so a
+    user running a second vault had start-at-login quietly registered
+    against the default one, and got the wrong memory back at every sign-in.
+    """
     if _is_linux():
         if not enabled:
+            remove_systemd_unit()
             remove_autostart_entry()
             return "off" if remove_desktop_entry() else "error"
         # Both, and they are not the same thing: the menu entry is how the
         # app is found, the autostart entry is how it comes up at login.
-        out = install_desktop_entry()
+        out = install_desktop_entry(vault)
         if out.startswith("error"):
             return out
-        auto = install_autostart_entry()
+        # Supervised where the machine can be. A unit that enables but never
+        # starts is not proof of anything, so it has to be active too, and
+        # anything short of that is undone rather than left half installed.
+        if systemd_available():
+            if install_systemd_unit(vault) == "on" and systemd_active():
+                remove_autostart_entry()          # exactly one starter
+                return "on"
+            remove_systemd_unit()
+        auto = install_autostart_entry(vault)
         return "on" if not auto.startswith("error") else auto
     if sys.platform != "win32":
         return "error: start at login is handled by the menu bar app here"
+    # Windows: a scheduled task restarts a panel that failed, the Run key
+    # only ever starts one. Same rule as Linux - the better mechanism if it
+    # takes, the older one if it does not, and never the two together. The
+    # Run key is still cleared on the way out, because a version of this that
+    # wrote one may have run on this machine before.
+    if not enabled:
+        remove_scheduled_task()
+    elif install_scheduled_task(vault) == "on":
+        _delete_run_value()
+        return "on"
     try:
         winreg = _winreg()
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
             if enabled:
-                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ,
-                                  _autostart_command())
+                wanted = _autostart_command(vault)
+                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, wanted)
                 # Read it back. A write that the registry accepted and then
                 # dropped - a policy, a locked hive, a roaming profile - used
                 # to report "on" and start nothing at the next sign-in.
                 try:
-                    winreg.QueryValueEx(k, RUN_VALUE)
+                    got, _kind = winreg.QueryValueEx(k, RUN_VALUE)
                 except FileNotFoundError:
                     return "error: the Run entry did not survive the write"
+                # And read back the value, not merely the name. A roaming
+                # profile or a management policy can put its own command
+                # there, and a Run entry that survived as somebody else's
+                # command is not this app starting at sign-in.
+                if got != wanted:
+                    return ("error: the Run entry holds a different command "
+                            f"({got!r})")
                 return "on"
             try:
                 winreg.DeleteValue(k, RUN_VALUE)
@@ -376,6 +788,22 @@ def run(vault: str | None = None, show: bool = False,
                   "notification area")
         else:
             print("Compartment is already open - look for its window")
+        return 0
+
+    # Precedence, the same as macOS: the copy a supervisor is watching owns
+    # the panel, because it is the only one that comes back if it dies.
+    if hand_over_to_supervisor(vault_path):
+        print("Compartment is running as a background service, so that copy "
+              "has the panel - systemd puts it back if it ever dies.")
+        return 0
+
+    # Nothing to hand to, so at least cut the tie to the terminal this was
+    # typed in. Otherwise closing that window takes the panel with it.
+    if started_from_a_terminal() and relaunch_detached(vault_path, show):
+        print("Compartment is running on its own now, so closing this "
+              "terminal will not stop it.\n"
+              "  To have it come back at every sign-in: compartment panel "
+              "--login on")
         return 0
 
     try:
@@ -744,40 +1172,73 @@ def run(vault: str | None = None, show: bool = False,
     return 0
 
 
-def quit_running() -> bool:
-    """Stop a running panel before an update or uninstall replaces it."""
+def running_pids() -> list[int]:
+    """Every other panel copy on this machine. Windows has no pgrep, and
+    taskkill answers the same question well enough there."""
     if sys.platform == "win32":
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
-                           capture_output=True, timeout=30)
-            return True
-        except (OSError, subprocess.SubprocessError):
-            return False
-    import signal
-    killed = False
+        return []
     try:
         out = subprocess.run(
             ["pgrep", "-f", "compartment.*(panel|tray|menubar)"],
             capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
-        return False
+        return []
+    me = os.getpid()
+    pids = []
     for line in out.split():
         try:
             pid = int(line)
         except ValueError:
             continue
-        if pid == os.getpid():
-            continue
+        if pid != me:
+            pids.append(pid)
+    return pids
+
+
+def quit_running(timeout: float = 10.0) -> bool:
+    """Stop a running panel before an update or uninstall replaces it.
+
+    Reports whether the app actually went, not whether a signal was sent.
+    The caller's next move is to start the replacement, and it must not do
+    that while the old copy still holds the single-instance lock: the new
+    one would stand down and the user would be told the app had restarted
+    while looking at the build it was meant to replace.
+    """
+    if sys.platform == "win32":
+        try:
+            r = subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
+                               capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        # 128 is taskkill's "no such process", which is not a failure to
+        # stop anything - it is nothing to stop. Anything else that is not
+        # zero means the copy is still there.
+        return r.returncode == 0
+    import signal
+    pids = running_pids()
+    if not pids:
+        return False
+    for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
-            killed = True
         except OSError:
             pass
-    return killed
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not running_pids():
+            return True
+        time.sleep(0.1)
+    return not running_pids()
 
 
 __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
-           "panel_rows",
+           "running_pids", "panel_rows",
            "autostart_entry_path", "install_autostart_entry",
-           "remove_autostart_entry",
+           "autostart_is_enabled", "remove_autostart_entry",
+           "systemd_unit_path", "systemd_unit_text", "systemd_available",
+           "systemd_enabled", "install_systemd_unit", "remove_systemd_unit",
+           "scheduled_task_xml", "install_scheduled_task",
+           "remove_scheduled_task", "scheduled_task_registered",
+           "start_supervised", "restart_supervised",
+           "hand_over_to_supervisor",
            "icon_path"]

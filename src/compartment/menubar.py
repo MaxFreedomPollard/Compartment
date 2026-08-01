@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -123,7 +124,60 @@ def acquire_instance_lock(vault: str):
     except Exception:                # noqa: BLE001 - no locking here at all
         return fh, True
     _INSTANCE_LOCK = fh
+    _record_lock_holder(fh)
     return fh, True
+
+
+def _record_lock_holder(fh) -> None:
+    """Leave our pid in the lock file.
+
+    So that the copy entitled to take the menu bar knows which single process
+    to ask for it. The lock is per vault on purpose - a second vault is a
+    second memory and gets an icon of its own - and a pgrep for every running
+    copy would take that one down too.
+
+    POSIX only. msvcrt locks the first byte outright, and another process
+    cannot read a byte range Windows has locked, so on Windows the file would
+    be unreadable by the only reader that wants it.
+    """
+    if sys.platform == "win32":
+        return
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"{os.getpid()}\n".encode())
+        fh.flush()
+    except OSError:
+        pass
+
+
+def lock_holder_pid(vault: str) -> int | None:
+    """The pid of the copy holding this vault's menu bar, if it said so.
+
+    None when the file is empty, which is what every lock written before the
+    pid was recorded looks like. That is a reason to leave the incumbent
+    alone, never a reason to guess at it.
+    """
+    try:
+        path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+        pid = int((path.read_text(encoding="utf-8", errors="replace")
+                   ).strip() or 0)
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 and pid != os.getpid() else None
+
+
+def release_instance_lock() -> None:
+    """Give the lock up deliberately, for a handover to a copy that will
+    outlive this one. The kernel does this on exit anyway; doing it first
+    means the other copy is not left waiting on a process that is leaving."""
+    global _INSTANCE_LOCK
+    fh, _INSTANCE_LOCK = _INSTANCE_LOCK, None
+    if fh is not None:
+        try:
+            fh.close()
+        except OSError:
+            pass
 
 
 def compartment_bin() -> str:
@@ -661,19 +715,35 @@ def _launcher_argv() -> list[str]:
     return [sys.executable, "-m", "compartment.cli", "menubar"]
 
 
-def _set_login_agent(enabled: bool) -> str:
+def _set_login_agent(enabled: bool, vault: str | None = None) -> str:
     plist = _agent_plist()
     if not enabled:
         # bootout first: with KeepAlive set, a running copy that is still
         # registered would be restarted by launchd after the plist was
         # deleted, and the icon would come back from a file that no longer
         # exists. Unload stays as the fallback for older macOS.
-        _launchctl("bootout", f"{_gui_domain()}/{LAUNCH_AGENT_LABEL}")
+        code, msg = _launchctl("bootout", f"{_gui_domain()}/{LAUNCH_AGENT_LABEL}")
         _launchctl("unload", str(plist))
         plist.unlink(missing_ok=True)
+        # Deleting the file is not what stops it. launchd holds the job
+        # definition in memory once bootstrapped, so a bootout that failed
+        # leaves KeepAlive free to bring the icon back from a plist that no
+        # longer exists - after the user asked for it to be off. 3 is
+        # launchd's "no such process", which is the state we wanted anyway.
+        if code not in (0, 3) and _agent_loaded():
+            return f"failed: launchd still has the agent registered: {msg}"
         return "off"
     argv = _launcher_argv()
-    args = "".join(f"        <string>{a}</string>\n" for a in argv)
+    args = "".join(f"        <string>{_plist_text(a)}</string>\n"
+                   for a in argv)
+    # Which vault to open, carried in the environment rather than on the
+    # command line. The agent runs an app bundle, and the launcher inside a
+    # .pkg bundle is not ours to change, so there is nowhere to put a
+    # --vault: it has to go before the subcommand and the launcher appends.
+    # Without this the login item quietly opened the DEFAULT vault, however
+    # the user had registered it - the Windows and Linux entries have always
+    # carried the path, and only macOS dropped it.
+    vault = vault or default_vault()
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -701,9 +771,22 @@ def _set_login_agent(enabled: bool) -> str:
         '    <dict>\n'
         '      <key>SuccessfulExit</key><false/>\n'
         '    </dict>\n'
+        '    <key>EnvironmentVariables</key>\n'
+        '    <dict>\n'
+        '      <key>COMPARTMENT_VAULT</key>\n'
+        f'      <string>{_plist_text(vault)}</string>\n'
+        '    </dict>\n'
         '  </dict>\n'
         '</plist>\n', encoding="utf-8")
     return _bootstrap_agent(plist)
+
+
+def _plist_text(value: str) -> str:
+    """A path is XML here, and a vault living under a folder with an
+    ampersand in its name would otherwise write a plist launchd cannot
+    parse - which fails at the next login, not at the moment it is set."""
+    return (value.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
 
 
 def _launchctl(*argv: str) -> tuple[int, str]:
@@ -725,6 +808,30 @@ def _gui_domain() -> str:
     return f"gui/{uid() if uid else 0}"
 
 
+def _agent_loaded() -> bool:
+    """Does launchd have this agent right now?
+
+    The one question that matters, asked of the only thing that can answer
+    it. A plist in ~/Library/LaunchAgents is a request, not a registration:
+    a bootstrap that was refused leaves the file behind exactly as it leaves
+    the login empty, and nothing on disk tells the two apart.
+    """
+    code, _ = _launchctl("print", f"{_gui_domain()}/{LAUNCH_AGENT_LABEL}")
+    return code == 0
+
+
+def _is_launchd_managed() -> bool:
+    """Was this copy started by the login agent?
+
+    launchd puts the job label in XPC_SERVICE_NAME for the processes it
+    spawns. A copy started from a shell has "0" there and a copy started
+    from Finder has the app's own service name, so this is true only of the
+    one copy launchd is watching - and being watched is the whole of what
+    entitles a copy to take the menu bar from another.
+    """
+    return os.environ.get("XPC_SERVICE_NAME", "") == LAUNCH_AGENT_LABEL
+
+
 def _bootstrap_agent(plist: Path) -> str:
     """Load the agent, and report a refusal as one.
 
@@ -736,31 +843,45 @@ def _bootstrap_agent(plist: Path) -> str:
     `bootstrap` is the modern verb and the only one that reports properly.
     An existing registration is booted out first so this is idempotent, and
     `load` remains as the fallback for macOS versions that predate it.
+
+    Neither verb is taken at its word at the end. `load` in particular
+    returns zero for jobs it declined, and the exit status of a command is a
+    weaker claim than launchd's own answer to "do you have this?".
     """
     domain = _gui_domain()
     _launchctl("bootout", f"{domain}/{LAUNCH_AGENT_LABEL}")   # ok if absent
     code, msg = _launchctl("bootstrap", domain, str(plist))
-    if code == 0:
+    if code != 0:
+        code, msg2 = _launchctl("load", "-w", str(plist))     # older macOS
+        msg = msg or msg2
+    if _agent_loaded():
         return "on"
-    code, msg2 = _launchctl("load", "-w", str(plist))         # older macOS
-    if code == 0:
-        return "on"
-    return f"failed: {msg or msg2 or 'launchctl refused the agent'}"
+    return f"failed: {msg or 'launchctl refused the agent'}"
 
 
 def login_status() -> str:
     svc = _app_service()
-    if svc is None:
-        return "on" if _agent_plist().is_file() else "off"
-    return LOGIN_STATUS.get(svc.status(), str(svc.status()))
+    if svc is not None:
+        return LOGIN_STATUS.get(svc.status(), str(svc.status()))
+    # No bundle to register, so the LaunchAgent is what starts this at login
+    # - and whether it does is launchd's to answer, not the filesystem's.
+    # This used to be `"on" if the plist exists`, which is the same mistake
+    # `_bootstrap_agent` was written to stop making on the way in: a plist
+    # written by a bootstrap that failed reported start-at-login as working,
+    # every login, for ever, on the pip install that every user without the
+    # .pkg has.
+    if not _agent_plist().is_file():
+        return "off"
+    return "on" if _agent_loaded() else "off (the agent is not loaded)"
 
 
-def set_login(enabled: bool) -> str:
+def set_login(enabled: bool, vault: str | None = None) -> str:
     """Start at login, via the modern API so System Settings lists Compartment by
     name with its icon instead of an anonymous "legacy agent" entry."""
     svc = _app_service()
     if svc is None:
-        return _set_login_agent(enabled)     # pip install: no bundle to register
+        # pip install: no bundle to register
+        return _set_login_agent(enabled, vault)
     try:
         res = (svc.registerAndReturnError_(None) if enabled
                else svc.unregisterAndReturnError_(None))
@@ -781,26 +902,203 @@ def set_login(enabled: bool) -> str:
     return login_status()
 
 
-def quit_running() -> bool:
-    """Stop a running status bar app, so an update or uninstall does not leave
-    the old build sitting in the menu bar with its binary already gone."""
-    import signal
-    killed = False
+# --------------------------------------------------- outliving the terminal
+
+#: Set on the copy a detached relaunch starts, so it never detaches twice.
+DETACHED_ENV = "COMPARTMENT_DETACHED"
+
+#: Set by hand to keep the app in the foreground, for debugging.
+FOREGROUND_ENV = "COMPARTMENT_FOREGROUND"
+
+
+def started_from_a_terminal() -> bool:
+    """Is this copy tied to a terminal that can take it down?
+
+    `compartment menubar` typed at a prompt is a child of that shell, in the
+    foreground process group of its tty. Closing the window sends SIGHUP to
+    that whole group, and the default disposition for SIGHUP is to die - so
+    the icon goes when the window goes, which is not what a status bar app
+    is for.
+    """
+    if os.environ.get(DETACHED_ENV) or os.environ.get(FOREGROUND_ENV):
+        return False
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            if stream is not None and stream.isatty():
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def relaunch_detached(vault: str, show: bool = False,
+                      timeout: float = 20.0) -> bool:
+    """Start the app again in a session of its own, and hand over to it.
+
+    `start_new_session` makes the new copy a session leader with no
+    controlling terminal, so nothing about the window it was typed in can
+    reach it: no SIGHUP when the window closes, no death when the shell
+    exits. Windows has no sessions in that sense and uses DETACHED_PROCESS,
+    which cuts the same tie to the console.
+
+    Returns False, holding the lock, unless the new copy really came up.
+    """
+    argv = _cli_argv() + ["--vault", vault, "menubar"]
+    if show:
+        argv.append("--show")
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL,
+              "env": {**os.environ, DETACHED_ENV: "1"}}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x00000008          # DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
+    before = set(running_pids())
+    release_instance_lock()
+    try:
+        subprocess.Popen(argv, **kwargs)              # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        acquire_instance_lock(vault)
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if set(running_pids()) - before:
+            return True
+        time.sleep(0.2)
+    _handle, only = acquire_instance_lock(vault)
+    return not only
+
+
+def running_pids() -> list[int]:
+    """Every other status bar copy on this machine."""
     try:
         out = subprocess.run(["pgrep", "-f", "compartment.*menubar"],
                              capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
-        return False
+        return []
     me = os.getpid()
-    for pid in [int(x) for x in out.split() if x.isdigit()]:
-        if pid == me:
-            continue
+    return [int(x) for x in out.split() if x.isdigit() and int(x) != me]
+
+
+def quit_running(timeout: float = 10.0) -> bool:
+    """Stop a running status bar app, so an update or uninstall does not leave
+    the old build sitting in the menu bar with its binary already gone.
+
+    Waits for the process to actually go. Sending a signal is not the same
+    as being obeyed, and the caller's next move - starting the new build -
+    is the one thing that must not happen while the old one still holds the
+    lock, because the new copy would stand down and the user would be told
+    the app had restarted while looking at the build it replaced.
+    """
+    import signal
+    pids = running_pids()
+    if not pids:
+        return False
+    for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
-            killed = True
         except OSError:
             pass
-    return killed
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not running_pids():
+            return True
+        time.sleep(0.1)
+    return not running_pids()
+
+
+def restart_agent() -> bool:
+    """Stop and start the login agent's copy in one launchd operation.
+
+    What an upgrade needs. A plain SIGTERM races: KeepAlive relaunches a
+    process that exited non-zero, so the old copy comes back on its own
+    while the caller is starting a replacement, and the two fight over the
+    lock. `kickstart -k` is launchd doing both halves itself, and because
+    the job is unchanged the new process picks up whatever the upgrade put
+    at the path the plist names.
+    """
+    if sys.platform != "darwin" or not _agent_loaded():
+        return False
+    code, _ = _launchctl("kickstart", "-k",
+                         f"{_gui_domain()}/{LAUNCH_AGENT_LABEL}")
+    return code == 0
+
+
+def evict_unsupervised(vault: str, timeout: float = 10.0) -> bool:
+    """Take this vault's menu bar from a copy that nothing is supervising.
+
+    Only the launchd copy is entitled to call this, and only the one process
+    named in the lock file is touched - see `lock_holder_pid`. An incumbent
+    that never wrote its pid is left alone: standing down costs an icon
+    until the next login, and killing the wrong process costs more.
+    """
+    import signal
+    pid = lock_holder_pid(vault)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def hand_over_to_login_agent(vault: str, timeout: float = 15.0) -> bool:
+    """Let the supervised copy have the menu bar, and prove that it took it.
+
+    The other half of the same precedence rule. A copy started by hand from
+    a terminal is a child of that terminal: closing the window SIGHUPs the
+    foreground process group and the icon goes with it, and nothing is
+    watching to put it back. Worse, while that copy holds the lock, the copy
+    launchd starts stands down with exit 0 - which `KeepAlive
+    SuccessfulExit=false` reads as "it left on purpose" - so launchd never
+    tries again either, and the menu bar belongs to the one copy that cannot
+    survive the session.
+
+    So a loose copy asks launchd to run the real one instead. A plist that
+    launchd has never heard of is bootstrapped on the way past, which is the
+    repair for a machine left with a written-but-never-loaded agent. A
+    missing plist is left alone: that means either a machine that never had
+    start-at-login or a user who turned it off, and neither is ours to
+    overrule.
+
+    Returns False - and keeps the lock - unless a new copy really came up.
+    An icon nothing supervises still beats no icon at all.
+    """
+    if sys.platform != "darwin" or _is_launchd_managed():
+        return False
+    plist = _agent_plist()
+    if not plist.is_file():
+        return False
+    # Both of these happen before anything is asked to start. The agent has
+    # RunAtLoad, so bootstrapping it starts a copy straight away: hold the
+    # lock a moment longer and that copy stands down with exit 0, which is
+    # the one exit KeepAlive will not relaunch - the handover would defeat
+    # itself. And a pid taken afterwards would already include it.
+    before = set(running_pids())
+    release_instance_lock()
+    if not _agent_loaded() and _bootstrap_agent(plist) != "on":
+        acquire_instance_lock(vault)
+        return False
+    code, _ = _launchctl("kickstart", f"{_gui_domain()}/{LAUNCH_AGENT_LABEL}")
+    if code == 0:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if set(running_pids()) - before:
+                return True
+            time.sleep(0.2)
+    # Nothing came up, so take the menu bar back rather than leave it empty.
+    # Unless the lock has gone to somebody in the meantime, which means the
+    # handover happened after all, just slower than we waited.
+    _handle, only = acquire_instance_lock(vault)
+    return not only
 
 
 # ----------------------------------------------------------------- self test
@@ -891,11 +1189,29 @@ def run(vault: str | None = None, show: bool = False,
     # a copy was started.
     if not render_to:
         _lock, only = acquire_instance_lock(vault_path)
+        # Precedence between two copies of the same app: the one launchd is
+        # supervising wins, whichever started first. Held from both ends -
+        # the managed copy takes the menu bar from an unsupervised incumbent
+        # here, and an unsupervised copy hands it over below.
+        if not only and _is_launchd_managed() and evict_unsupervised(vault_path):
+            _lock, only = acquire_instance_lock(vault_path)
         if not only:
             NSDistributedNotificationCenter.defaultCenter(
             ).postNotificationName_object_userInfo_deliverImmediately_(
                 SHOW_NOTIFICATION, None, None, True)
             print("Compartment is already running - asked it to show its panel")
+            return 0
+        if hand_over_to_login_agent(vault_path):
+            print("Compartment starts at login on this Mac, so that copy has "
+                  "the menu bar - launchd puts it back if it ever dies.")
+            return 0
+        # No login agent to hand to, so at least cut the tie to the terminal
+        # this was typed in. Otherwise closing that window takes the icon.
+        if started_from_a_terminal() and relaunch_detached(vault_path, show):
+            print("Compartment is in your menu bar. It is running on its own "
+                  "now, so closing this terminal will not stop it.\n"
+                  "  To have it come back at every login: compartment "
+                  "menubar --login on")
             return 0
 
     # -- small helpers on top of AppKit's verbosity ------------------------

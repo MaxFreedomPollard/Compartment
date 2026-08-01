@@ -127,15 +127,25 @@ def test_init_tells_a_linux_user_what_it_did(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setattr(cli, "_linux_gui_available", lambda: True)
-    fake = type("A", (), {"set_login": staticmethod(lambda v: "on")})
+    fake = type("A", (), {"set_login": staticmethod(lambda v, vault=None: "on")})
     monkeypatch.setattr(cli, "_tray_app", lambda: fake)
-    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: None)
+    # A child that is still running two seconds later, which is what the
+    # install now checks for before it claims the app started.
+    still_running = type("P", (), {"wait": staticmethod(
+        lambda timeout=None: (_ for _ in ()).throw(
+            cli.subprocess.TimeoutExpired("panel", timeout)))})
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: still_running)
     cli._start_status_bar_app(str(tmp_path / "v.vault"))
     out = capsys.readouterr().out
     assert "applications menu" in out
-    assert "start at login" not in out, (
-        "nothing starts at login on Linux: a window in your face at every "
-        "sign-in is not what a management app should do")
+    # This used to assert the opposite, on the grounds that nothing started
+    # at login on Linux and a window in your face at every sign-in is not
+    # what a management app should do. That stopped being true when Linux
+    # got a real autostart entry, and it is further from true now that it
+    # gets a systemd user service which also puts the panel back when it
+    # dies. Saying only "applications menu entry" for both was reporting one
+    # thing as though it were the other.
+    assert "start at login: on" in out
 
 
 def test_a_python_without_tkinter_says_the_one_command_that_fixes_it(
@@ -143,7 +153,7 @@ def test_a_python_without_tkinter_says_the_one_command_that_fixes_it(
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setattr(cli, "_linux_gui_available", lambda: False)
-    fake = type("A", (), {"set_login": staticmethod(lambda v: "on")})
+    fake = type("A", (), {"set_login": staticmethod(lambda v, vault=None: "on")})
     monkeypatch.setattr(cli, "_tray_app", lambda: fake)
     started = []
     monkeypatch.setattr(cli.subprocess, "Popen",

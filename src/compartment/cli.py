@@ -252,6 +252,14 @@ def _linux_gui_available() -> bool:
         return False
 
 
+#: Where to tell the user to look, once there is something to look at.
+_APP_IS_AT = {
+    "darwin": "look for the icon in your menu bar",
+    "win32": "look for the icon in your notification area",
+    "": "its window is open, and Compartment is in your applications menu",
+}
+
+
 def _start_status_bar_app(vault: str) -> None:
     """Put the status bar app up now, and again at every login.
 
@@ -273,14 +281,18 @@ def _start_status_bar_app(vault: str) -> None:
         print("  The CLI and the MCP server are ready, and `compartment "
               "dash` opens the vault in a browser.")
         return
+    state = ""
     try:
-        state = app.set_login(True)
-        # On Linux this is the applications menu entry. Nothing starts at
-        # login there: without a tray icon to sit quietly in, an app that
-        # started itself would just be a window in your face at every
-        # sign-in.
-        print(f"  {'applications menu entry' if linux else 'start at login'}"
-              f": {state}")
+        state = app.set_login(True, vault)
+        # Linux used to be told about its applications menu entry here,
+        # because nothing started at login there. That stopped being true
+        # when it got a real autostart entry, and it is further from true
+        # now that it gets a systemd user service, so it is reported the
+        # same way as everywhere else - and the menu entry, which is a
+        # different thing, is named separately.
+        print(f"  start at login: {state}")
+        if linux:
+            print("  applications menu entry: on")
     except Exception as exc:                     # noqa: BLE001
         print(f"  could not register the app ({exc})")
     if linux and not _linux_gui_available():
@@ -292,6 +304,24 @@ def _start_status_bar_app(vault: str) -> None:
         print("  Everything else works now: the CLI, the MCP server, and "
               "`compartment dash`.")
         return
+    # Let the supervisor start it where there is one, so the copy that comes
+    # up is the copy that gets restarted if it dies. On macOS bootstrapping
+    # the agent a moment ago already did it (RunAtLoad); on Linux and Windows
+    # it is one more call. Starting a second copy after that is what used to
+    # put two icons in the menu bar, and the copy started here is the one
+    # that dies with the terminal.
+    supervised = False
+    if state == "on":
+        try:
+            supervised = (sys.platform == "darwin" or app.start_supervised())
+        except Exception:                            # noqa: BLE001
+            supervised = False
+    if supervised:
+        if _wait_for_status_bar_app():
+            print(f"  app started - {_APP_IS_AT.get(sys.platform, _APP_IS_AT[''])}")
+            return
+        print("  start at login is registered, but no icon appeared; "
+              "starting one now")
     try:
         exe = shutil.which("compartment")
         argv = ([exe, "--vault", vault, "menubar"] if exe else
@@ -303,18 +333,41 @@ def _start_status_bar_app(vault: str) -> None:
             kwargs["creationflags"] = 0x00000008          # DETACHED_PROCESS
         else:
             kwargs["start_new_session"] = True            # outlive this shell
-        subprocess.Popen(argv, **kwargs)
-        if sys.platform == "darwin":
-            print("  app started - look for the icon in your menu bar")
-        elif sys.platform == "win32":
-            print("  app started - look for the icon in your notification "
-                  "area")
-        else:
-            print("  app started - its window is open, and Compartment is "
-                  "in your applications menu")
+        proc = subprocess.Popen(argv, **kwargs)
+        # Spawning is not starting. The app exits straight away for several
+        # ordinary reasons - PyObjC missing, another copy already holding
+        # the lock, a broken interpreter - and every one of them used to end
+        # with the install saying "look for the icon in your menu bar" over
+        # a menu bar that had nothing new in it. Still running after a
+        # couple of seconds is the most an installer can honestly claim.
+        try:
+            status = proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            status = None
+        if status is not None:
+            print(f"  the app exited immediately (status {status}). "
+                  "Run `compartment panel` to see what it says.")
+            return
+        print(f"  app started - {_APP_IS_AT.get(sys.platform, _APP_IS_AT[''])}")
     except Exception as exc:                     # noqa: BLE001
         print(f"  could not start the app ({exc}); run "
               "`compartment panel` yourself")
+
+
+def _wait_for_status_bar_app(timeout: float = 15.0) -> bool:
+    """Did the app actually come up?
+
+    Asked because "the login item is registered" and "the app is running"
+    are different claims, and only the second one is what the user was
+    promised.
+    """
+    app = _tray_app()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if app.running_pids():
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def _install_kind() -> tuple[str, list[str]]:
@@ -359,6 +412,21 @@ def cmd_update(args) -> None:
 
 def _restart_status_bar_app(vault: str) -> None:
     """Stop the running status bar app and start the new build."""
+    # One supervisor operation rather than kill-then-start. The supervisor
+    # relaunches a process that exited non-zero, so the copy this function
+    # used to start raced the one launchd or systemd had already brought
+    # back, and whichever lost the lock left with exit 0. Since the job is
+    # unchanged, the process that comes back runs whatever the upgrade just
+    # wrote at the path it names.
+    try:
+        app = _tray_app()
+        restart = (app.restart_agent if sys.platform == "darwin"
+                   else app.restart_supervised)
+        if restart() and _wait_for_status_bar_app():
+            print("  app restarted - the supervisor is running the new build")
+            return
+    except Exception:                                    # noqa: BLE001
+        pass
     try:
         app = _tray_app()
         app.quit_running()
@@ -372,14 +440,19 @@ def cmd_uninstall(args) -> None:
     print(f"Compartment {__version__} - uninstalling")
     try:
         app = _tray_app()
+        linux = sys.platform not in ("darwin", "win32")
+        # Deregister before killing, not after. On macOS the agent has
+        # KeepAlive, so a copy stopped while the job is still registered
+        # exits non-zero and launchd puts the icon straight back - during an
+        # uninstall, from a plist that is about to be deleted.
+        print(f"  start at login: {app.set_login(False)}")
+        if linux:
+            print("  applications menu entry: removed")
         try:
-            app.quit_running()
-            print("  app stopped")
+            print("  app stopped" if app.quit_running()
+                  else "  app: nothing was running")
         except Exception:                                # noqa: BLE001
             pass
-        linux = sys.platform not in ("darwin", "win32")
-        print(f"  {'applications menu entry' if linux else 'start at login'}"
-              f": {app.set_login(False)}")
     except Exception as exc:                             # noqa: BLE001
         print(f"  app: nothing to remove ({exc})")
     if sys.platform == "darwin":
@@ -583,7 +656,7 @@ def cmd_menubar(args) -> None:
     """The status bar / tray app."""
     app = _tray_app()
     if args.login is not None:
-        print(app.set_login(args.login == "on")
+        print(app.set_login(args.login == "on", args.vault)
               if args.login in ("on", "off") else app.login_status())
         sys.exit(0)
     if args.self_check:
@@ -1648,8 +1721,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--login", nargs="?", const="status",
                    choices=["on", "off", "status"],
                    help="start Compartment at login or sign-in (on/off), or "
-                        "show the state. On Linux this is the applications "
-                        "menu entry, since there is no icon to start")
+                        "show the state. Where the system can supervise it "
+                        "(launchd, a systemd user service, a scheduled task) "
+                        "the app is also put back if it stops on its own")
     p.set_defaults(fn=cmd_menubar)
 
     ph = sub.add_parser("hook", help="Claude Code capture hook (deterministic "
