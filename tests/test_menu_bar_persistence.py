@@ -946,6 +946,9 @@ def test_the_relaunch_leaves_the_terminals_session(tmp_path, monkeypatch):
         seen["argv"], seen["kwargs"] = argv, kwargs
         up.append(7070)
         return object()
+    # Not the real one: it resolves the CLI by asking the login shell, and
+    # this test has replaced the Popen that would run it.
+    monkeypatch.setattr(menubar, "compartment_bin", lambda: "/nowhere/compartment")
     monkeypatch.setattr(menubar.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(menubar, "running_pids", lambda: list(up))
     vault = str(tmp_path / "memory.vault")
@@ -960,9 +963,44 @@ def test_the_relaunch_leaves_the_terminals_session(tmp_path, monkeypatch):
     assert seen["argv"][-1] == "menubar" and vault in seen["argv"]
 
 
+def test_the_relaunch_keeps_the_name_the_app_had(tmp_path, monkeypatch):
+    """Through the console script, not `python -m`. Windows finds this app
+    by image name - Get-Process, tasklist, taskkill /IM all do - so a copy
+    relaunched as python.exe is running and cannot be found or stopped."""
+    seen, up = {}, []
+    exe = tmp_path / "compartment"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(menubar, "compartment_bin", lambda: str(exe))
+    monkeypatch.setattr(menubar.subprocess, "Popen",
+                        lambda argv, **k: (seen.update(argv=argv),
+                                           up.append(1), object())[2])
+    monkeypatch.setattr(menubar, "running_pids", lambda: list(up))
+    menubar.relaunch_detached(str(tmp_path / "memory.vault"), timeout=5)
+    assert seen["argv"][0] == str(exe)
+    assert "-m" not in seen["argv"], "relaunched as the interpreter"
+
+
+def test_the_install_never_hands_its_child_a_terminal(monkeypatch, tmp_path):
+    """The spawned copy inherits stdin unless told otherwise, sees a tty on
+    the other end, and detaches itself - so the copy the installer started
+    exits and hands over to one the installer never hears about."""
+    seen = {}
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(cli, "_linux_gui_available", lambda: True)
+    monkeypatch.setattr(cli, "_tray_app", lambda: type("A", (), {
+        "set_login": staticmethod(lambda on, vault=None: "on"),
+        "start_supervised": staticmethod(lambda: False)}))
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda a, **k: (seen.update(k), _Proc())[1])
+    cli._start_status_bar_app(str(tmp_path / "v.vault"))
+    assert seen.get("stdin") == cli.subprocess.DEVNULL
+
+
 def test_the_relaunch_keeps_the_panel_if_nothing_came_up(tmp_path,
                                                           monkeypatch):
     """Never trade a copy tied to a terminal for no copy at all."""
+    monkeypatch.setattr(menubar, "compartment_bin", lambda: "/nowhere/compartment")
     monkeypatch.setattr(menubar.subprocess, "Popen",
                         lambda *a, **k: object())
     monkeypatch.setattr(menubar, "running_pids", lambda: [])

@@ -943,7 +943,14 @@ def relaunch_detached(vault: str, show: bool = False,
 
     Returns False, holding the lock, unless the new copy really came up.
     """
-    argv = _cli_argv() + ["--vault", vault, "menubar"]
+    # Through the console script, not `python -m`, so the new copy keeps the
+    # name the old one had. Windows identifies this app by its image name
+    # everywhere it matters - Get-Process, tasklist, taskkill /IM - so a
+    # relaunch as python.exe is a copy that is running and cannot be found,
+    # stopped, or counted by anything that goes looking for it.
+    exe = compartment_bin()
+    argv = ([exe, "--vault", vault, "menubar"] if Path(exe).is_file()
+            else _cli_argv() + ["--vault", vault, "menubar"])
     if show:
         argv.append("--show")
     kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,

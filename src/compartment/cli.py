@@ -327,7 +327,12 @@ def _start_status_bar_app(vault: str) -> None:
         argv = ([exe, "--vault", vault, "menubar"] if exe else
                 [sys.executable, "-m", "compartment.cli", "--vault", vault,
                  "menubar"])
-        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        # stdin included. Without it the app inherits this process's stdin,
+        # sees a terminal on the other end, decides it was typed at a prompt
+        # and relaunches itself detached - so the copy the installer started
+        # exits and hands over to one the installer never hears about.
+        kwargs = {"stdin": subprocess.DEVNULL,
+                  "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if sys.platform == "win32":
             # no console window behind an app that has no window
             kwargs["creationflags"] = 0x00000008          # DETACHED_PROCESS
