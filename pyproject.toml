@@ -93,3 +93,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 compartment = ["models/**/*", "data/**/*"]
+
+# Running the suite must cost the machine it runs on nothing. A test marked
+# real_launchctl talks to the live launchd of whoever started pytest, so it
+# is deselected by default and asked for by name:
+#     pytest -m real_launchctl
+[tool.pytest.ini_options]
+markers = [
+    "real_launchctl: talks to the real launchd; opt in with -m real_launchctl",
+]
+addopts = "-m 'not real_launchctl'"

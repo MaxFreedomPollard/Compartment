@@ -6,6 +6,7 @@ this it did not: the GUI dependencies were optional extras, `init` never
 started the app, and on macOS start-at-login was impossible without the .app
 bundle.
 """
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -58,8 +59,34 @@ def test_one_command_covers_every_platform():
 
 @pytest.fixture()
 def fake_home(tmp_path, monkeypatch):
+    """A home of our own for everything the login item writes.
+
+    USER_APP_BUNDLE is worked out at import, while HOME was still the real
+    one, so the small bundle the login item needs would be written into the
+    developer's own ~/Applications however faked the home is. And whether
+    this machine has a Compartment.app installed decides what goes in the
+    plist, which is not something a test should be reading off the machine
+    it happens to run on.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(menubar, "USER_APP_BUNDLE",
+                        tmp_path / "Applications" / "Compartment.app")
+    monkeypatch.setattr(menubar, "installed_app_bundle", lambda: None)
     return tmp_path
+
+
+@pytest.fixture()
+def launchctl(monkeypatch):
+    """launchctl, written down rather than run. Returns the calls.
+
+    The autouse guard in conftest.py has already made the real launchd
+    unreachable; this is the same protection with the answers a round trip
+    needs, and the record of what was asked is what gets asserted.
+    """
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(menubar, "_launchctl",
+                        lambda *a: (calls.append(a), (0, ""))[1])
+    return calls
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS login item")
@@ -74,7 +101,7 @@ def test_a_pip_install_is_not_mistaken_for_the_app_bundle():
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS login item")
-def test_start_at_login_round_trips_without_a_bundle(fake_home):
+def test_start_at_login_round_trips_without_a_bundle(fake_home, launchctl):
     plist = menubar._agent_plist()
     assert menubar.login_status() == "off"
     assert menubar.set_login(True) == "on"
@@ -83,16 +110,69 @@ def test_start_at_login_round_trips_without_a_bundle(fake_home):
     assert menubar.set_login(False) == "off"
     assert not plist.exists()
     assert menubar.login_status() == "off"
+    # The plist by itself starts nothing, and one left registered after "off"
+    # is a job launchd may still bring back. So: booted out before it is
+    # bootstrapped, confirmed with launchd rather than with the exit status
+    # of the verb, and deregistered before the file is deleted. The lone
+    # print in the middle is `login_status` asking launchd the same way.
+    assert [c[0] for c in launchctl] == ["bootout", "bootstrap", "print",
+                                         "print",
+                                         "bootout", "unload"], launchctl
+    # And every one of them named our own job. Nothing else on the machine.
+    for call in launchctl:
+        assert menubar.LAUNCH_AGENT_LABEL in " ".join(call), call
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS login item")
-def test_the_login_agent_names_a_real_launcher(fake_home):
+def test_the_login_agent_names_a_real_launcher(fake_home, launchctl):
     menubar.set_login(True)
     body = menubar._agent_plist().read_text(encoding="utf-8")
     assert menubar.LAUNCH_AGENT_LABEL in body
     assert "<key>RunAtLoad</key><true/>" in body
+    # Not a one-shot: a crash has to bring the icon back, an intentional Quit
+    # must not. That is KeepAlive as a dict, never a bare true or false.
+    assert "<key>KeepAlive</key>" in body
+    assert "<key>SuccessfulExit</key><false/>" in body
     assert "menubar" in body
     menubar.set_login(False)
+    assert not menubar._agent_plist().exists()
+
+
+@pytest.mark.real_launchctl
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS login item")
+def test_launchd_really_accepts_the_agent_we_write(fake_home, monkeypatch):
+    """The one test that talks to the live launchd.
+
+    Left out of every ordinary run, and asked for by name:
+
+        pytest -m real_launchctl
+
+    Even then it registers a label of its own with a program that does
+    nothing, so the job being booted in and out is never the developer's real
+    login item and no second menu bar app appears at RunAtLoad.
+
+    It is written with a vault, because launchd reading the file back is the
+    only check that the plist is well formed, and the vault is the part of it
+    a unit test can only ever compare against itself.
+    """
+    label = f"{menubar.BUNDLE_ID}.pytest.{os.getpid()}"
+    monkeypatch.setattr(menubar, "LAUNCH_AGENT_LABEL", label)
+    monkeypatch.setattr(menubar, "_launcher_argv", lambda: ["/usr/bin/true"])
+    job = f"{menubar._gui_domain()}/{label}"
+    try:
+        assert menubar.set_login(True, "/tmp/compartment-pytest.vault") == "on"
+        assert menubar._agent_plist().is_file()
+        # launchd is holding it, not merely the filesystem - and holding the
+        # vault with it, which is how the app finds its way back to the right
+        # one when it is started from a bundle that takes no arguments.
+        code, out = menubar._launchctl("print", job)
+        assert code == 0, out
+        assert "/tmp/compartment-pytest.vault" in out, out
+        assert menubar.set_login(False) == "off"
+        assert not menubar._agent_plist().exists()
+        assert menubar._launchctl("print", job)[0] != 0
+    finally:
+        menubar._launchctl("bootout", job)
 
 
 # --- Windows autostart -----------------------------------------------------
