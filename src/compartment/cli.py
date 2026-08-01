@@ -344,7 +344,14 @@ def _start_status_bar_app(vault: str) -> None:
             status = proc.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
             status = None
-        if status is not None:
+        if status == 0:
+            # Zero is how a copy stands down when one is already running, so
+            # it is not a failure - but it is not proof of an icon either.
+            if not _wait_for_status_bar_app(timeout=5.0):
+                print("  the app is not running. Run `compartment panel` to "
+                      "see what it says.")
+                return
+        elif status is not None:
             print(f"  the app exited immediately (status {status}). "
                   "Run `compartment panel` to see what it says.")
             return

@@ -526,12 +526,19 @@ def supervisor_status() -> str | None:
 
 def start_supervised() -> bool:
     """Start the panel through its supervisor, so that the copy which comes
-    up is the copy that will be brought back if it dies."""
+    up is the copy that will be brought back if it dies.
+
+    Not on Windows, deliberately. `schtasks /run` starts the task in
+    whatever session Task Scheduler picks rather than the one the person
+    running the installer is looking at, and a tray icon in another session
+    is an icon nobody can see - the install then had nothing to show for
+    itself while the task's copy held the lock. The task is for the next
+    sign-in, which is the job it is actually good at; the install starts a
+    copy in the session it can see, exactly as it did before the task
+    existed.
+    """
     if _is_linux():
         return systemd_enabled() and _systemctl("start", SYSTEMD_UNIT)[0] == 0
-    if sys.platform == "win32":
-        return (scheduled_task_registered()
-                and _schtasks("/run", "/tn", SCHEDULED_TASK)[0] == 0)
     return False
 
 
@@ -1173,10 +1180,30 @@ def run(vault: str | None = None, show: bool = False,
 
 
 def running_pids() -> list[int]:
-    """Every other panel copy on this machine. Windows has no pgrep, and
-    taskkill answers the same question well enough there."""
+    """Every other panel copy on this machine.
+
+    Windows answers through tasklist. It used to answer with an empty list,
+    which is worse than not asking: every caller reads that as "nothing is
+    running", so the install waited fifteen seconds for an app that was
+    already up and then started a second one. A check that can never succeed
+    is not a check.
+    """
     if sys.platform == "win32":
-        return []
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq compartment.exe",
+                 "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        me, pids = os.getpid(), []
+        for line in (out or "").splitlines():
+            parts = [p.strip('" ') for p in line.split('","')]
+            # tasklist says "INFO: No tasks are running..." on no match, and
+            # that line has no second field to misread as a pid.
+            if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) != me:
+                pids.append(int(parts[1]))
+        return pids
     try:
         out = subprocess.run(
             ["pgrep", "-f", "compartment.*(panel|tray|menubar)"],

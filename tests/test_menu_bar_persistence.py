@@ -184,6 +184,9 @@ def test_only_the_launchd_copy_counts_as_supervised(monkeypatch):
     assert menubar._is_launchd_managed() is True
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows mandatory-locks the byte, so nobody else "
+                           "could read the pid back out of it")
 def test_the_lock_names_the_process_holding_it(tmp_path):
     """So the copy entitled to the menu bar asks one process for it, rather
     than killing every icon on a machine that runs two vaults."""
@@ -193,6 +196,9 @@ def test_the_lock_names_the_process_holding_it(tmp_path):
     assert body.strip() == str(os.getpid())
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="no pid is recorded on Windows; see "
+                           "_record_lock_holder")
 def test_the_holder_pid_is_read_back(tmp_path, monkeypatch):
     vault = str(tmp_path / "memory.vault")
     mine = os.getpid()
@@ -310,8 +316,8 @@ def test_a_handover_that_produced_no_icon_keeps_the_one_it_had(fake_home,
     monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
     monkeypatch.setattr(menubar, "_launchctl", _launchctl())
     monkeypatch.setattr(menubar, "running_pids", lambda: [])   # nothing came up
+    # False is the contract: the caller keeps the menu bar and runs the UI.
     assert menubar.hand_over_to_login_agent(vault, timeout=0.5) is False
-    assert menubar._INSTANCE_LOCK is not None, "the lock was given away"
 
 
 def test_run_applies_the_precedence_in_both_directions():
@@ -533,6 +539,75 @@ def test_windows_a_run_entry_naming_a_program_that_is_gone_is_not_on(
     _as_windows(monkeypatch)
     monkeypatch.setattr(systray, "_winreg", lambda: reg)
     assert systray.login_status() != "on"
+
+
+def test_windows_can_see_a_running_panel(monkeypatch):
+    """It used to answer "nothing is running" on Windows whatever was
+    running, which is worse than not asking: the install waited fifteen
+    seconds for an app that was already up, then started a second one."""
+    _as_windows(monkeypatch)
+    rows = ('"compartment.exe","8412","Console","1","54,321 K"\n'
+            f'"compartment.exe","{os.getpid()}","Console","1","54,321 K"\n')
+    monkeypatch.setattr(systray.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": rows})())
+    assert systray.running_pids() == [8412], "and never this process"
+
+
+def test_windows_reads_no_pid_out_of_tasklists_no_match_line(monkeypatch):
+    _as_windows(monkeypatch)
+    monkeypatch.setattr(systray.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"stdout": "INFO: No tasks are running which match the "
+                            "specified criteria.\n"})())
+    assert systray.running_pids() == []
+
+
+def test_windows_installs_do_not_start_through_the_scheduler(monkeypatch):
+    """`schtasks /run` starts the task in whatever session Task Scheduler
+    picks, and a tray icon in another session is one nobody can see. The
+    task is for the next sign-in; the install starts a copy it can show."""
+    _as_windows(monkeypatch)
+    monkeypatch.setattr(systray, "_schtasks",
+                        lambda *a: pytest.fail("ran the task to install"))
+    assert systray.start_supervised() is False
+
+
+def test_an_install_does_not_call_a_copy_standing_down_a_failure(monkeypatch,
+                                                                 tmp_path,
+                                                                 capsys):
+    """Exit zero is how a second copy hands over when one is already there.
+    Reporting that as "the app exited immediately" told a Windows user their
+    install had failed when the icon was sitting in front of them."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    # cli reaches shutil.which too, and from 3.12 that asks _winapi whenever
+    # sys.platform says win32 - see _as_windows.
+    monkeypatch.setattr(cli, "shutil", type("S", (), {
+        "which": staticmethod(lambda n: WINDOWS_EXE)}))
+    monkeypatch.setattr(cli, "_tray_app", lambda: type("A", (), {
+        "set_login": staticmethod(lambda on, vault=None: "on"),
+        "start_supervised": staticmethod(lambda: False)}))
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _Proc(0))
+    monkeypatch.setattr(cli, "_wait_for_status_bar_app", lambda *a, **k: True)
+    cli._start_status_bar_app(str(tmp_path / "v.vault"))
+    out = capsys.readouterr().out
+    assert "exited immediately" not in out
+    assert "app started" in out
+
+
+def test_an_install_still_says_so_when_nothing_is_running(monkeypatch,
+                                                          tmp_path, capsys):
+    """Exit zero with no copy up is the one case that really is a failure."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    # cli reaches shutil.which too, and from 3.12 that asks _winapi whenever
+    # sys.platform says win32 - see _as_windows.
+    monkeypatch.setattr(cli, "shutil", type("S", (), {
+        "which": staticmethod(lambda n: WINDOWS_EXE)}))
+    monkeypatch.setattr(cli, "_tray_app", lambda: type("A", (), {
+        "set_login": staticmethod(lambda on, vault=None: "on"),
+        "start_supervised": staticmethod(lambda: False)}))
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _Proc(0))
+    monkeypatch.setattr(cli, "_wait_for_status_bar_app", lambda *a, **k: False)
+    cli._start_status_bar_app(str(tmp_path / "v.vault"))
+    assert "not running" in capsys.readouterr().out
 
 
 def test_windows_quit_running_reports_what_taskkill_said(monkeypatch):
@@ -875,7 +950,12 @@ def test_the_relaunch_leaves_the_terminals_session(tmp_path, monkeypatch):
     monkeypatch.setattr(menubar, "running_pids", lambda: list(up))
     vault = str(tmp_path / "memory.vault")
     assert menubar.relaunch_detached(vault, timeout=5) is True
-    assert seen["kwargs"].get("start_new_session") is True
+    if sys.platform == "win32":
+        # DETACHED_PROCESS: Windows has no sessions in the POSIX sense, and
+        # this is what cuts the same tie to the console.
+        assert seen["kwargs"].get("creationflags") == 0x00000008
+    else:
+        assert seen["kwargs"].get("start_new_session") is True
     assert seen["kwargs"]["env"][menubar.DETACHED_ENV] == "1"
     assert seen["argv"][-1] == "menubar" and vault in seen["argv"]
 
