@@ -21,9 +21,9 @@ def vault_path(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def no_real_supervisors(monkeypatch, tmp_path):
-    """No test talks to the machine's own systemd or Task Scheduler, or
-    writes a start-at-login entry into the real home directory.
+def no_real_supervisors(monkeypatch, tmp_path, request):
+    """No test talks to the machine's own launchd, systemd or Task Scheduler,
+    or writes a start-at-login entry into the real home directory.
 
     Running the suite must not change the computer it runs on. Without this,
     a Linux box with a user manager would have `set_login` tests enable a
@@ -32,11 +32,25 @@ def no_real_supervisors(monkeypatch, tmp_path):
     the autostart tests, which patch only sys.platform, would write into the
     real ~/.config on any machine at all.
 
+    launchd is the same fault with a worse ending, and it was live until
+    this: a fake HOME moves the plist but not the domain, because
+    `_gui_domain` asks the real uid and LAUNCH_AGENT_LABEL is a module
+    constant. So a macOS run of tests/test_status_bar_install.py ran
+    `launchctl bootout gui/<real uid>/<real label>` and left the developer's
+    own login item deregistered with its plist still on disk, then
+    bootstrapped a job under the same label whose RunAtLoad started a second
+    menu bar app.
+
     Tests that are about those code paths override this with their own fake
     or their own XDG_CONFIG_HOME, which is what monkeypatch ordering gives
-    them for free.
+    them for free. The one test that is about the live launchd asks for it by
+    name with the real_launchctl marker, and is deselected by default.
     """
-    from compartment import systray
+    from compartment import menubar, systray
+    if request.node.get_closest_marker("real_launchctl") is None:
+        monkeypatch.setattr(menubar, "_launchctl",
+                            lambda *a: (1, "launchctl: the test suite does "
+                                           "not talk to the real launchd"))
     monkeypatch.setattr(systray, "_systemctl",
                         lambda *a: (1, "Failed to connect to bus: No such "
                                        "file or directory"))
