@@ -51,6 +51,22 @@ QUARANTINE_WARNING = (
 )
 
 
+def local_stamp(created: float | None) -> str:
+    """A stored instant as the local calendar date and time, or "" if unusable.
+
+    Every path that hands a memory to a reader calls this. A raw unix float is
+    a date only to something willing to do arithmetic on it, so a model reading
+    a search result had no cheap way to tell a fact learned this morning from
+    one learned two years ago - which is exactly the judgement that decides
+    whether the fact is still true. `recent` had this and the other paths did
+    not; the difference was not a decision, and it is gone."""
+    try:
+        return datetime.datetime.fromtimestamp(
+            float(created)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
 def is_seeded(tags_json: str) -> bool:
     """Did this record arrive with the vault, rather than during use?
 
@@ -462,7 +478,11 @@ class Vault:
                            tags=r["tags"], importance=r["importance"],
                            quarantined=r["quarantined"], pack=r.get("pack"),
                            prov=r["prov"], master_key=self._master,
-                           created=r["created"])
+                           created=r["created"],
+                           # .get: entries written by an older version have no
+                           # source field, and a replay must never be the thing
+                           # that refuses to restore a memory.
+                           source=r.get("source"))
         elif op == "forget":
             self.db.delete(e["id"], shred=e["shred"])
         elif op == "link":
@@ -497,6 +517,7 @@ class Vault:
               tags: list[str] | None = None, importance: float = 0.5,
               quarantined: bool = False, pack: str | None = None,
               vec: np.ndarray | None = None, prov: dict | None = None,
+              source: str | None = None, created: float | None = None,
               _journal: bool = True, _dedup: bool = True) -> dict:
         self._require_open()
         ns = namespace or self.config.default_namespace(caller)
@@ -536,7 +557,15 @@ class Vault:
         rid = self.db.insert(record_id=None, ns=ns, text=text, vec=vec,
                              tags=tags or [], importance=importance,
                              quarantined=quarantined, pack=pack, prov=prov,
-                             master_key=self._master)
+                             master_key=self._master,
+                             source=(source or "").strip() or None,
+                             # An imported or re-stated memory keeps the moment
+                             # it was FIRST learned. Stamping it "now" would
+                             # tell every reader, and the recency prior, that a
+                             # two-year-old fact is fresh - and the migration
+                             # that restates a memory more atomically would
+                             # destroy the one date it exists to preserve.
+                             created=created)
         row = self.db.get_row(rid)
         for seq, k in enumerate(self.db.vector_keys(rid)):
             self._id_by_ikey[k] = rid
@@ -548,9 +577,12 @@ class Vault:
                 "vec": base64.b64encode(vec.tobytes()).decode(),
                 "tags": tags or [], "importance": importance,
                 "quarantined": quarantined, "pack": pack, "prov": prov,
-                "created": row["created"],
+                "created": row["created"], "source": row["source"],
             }})
-        return {"id": rid, "duplicate": False, "namespace": ns}
+        return {"id": rid, "duplicate": False, "namespace": ns,
+                "created": row["created"],
+                "created_local": local_stamp(row["created"]),
+                "source": row["source"]}
 
     def _importance_of(self, rid: str) -> float:
         row = self.db.conn.execute(
@@ -622,6 +654,8 @@ class Vault:
                 "tags": json.loads(row["tags"]),
                 "importance": row["importance"],
                 "created": row["created"],
+                "created_local": local_stamp(row["created"]),
+                "source": row["source"],
                 "provenance": json.loads(row["prov"]),
                 "pack": row["pack"],
             }
@@ -659,7 +693,7 @@ class Vault:
         total = organic = 0
         rows = []
         for row in self.db.conn.execute(
-                "SELECT id, ns, tags, created, importance, quarantined "
+                "SELECT id, ns, tags, created, importance, quarantined, source "
                 "FROM records ORDER BY created"):
             if row["ns"] not in allowed:
                 continue
@@ -679,17 +713,13 @@ class Vault:
         out = []
         for row, seeded in window:
             created = row["created"]
-            try:
-                stamp = datetime.datetime.fromtimestamp(
-                    float(created)).strftime("%Y-%m-%d %H:%M")
-            except (TypeError, ValueError, OSError):
-                stamp = ""
             rec = {"id": row["id"], "namespace": row["ns"],
                    "text": self.db.decrypt_text(self.db.get_row(row["id"]),
                                                 self._master),
                    "tags": json.loads(row["tags"]),
                    "importance": row["importance"], "created": created,
-                   "created_local": stamp, "seeded": seeded}
+                   "created_local": local_stamp(created),
+                   "source": row["source"], "seeded": seeded}
             if row["quarantined"]:
                 rec["quarantined"] = True
             out.append(rec)
@@ -707,8 +737,13 @@ class Vault:
         text = self.db.decrypt_text(row, self._master)
         self._audit_and_capture(caller, "get", f"id={record_id}")
         out = {"id": record_id, "namespace": row["ns"], "text": text,
-               "tags": json.loads(row["tags"]), "importance": row["importance"],
-               "created": row["created"], "provenance": json.loads(row["prov"]),
+               "tags": json.loads(row["tags"]),
+               "tags_origin": json.loads(row["tags_origin"] or "null"),
+               "importance": row["importance"],
+               "created": row["created"],
+               "created_local": local_stamp(row["created"]),
+               "source": row["source"],
+               "provenance": json.loads(row["prov"]),
                "pack": row["pack"]}
         if row["quarantined"]:
             out["quarantined"] = True
@@ -994,6 +1029,8 @@ class Vault:
                 "tags": json.loads(row["tags"]), "importance": row["importance"],
                 "quarantined": bool(row["quarantined"]), "pack": row["pack"],
                 "provenance": json.loads(row["prov"]), "created": row["created"],
+                "created_local": local_stamp(row["created"]),
+                "source": row["source"],
             }, sort_keys=True))
         self._audit_and_capture(caller, "export", f"{len(lines)} records")
         return "\n".join(lines) + ("\n" if lines else "")
@@ -1016,6 +1053,8 @@ class Vault:
                              tags=r.get("tags", []),
                              importance=r.get("importance", 0.5),
                              quarantined=r.get("quarantined", False),
+                             source=r.get("source"),
+                             created=r.get("created"),
                              vec=vec, _journal=False)
             if res.get("duplicate"):
                 skipped += 1

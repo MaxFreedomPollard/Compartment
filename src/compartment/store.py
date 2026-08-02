@@ -27,13 +27,25 @@ CREATE TABLE IF NOT EXISTS records (
     key_wrapped BLOB NOT NULL,      -- AEAD(master_key, record_key); destroyed on shred
     vec BLOB NOT NULL,              -- float32 embedding
     dim INTEGER NOT NULL,
-    tags TEXT NOT NULL,             -- JSON list
+    tags TEXT NOT NULL,             -- JSON list; mutable, retagging rewrites it
     importance REAL NOT NULL,
     quarantined INTEGER NOT NULL,
     pack TEXT,                      -- pack name for pack records, NULL for organic
     prov TEXT NOT NULL,             -- JSON {host, agent, session}
     created REAL NOT NULL,
-    accessed REAL NOT NULL
+    accessed REAL NOT NULL,
+    -- How this fact came to be known, in a few words ("web search",
+    -- "the user said so", "read from ~/.zshrc"). Kept OUT of the ciphertext
+    -- and out of the embedding: a claim's provenance is metadata about the
+    -- claim, and mixing it into the text makes every memory from one session
+    -- look alike to the encoder. Rendered back into view on every read, so a
+    -- reader never sees a bare assertion with no idea where it came from.
+    source TEXT,
+    -- The tags the memory was born with. `tags` drifts as the retagger learns
+    -- what a memory turned out to relate to; this never moves, so "what did we
+    -- think this was about at the time" stays answerable and a retagger bug
+    -- can always be undone.
+    tags_origin TEXT
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, text);
 -- One row per EMBEDDING WINDOW. A record longer than the encoder's 512-token
@@ -106,6 +118,7 @@ class Store:
             self.conn.executescript(SCHEMA)
         else:
             self.conn.executescript(SCHEMA)
+        self._migrate_columns()
         try:
             self.conn.execute("SELECT count(*) FROM fts")
         except sqlite3.OperationalError as exc:
@@ -113,6 +126,23 @@ class Store:
                 "This Python's SQLite lacks FTS5, which Compartment requires "
                 "for hybrid search. Install a Python built with full SQLite."
             ) from exc
+
+    # New COLUMNS on an existing table, unlike new tables, do not arrive for
+    # free: `CREATE TABLE IF NOT EXISTS` is a no-op the moment the table
+    # exists, so a vault sealed by an older version would deserialize, skip the
+    # whole statement, and then fail on the first query naming a new column.
+    # Every entry here is nullable with no default, which is what lets an old
+    # row stay valid without being rewritten: a memory stored before this
+    # version simply has no recorded source, and reads as such.
+    _ADDED_COLUMNS = (("source", "TEXT"), ("tags_origin", "TEXT"))
+
+    def _migrate_columns(self) -> None:
+        have = {r["name"] for r in
+                self.conn.execute("PRAGMA table_info(records)").fetchall()}
+        for name, decl in self._ADDED_COLUMNS:
+            if name not in have:
+                self.conn.execute(
+                    f"ALTER TABLE records ADD COLUMN {name} {decl}")
 
     def serialize(self) -> bytes:
         return self.conn.serialize()
@@ -153,7 +183,8 @@ class Store:
 
     def insert(self, *, record_id: str | None, ns: str, text: str, vec: np.ndarray,
                tags: list[str], importance: float, quarantined: bool, pack: str | None,
-               prov: dict, master_key: bytes, created: float | None = None) -> str:
+               prov: dict, master_key: bytes, created: float | None = None,
+               source: str | None = None) -> str:
         rid = record_id or uuid.uuid4().hex
         rk, wrapped = crypto.new_record_key(master_key, rid)
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
@@ -166,12 +197,13 @@ class Store:
         head = allv[0]
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
-            " quarantined, pack, prov, created, accessed)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " quarantined, pack, prov, created, accessed, source, tags_origin)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, self.next_ikey(), ns, ct, wrapped,
              head.tobytes(), int(head.shape[0]),
              json.dumps(tags), float(importance), int(quarantined), pack,
-             json.dumps(prov), created or now, now),
+             json.dumps(prov), created or now, now,
+             source, json.dumps(tags)),
         )
         self.set_vectors(rid, allv)
         self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)", (rid, text))
@@ -230,6 +262,43 @@ class Store:
     def touch(self, record_id: str) -> None:
         self.conn.execute("UPDATE records SET accessed = ? WHERE id = ?",
                           (time.time(), record_id))
+
+    # Tags carrying one of these prefixes are STRUCTURAL, not descriptive: they
+    # are read by code, not by a person deciding what a memory is about. The
+    # "id:" tag is how a seeded starting memory is told apart from one the agent
+    # learned (vault.is_seeded), which drives what `memory_recent` shows and
+    # whether the starter-facts search filter can find a record at all. A
+    # retagger that dropped one would silently reclassify thousands of memories
+    # and there would be nothing left to reconstruct the truth from, so they are
+    # re-added on every write rather than trusted to survive.
+    PROTECTED_TAG_PREFIXES = ("id:",)
+
+    def protected_tags(self, record_id: str) -> list[str]:
+        row = self.conn.execute(
+            "SELECT tags FROM records WHERE id = ?", (record_id,)).fetchone()
+        if row is None:
+            return []
+        return [t for t in json.loads(row["tags"])
+                if t.startswith(self.PROTECTED_TAG_PREFIXES)]
+
+    def set_tags(self, record_id: str, tags: list[str]) -> list[str]:
+        """Replace a record's descriptive tags. Text, vectors, importance and
+        `created` are untouched: this is the only mutation the retagger is
+        allowed to make, and it cannot reach anything a reader would call the
+        memory itself.
+
+        Structural tags are merged back in whatever the caller passed, and the
+        stored order is deduplicated and stable so an unchanged retag pass
+        produces a byte-identical row and does not dirty the vault."""
+        keep = self.protected_tags(record_id)
+        seen, out = set(), []
+        for t in list(keep) + [str(t).strip() for t in tags]:
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        self.conn.execute("UPDATE records SET tags = ? WHERE id = ?",
+                          (json.dumps(out), record_id))
+        return out
 
     def all_vectors(self) -> tuple[list[str], list[int], np.ndarray]:
         """Every embedding window, as (record ids, index keys, matrix).

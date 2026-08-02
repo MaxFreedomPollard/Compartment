@@ -1,0 +1,270 @@
+"""Atomic memories: dating, provenance, batch storage, and the retagger.
+
+The properties under test are the ones whose failure would be silent. A vault
+that refused to open would be noticed in a second; a retagger that quietly
+reclassified thousands of seeded memories, or an upgrade that dropped every
+recorded date, would not be noticed until the vault was already wrong.
+"""
+import json
+import sqlite3
+import time
+
+import numpy as np
+import pytest
+
+from compartment import retag
+from compartment.store import Store
+from compartment.vault import Vault, is_seeded, local_stamp
+
+from conftest import PASS
+
+
+# --- opening a vault written by an older version ------------------------------
+
+def test_old_vault_without_the_new_columns_opens_and_gains_them():
+    """A 4.4.1 vault has no `source` or `tags_origin`. Opening one must add the
+    columns rather than failing on the first query that names them."""
+    old = sqlite3.connect(":memory:", isolation_level=None)
+    old.executescript("""
+        CREATE TABLE records (
+            id TEXT PRIMARY KEY, ikey INTEGER UNIQUE, ns TEXT NOT NULL,
+            ct BLOB NOT NULL, key_wrapped BLOB NOT NULL, vec BLOB NOT NULL,
+            dim INTEGER NOT NULL, tags TEXT NOT NULL, importance REAL NOT NULL,
+            quarantined INTEGER NOT NULL, pack TEXT, prov TEXT NOT NULL,
+            created REAL NOT NULL, accessed REAL NOT NULL);
+        CREATE VIRTUAL TABLE fts USING fts5(id UNINDEXED, text);
+    """)
+    old.execute(
+        "INSERT INTO records VALUES ('r1',1,'main',x'00',x'00',x'00',1,'[]',"
+        "0.5,0,NULL,'{}',1.0,1.0)")
+    image = old.serialize()
+
+    db = Store(image)
+    cols = {r["name"] for r in
+            db.conn.execute("PRAGMA table_info(records)").fetchall()}
+    assert {"source", "tags_origin"} <= cols
+    # the pre-existing row survives, with the new fields simply empty
+    row = db.conn.execute("SELECT * FROM records WHERE id='r1'").fetchone()
+    assert row["source"] is None and row["tags_origin"] is None
+
+
+def test_migration_is_idempotent():
+    db = Store()
+    db._migrate_columns()
+    db._migrate_columns()
+    cols = [r["name"] for r in
+            db.conn.execute("PRAGMA table_info(records)").fetchall()]
+    assert cols.count("source") == 1
+
+
+# --- dates and provenance -----------------------------------------------------
+
+def test_every_read_path_reports_when_the_memory_was_stored(vault):
+    vault.store("The user's shell is zsh.", caller="test",
+                source="read from /etc/shells")
+    for got in (vault.search("shell", caller="test")["results"][0],
+                vault.recent(caller="test")["results"][0]):
+        assert got["created_local"] == local_stamp(got["created"])
+        assert got["created_local"]                     # non-empty, formatted
+        assert got["source"] == "read from /etc/shells"
+
+
+def test_get_reports_the_date_and_the_original_tags(vault):
+    rid = vault.store("Fastmail Individual was about $6/month at that check.",
+                      caller="test", tags=["email"], source="web search")["id"]
+    got = vault.get(rid, caller="test")
+    assert got["source"] == "web search"
+    assert got["created_local"]
+    assert got["tags_origin"] == ["email"]
+
+
+def test_store_returns_the_stamp_it_recorded(vault):
+    out = vault.store("A fact.", caller="test", source="the user said so")
+    assert out["source"] == "the user said so"
+    assert out["created_local"] == local_stamp(out["created"])
+
+
+def test_a_blank_source_is_stored_as_absent_not_as_empty_string(vault):
+    rid = vault.store("A fact.", caller="test", source="   ")["id"]
+    assert vault.get(rid, caller="test")["source"] is None
+
+
+# --- imported and replayed memories keep their original date ------------------
+
+def test_import_preserves_the_date_a_memory_was_first_learned(vault):
+    long_ago = time.time() - 400 * 86400
+    line = json.dumps({"text": "An old fact.", "namespace": "main",
+                       "created": long_ago, "source": "web search",
+                       "tags": [], "importance": 0.5})
+    assert vault.import_jsonl(line, caller="test") == 1
+    got = vault.recent(caller="test")["results"][0]
+    assert got["created"] == pytest.approx(long_ago)
+    assert got["source"] == "web search"
+
+
+def test_export_round_trips_source_and_created(vault):
+    vault.store("A fact worth keeping.", caller="test", source="inferred")
+    rec = json.loads(vault.export_jsonl(caller="test").splitlines()[0])
+    assert rec["source"] == "inferred"
+    assert rec["created_local"] == local_stamp(rec["created"])
+
+
+def test_a_journal_replay_keeps_the_source(vault_path):
+    v = Vault.create(vault_path, PASS, creator="test")
+    v.store("A fact.", caller="test", source="web search")
+    # abandon without saving: reopening replays the journal
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    assert v2.recent(caller="test")["results"][0]["source"] == "web search"
+
+
+# --- batch storage ------------------------------------------------------------
+
+def test_many_facts_become_many_records_each_with_its_own_date(vault):
+    facts = ["compartment.dev is registered and on Cloudflare nameservers.",
+             "Zoho's free tier no longer includes IMAP.",
+             "Proton IMAP needs the paid Proton Bridge app running."]
+    ids = [vault.store(f, caller="test", source="web search")["id"]
+           for f in facts]
+    assert len(set(ids)) == 3
+    for rid in ids:
+        got = vault.get(rid, caller="test")
+        assert got["source"] == "web search"
+        assert got["created_local"]
+
+
+# --- the retagger -------------------------------------------------------------
+
+def _tags(vault, rid):
+    return vault.get(rid, caller="test")["tags"]
+
+
+def test_retagging_never_changes_the_memory_itself(vault):
+    rid = vault.store("The user prefers Fastmail for custom domains.",
+                      caller="test", tags=["email"], source="the user said so")["id"]
+    before = vault.get(rid, caller="test")
+    retag.run(vault, caller="test")
+    after = vault.get(rid, caller="test")
+    for field in ("text", "created", "importance", "source", "namespace"):
+        assert after[field] == before[field], f"retag changed {field}"
+
+
+def test_retagging_cannot_strip_a_seeded_memory_of_its_identity(seeded_vault):
+    row = seeded_vault.db.conn.execute(
+        "SELECT id, tags FROM records WHERE tags LIKE '%\"id:%' LIMIT 1"
+    ).fetchone()
+    assert row is not None, "fixture should contain seeded records"
+    # even handed a plan that omits it entirely, the write path restores it
+    seeded_vault.db.set_tags(row["id"], ["something", "else"])
+    tags = json.loads(seeded_vault.db.conn.execute(
+        "SELECT tags FROM records WHERE id = ?", (row["id"],)).fetchone()["tags"])
+    assert any(t.startswith("id:") for t in tags)
+    assert is_seeded(json.dumps(tags))
+
+
+def test_an_identity_tag_is_never_propagated_to_a_neighbour(seeded_vault):
+    """The failure this exists to prevent: one seeded record's unique "id:" tag
+    spreading across its neighbourhood would reclassify learned memories as
+    starter content, and nothing would be left to tell them apart."""
+    changes = retag.plan(seeded_vault, limit=200)
+    for c in changes:
+        assert not any(t.startswith("id:") for t in c.added)
+
+
+def test_a_tag_spreads_on_meaning_alone(vault):
+    """The Zoho case, and the reason the semantic channel exists.
+
+    The tag word appears in NO record's text, so the lexical signal cannot
+    reach it and only embedding proximity can carry it. This is the test that
+    would fail if propagation quietly stopped working and the retagger degraded
+    into a keyword matcher, which it would otherwise still pass every other
+    test while doing."""
+    for line in ("Sending mail requires an app-specific password.",
+                 "The mailbox syncs over IMAP on port 993.",
+                 "Outgoing messages relay through SMTP on port 587.",
+                 "The inbox is reachable with a standard mail client."):
+        vault.store(line, caller="test", tags=["correspondence"])
+    target = vault.store("Message delivery uses a relay host with TLS.",
+                         caller="test", tags=[])["id"]
+    unrelated = vault.store("The kitchen tap drips when the boiler runs.",
+                            caller="test", tags=[])["id"]
+    retag.run(vault, caller="test")
+    assert "correspondence" in _tags(vault, target)
+    assert "correspondence" not in _tags(vault, unrelated), \
+        "a tag must not spread to a memory that merely shares the vault"
+
+
+def test_a_known_tag_said_out_loud_in_the_text_is_attached(vault):
+    vault.store("Some unrelated memory about fastmail.", caller="test",
+                tags=["fastmail"])
+    rid = vault.store("Billing for fastmail renews annually.", caller="test",
+                      tags=[])["id"]
+    retag.run(vault, caller="test")
+    assert "fastmail" in _tags(vault, rid)
+
+
+def test_a_short_tag_does_not_match_inside_a_longer_word(vault):
+    vault.store("A memory about go, the language.", caller="test", tags=["go"])
+    rid = vault.store("We use Google Workspace for mail.", caller="test",
+                      tags=[])["id"]
+    retag.run(vault, caller="test")
+    assert "go" not in _tags(vault, rid)
+
+
+def test_a_pass_is_additive_unless_pruning_is_asked_for(vault):
+    rid = vault.store("A lone memory with an unusual tag.", caller="test",
+                      tags=["zoho"])["id"]
+    retag.run(vault, caller="test")
+    assert "zoho" in _tags(vault, rid), "default pass must not remove tags"
+
+
+def test_pruning_keeps_a_tag_the_text_itself_says(vault):
+    rid = vault.store("The zoho mailbox is web-only now.", caller="test",
+                      tags=["zoho"])["id"]
+    retag.run(vault, prune=True, caller="test")
+    assert "zoho" in _tags(vault, rid)
+
+
+def test_a_second_pass_over_an_unchanged_vault_changes_nothing(vault):
+    for i in range(6):
+        vault.store(f"Fact number {i} about mail servers.", caller="test",
+                    tags=["mail"])
+    retag.run(vault, caller="test")
+    assert retag.plan(vault) == []
+
+
+def test_the_original_tags_are_still_recoverable_after_retagging(vault):
+    rid = vault.store("The user prefers app passwords over OAuth.",
+                      caller="test", tags=["auth"])["id"]
+    for i in range(4):
+        vault.store(f"App password note {i}.", caller="test",
+                    tags=["auth", "email"])
+    retag.run(vault, caller="test")
+    assert vault.get(rid, caller="test")["tags_origin"] == ["auth"]
+
+
+def test_retagging_an_empty_vault_is_a_no_op(vault):
+    assert retag.plan(vault) == []
+    assert retag.run(vault, caller="test")["records_changed"] == 0
+
+
+def test_no_record_accumulates_unbounded_tags(vault):
+    for i in range(30):
+        vault.store(f"Closely related mail fact {i}.", caller="test",
+                    tags=[f"tag{i}", "mail"])
+    retag.run(vault, caller="test")
+    for row in vault.db.conn.execute("SELECT id FROM records"):
+        assert len(_tags(vault, row["id"])) <= retag.MAX_TAGS_PER_RECORD
+
+
+def test_record_matrix_gives_one_unit_vector_per_record(vault):
+    vault.store("A short memory.", caller="test")
+    vault.store("Another short memory.", caller="test")
+    ids, mat = retag._record_matrix(vault.db)
+    assert len(ids) == len(set(ids)) == mat.shape[0] == 2
+    assert np.allclose(np.linalg.norm(mat, axis=1), 1.0, atol=1e-5)
+
+
+def test_protected_prefixes_are_declared_where_both_modules_can_see_them():
+    """retag.py and vault.is_seeded must agree on what marks a seeded record;
+    if they ever drift, propagation silently starts smearing identities."""
+    assert "id:" in Store.PROTECTED_TAG_PREFIXES

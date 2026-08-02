@@ -957,6 +957,29 @@ def cmd_reindex(args) -> None:
     print(f"reindexed: {v.index.kind}, {n} {'vector' if n == 1 else 'vectors'}")
 
 
+def cmd_retag(args) -> None:
+    from . import retag
+    v = _open_vault(args)
+    changes = retag.plan(v, include_seeded=args.include_seeded,
+                         prune=args.prune)
+    if args.dry_run:
+        for c in changes:
+            adds = " ".join(f"+{t}" for t in c.added)
+            dels = " ".join(f"-{t}" for t in c.removed)
+            print(f"{c.record_id[:8]}  {adds} {dels}".rstrip())
+        print(f"-- {len(changes)} records would change "
+              f"(+{sum(len(c.added) for c in changes)} tags, "
+              f"-{sum(len(c.removed) for c in changes)}); nothing written")
+        return
+    n = retag.apply(v, changes, caller=args.caller)
+    if n:
+        v.save()
+    print(f"retagged {n} {'record' if n == 1 else 'records'} "
+          f"(+{sum(len(c.added) for c in changes)} tags, "
+          f"-{sum(len(c.removed) for c in changes)}); "
+          "memory text, dates and importance untouched")
+
+
 def cmd_serve(args) -> None:
     from . import server
     argv = ["--vault", args.vault, "--caller", args.caller]
@@ -1836,6 +1859,19 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_audit)
     p = pa_sub.add_parser("repair", help="re-link a chain broken by an older build")
     p.set_defaults(fn=cmd_audit_repair)
+
+    p = sub.add_parser("retag", help="re-derive tags from the vault as it "
+                                     "stands now (never touches memory text)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print what would change and write nothing")
+    p.add_argument("--prune", action="store_true",
+                   help="also REMOVE tags no longer supported by the vault "
+                        "(off by default: adding a wrong tag is cheap, "
+                        "removing a right one is not)")
+    p.add_argument("--include-seeded", action="store_true",
+                   help="also retag the starting memories that shipped with "
+                        "the vault (their tags were curated deliberately)")
+    p.set_defaults(fn=cmd_retag)
 
     p = sub.add_parser("verify", help="check vault structure + signed manifest")
     p.set_defaults(fn=cmd_verify)

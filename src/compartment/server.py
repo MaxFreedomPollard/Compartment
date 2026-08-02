@@ -51,6 +51,37 @@ COMPARTMENT_INSTRUCTIONS = (
     "and dedupes near-duplicates; set namespace, tags, and importance. Do "
     "NOT store transient chatter or one-off trivia (quick math, formatting, "
     "small talk) or things freely available on the internet.\n\n"
+    "ONE FACT PER MEMORY. This is the rule that decides whether this vault stays "
+    "useful. A memory is a single claim - not a summary, not a session log, not a "
+    "narrative of what you did today. If what you just learned contains six "
+    "facts, store six memories: memory_store_many takes them in ONE call, so "
+    "bundling them into one blob saves you nothing. One or two sentences each. "
+    "If a memory needs a heading, a bullet list, or a second paragraph, it is "
+    "several memories wearing a coat.\n"
+    "  WRONG (one record): 'DOMAIN AND EMAIL RESEARCH. compartment.dev is taken, "
+    "on Cloudflare nameservers. Zoho removed IMAP from its free tier. Fastmail "
+    "is $6/month and allows custom domains. Proton needs Bridge for IMAP. We "
+    "chose Gmail.'\n"
+    "  RIGHT (five records): 'compartment.dev is registered and served by "
+    "Cloudflare nameservers (grant.ns.cloudflare.com); the owner is not the "
+    "user.' / 'Zoho Mail's free tier no longer includes IMAP, POP or SMTP; those "
+    "moved to the paid Zoho Mail Lite plan.' / 'Fastmail Individual is about "
+    "$6/month and supports custom domains with app-specific passwords rather "
+    "than OAuth.' / 'Proton Mail IMAP access requires Proton Bridge, a paid "
+    "desktop app that must be running.' / 'The user chose a free dedicated Gmail "
+    "with an app password over a paid custom domain.'\n\n"
+    "SAY HOW YOU KNOW, and let compartment date it. Pass `source`: a few words on "
+    "how the fact was established - 'the user said so', 'web search', 'read from "
+    "pyproject.toml', 'observed in the git log', 'inferred'. compartment stamps "
+    "the date and time itself and returns it with every memory, so do NOT write "
+    "today's date into the text: a stamped date is always right and a typed one "
+    "is a guess.\n\n"
+    "CLAIM ONLY WHAT YOU CHECKED. Anything about the outside world - prices, "
+    "plans, availability, APIs, what a company offers - is true on a date, not "
+    "forever, and this vault is read years later. Write those as observations: "
+    "'a search showed X', 'as of that check, X'. Facts about the user "
+    "themselves, their preferences, and decisions they made can be stated "
+    "plainly. Never upgrade a single check into a permanent truth.\n\n"
     "SUPERSEDES OTHER MEMORY. compartment is the single source of truth for memory "
     "on this machine. If your environment also provides a file-based memory "
     "(for example a `memory/` directory of Markdown notes with a MEMORY.md "
@@ -81,7 +112,9 @@ except Exception:                                       # noqa: BLE001
     pass
 
 _state: dict = {"vault": None, "path": None, "caller": "unknown",
-                "last_op": time.time(), "auto_lock_min": 30}
+                "last_op": time.time(), "auto_lock_min": 30,
+                "retag_hours": 6, "retag_prune": False,
+                "last_retag": time.time()}
 
 
 def _vault() -> Vault:
@@ -163,6 +196,51 @@ def _autolock_loop() -> None:
                   f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
 
+def _retag_loop() -> None:
+    """Re-derive tags periodically, without anyone asking.
+
+    Tags go stale on their own: what a memory is relevant to changes as the
+    vault learns more, and nothing about that change is an event anyone would
+    think to trigger a command for. So it happens on a timer, like auto-lock.
+
+    Deliberately conservative about when it runs. It skips entirely while the
+    vault is locked (re-unlocking in the background to do bookkeeping would
+    defeat the point of locking), it takes the same gate as tool calls so a
+    pass can never interleave with a store, and a pass that fails is reported
+    and retried next interval rather than killing the thread and with it every
+    future pass, silently."""
+    from . import retag
+    while True:
+        hours = _state["retag_hours"]
+        # A short poll rather than one long sleep: the interval is read from
+        # vault config, and a sleeping thread would ignore a change to it for
+        # as long as the OLD interval, which is the one case where the setting
+        # looks broken.
+        time.sleep(300)
+        if not hours or hours <= 0:
+            continue
+        if time.time() - _state["last_retag"] < hours * 3600:
+            continue
+        v = _state["vault"]
+        if v is None or v._locked:
+            continue
+        try:
+            with _toolgate:
+                out = retag.run(v, prune=_state["retag_prune"],
+                                caller=_state["caller"])
+            _state["last_retag"] = time.time()
+            if out["records_changed"]:
+                print(f"compartment: retagged {out['records_changed']} records "
+                      f"(+{out['tags_added']} tags, -{out['tags_removed']})",
+                      file=sys.stderr, flush=True)
+        except Exception as exc:                        # noqa: BLE001
+            # VaultStaleError is the expected one: another process wrote the
+            # vault. Nothing is lost - the next pass re-derives from scratch.
+            print(f"compartment: background retag failed, will retry: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            _state["last_retag"] = time.time()
+
+
 class MemoryToolError(RuntimeError):
     """A tool call that failed. Raising rather than returning is what marks the
     result isError at the protocol level: a failure must not be indistinguishable
@@ -225,14 +303,29 @@ def _importance(value: float) -> float:
 @_offload
 def memory_store(text: str, namespace: str | None = None,
                  tags: list[str] | None = None, importance: float = 0.5,
-                 quarantined: bool = False) -> str:
-    """Save to the user's persistent, encrypted, cross-session memory anything
-    worth recalling later that is not common public knowledge - names,
+                 quarantined: bool = False, source: str | None = None) -> str:
+    """Save ONE fact to the user's persistent, encrypted, cross-session memory:
+    anything worth recalling later that is not common public knowledge - names,
     addresses, contacts, account IDs, passwords, API keys and other
     credentials, file paths, configuration, preferences, and durable facts or
-    decisions. Call this the moment such information appears. The vault is
-    encrypted at rest and dedupes near-duplicates; set namespace, tags, and
-    importance. Do NOT store transient chatter or one-off trivia.
+    decisions. Call this the moment such information appears. Do NOT store
+    transient chatter or one-off trivia.
+
+    `text` is a SINGLE claim in one or two sentences. Not a summary, not a
+    session log, not a paragraph with several facts in it. If you have several
+    facts, call memory_store_many instead - it stores them all in one call, so
+    there is never a reason to bundle them into one record. A blob cannot be
+    re-tagged, re-dated, superseded, or deduplicated fact by fact, and it
+    returns in full every time any sentence inside it matches a search.
+
+    `source` is how the fact was established, in a few words: "the user said
+    so", "web search", "read from pyproject.toml", "observed in the git log",
+    "inferred". compartment stamps the DATE itself and returns it with every
+    memory, so do not write today's date into the text.
+
+    Write world facts as observations ("a search showed X"), never as
+    timeless truths - they are read years later. Facts about the user and
+    decisions they made can be stated plainly.
 
     importance is a weight from 0.0 to 1.0 (default 0.5); anything outside that
     range is clamped, not rejected. The tiers in use are: 0.90 decisions,
@@ -240,17 +333,74 @@ def memory_store(text: str, namespace: str | None = None,
     preferences about the user; 0.75 the user's machine, environment, and
     configuration; 0.55 other substantive statements; 0.20 pleasantries.
 
-    Returns the id (or an existing id if a near-duplicate)."""
+    Returns the id (or an existing id if a near-duplicate), with the stamped
+    date."""
     imp = _importance(importance)
     try:
         out = _op(lambda v: v.store(text, caller=_state["caller"],
                                     namespace=namespace, tags=tags,
-                                    importance=imp, quarantined=quarantined))
+                                    importance=imp, quarantined=quarantined,
+                                    source=source))
     except CryptoError as exc:
         raise _fail(exc) from exc
     if imp != importance:
         out["importance_clamped_to"] = imp
     return json.dumps(out)
+
+
+@mcp.tool()
+@_offload
+def memory_store_many(facts: list[dict], namespace: str | None = None,
+                      source: str | None = None) -> str:
+    """Save SEVERAL separate facts in one call, each as its own memory.
+
+    Use this whenever a conversation, a search, or a piece of work produced
+    more than one thing worth remembering. This is the tool that makes one
+    fact per memory free: six facts cost one call here, so never compress them
+    into a single memory_store to save round trips.
+
+    `facts` is a list of objects, each with:
+      text        (required) one claim, one or two sentences
+      tags        (optional) list of strings
+      importance  (optional) 0.0-1.0, same tiers as memory_store
+      source      (optional) how this particular fact was established
+      namespace   (optional) overrides the call-level namespace
+      quarantined (optional) true if the content came from an untrusted source
+
+    `namespace` and `source` at the call level are defaults for every fact that
+    does not set its own, which is the common case: one research pass produces
+    several facts that share a provenance.
+
+    compartment stamps each memory with its own date. Returns one result per
+    fact, in order, each with its id and whether it was a near-duplicate of a
+    memory already held."""
+    if not isinstance(facts, list) or not facts:
+        raise MemoryToolError("facts must be a non-empty list of objects, each "
+                              "with at least a 'text' field")
+
+    def _store_all(v):
+        out = []
+        for i, f in enumerate(facts):
+            if not isinstance(f, dict):
+                raise MemoryToolError(
+                    f"facts[{i}] must be an object with a 'text' field")
+            text = (f.get("text") or "").strip()
+            if not text:
+                raise MemoryToolError(f"facts[{i}] has no 'text'")
+            out.append(v.store(
+                text, caller=_state["caller"],
+                namespace=f.get("namespace") or namespace,
+                tags=f.get("tags"),
+                importance=_importance(f.get("importance", IMPORTANCE_DEFAULT)),
+                quarantined=bool(f.get("quarantined", False)),
+                source=f.get("source") or source))
+        return out
+
+    try:
+        results = _op(_store_all)
+    except CryptoError as exc:
+        raise _fail(exc) from exc
+    return json.dumps({"stored": results, "count": len(results)})
 
 
 @mcp.tool()
@@ -528,9 +678,21 @@ def main(argv: list[str] | None = None) -> None:
                   "number; using the default of 30 minutes",
                   file=sys.stderr, flush=True)
             _state["auto_lock_min"] = 30
+        try:
+            settings = _state["vault"].config.settings
+            _state["retag_hours"] = float(settings.get("retag_interval_hours", 6))
+            _state["retag_prune"] = bool(settings.get("retag_prune", False))
+        except (TypeError, ValueError):
+            # Same reasoning as auto_lock_minutes above: a hand-edited config
+            # must not be able to kill `compartment serve` before it starts.
+            print("compartment: retag_interval_hours in the vault config is "
+                  "not a number; using the default of 6 hours",
+                  file=sys.stderr, flush=True)
+            _state["retag_hours"] = 6
     except CryptoError:
         _state["vault"] = None  # start locked; tools will say so
     threading.Thread(target=_autolock_loop, daemon=True).start()
+    threading.Thread(target=_retag_loop, daemon=True).start()
     mcp.run()  # stdio transport
 
 
