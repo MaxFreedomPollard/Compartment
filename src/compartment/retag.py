@@ -107,7 +107,38 @@ IMPLICATION_MIN_SUPPORT = 5
 # two-letter tags do not match inside unrelated words.
 VOCAB_MIN_LEN = 3
 # No record gets an unbounded pile of tags. Highest-scoring first.
-MAX_TAGS_PER_RECORD = 12
+#
+# Measured, and lowered from 12: against a real 7,206-record vault every single
+# record saturated a 12-tag ceiling. A ceiling everything reaches is not a
+# ceiling, it is a quota, and a memory wearing twelve tags is no more findable
+# than one wearing none - the filter stops selecting anything.
+MAX_TAGS_PER_RECORD = 8
+
+# --- what is even eligible to be proposed --------------------------------------
+# A tag has to be a CATEGORY before it can be spread. These three filters are
+# what separate a label somebody once typed from a subject the vault actually
+# organizes itself around, and without them propagation degrades into spam.
+#
+# 1. Used by at least this many records already. A tag on one memory is that
+#    memory's private label - "max-automation-philosophy" names a specific note,
+#    it does not describe a class of them - and copying it onto a neighbour
+#    asserts a category that has never existed.
+MIN_TAG_SUPPORT = 3
+# 2. Not on more than this share of the vault. A tag carried by a quarter of
+#    everything cannot narrow a search, so attaching it to more records costs
+#    context and buys nothing. Same reasoning as ranking.COMMON_TERM_FRACTION:
+#    the ceiling is measured from this vault, not from a fixed list.
+MAX_TAG_FRACTION = 0.25
+# ...but never below this many records. A fraction alone is meaningless on a
+# small vault: in a vault of six memories a tag shared by four is 67% and would
+# be excluded as "uninformative" when it is in fact the only category there is.
+# A tag on twenty records is a real category whatever the vault size, so the
+# ceiling is the LARGER of the two.
+MIN_COMMON_ABSOLUTE = 20
+# 3. Not a date. A date-shaped tag marks WHEN a memory was written, which is
+#    already a column and is exactly what must not travel: propagating
+#    "2026-07-26" onto a neighbour claims that neighbour was about that day.
+DATE_TAG_RE = re.compile(r"^\d{4}(-\d{1,2}){0,2}$")
 
 # --- pruning (off unless asked) ----------------------------------------------
 # Below this share of neighbour support an existing tag is considered
@@ -190,6 +221,24 @@ def _implications(tagsets: list[list[str]]) -> dict[str, dict[str, float]]:
     return rules
 
 
+def eligible_tags(desc_by_id: dict[str, list[str]]) -> set[str]:
+    """The tags this pass is allowed to ADD to a record.
+
+    Nothing here restricts what a memory may KEEP. A tag a person chose stays
+    on the memory they chose it for however rare or specific it is; this only
+    governs what may be copied onto a memory that does not have it yet."""
+    counts: dict[str, int] = {}
+    for tags in desc_by_id.values():
+        for t in set(tags):
+            counts[t] = counts.get(t, 0) + 1
+    total = max(1, len(desc_by_id))
+    ceiling = max(MIN_COMMON_ABSOLUTE, total * MAX_TAG_FRACTION)
+    return {t for t, n in counts.items()
+            if n >= MIN_TAG_SUPPORT
+            and n <= ceiling
+            and not DATE_TAG_RE.match(t)}
+
+
 def _vocab_pattern(vocab: set[str]) -> dict[str, re.Pattern]:
     """A word-boundary matcher per known tag.
 
@@ -229,8 +278,11 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
     tags_by_id = {rid: json.loads(t) for rid, t in rows.items()}
     desc_by_id = {rid: _descriptive(t) for rid, t in tags_by_id.items()}
     rules = _implications([v for v in desc_by_id.values() if v])
-    vocab = {t for tags in desc_by_id.values() for t in tags}
-    patterns = _vocab_pattern(vocab)
+    # One eligibility set, applied to every way a tag can be proposed. Filtering
+    # in only one of the three signals would let the other two reintroduce
+    # exactly what it excluded.
+    allowed = eligible_tags(desc_by_id)
+    patterns = _vocab_pattern(allowed)
 
     targets = [rid for rid in ids
                if rid in rows and (include_seeded or not is_seeded(rows[rid]))]
@@ -245,12 +297,12 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
         for local, rid in enumerate(chunk):
             changes.append(_plan_one(
                 rid, sims[local], ids, index, desc_by_id, tags_by_id,
-                rules, patterns, vault, prune))
+                rules, patterns, allowed, vault, prune))
     return [c for c in changes if c.is_change]
 
 
 def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
-              patterns, vault, prune) -> Change:
+              patterns, allowed, vault, prune) -> Change:
     before = tags_by_id[rid]
     own = list(desc_by_id[rid])
 
@@ -270,30 +322,41 @@ def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
     support = {t: w / total for t, w in weights.items()} if total > 0 else {}
 
     scored: dict[str, float] = {t: s for t, s in support.items()
-                                if s >= PROPAGATE_SHARE}
+                                if s >= PROPAGATE_SHARE and t in allowed}
 
     # --- signal 2: tags this record's own tags imply --------------------------
     for tag in own:
         for implied, conf in rules.get(tag, {}).items():
-            scored[implied] = max(scored.get(implied, 0.0), conf)
+            if implied in allowed:
+                scored[implied] = max(scored.get(implied, 0.0), conf)
 
     # --- signal 3: known tags said out loud in the text -----------------------
     # Costs one record decryption, so it runs last and only for records whose
     # text can still change the answer.
     text = None
-    lexical: set[str] = set()
-    if patterns:
+    spoken: set[str] = set()
+    if patterns or (prune and own):
         row = vault.db.get_row(rid)
         if row is not None:
             text = vault.db.decrypt_text(row, vault._master)
             for tag, pat in patterns.items():
                 if pat.search(text):
-                    lexical.add(tag)
+                    spoken.add(tag)
                     scored[tag] = max(scored.get(tag, 0.0), 1.0)
+            # A record's OWN tags are checked against its text too, and
+            # deliberately without the eligibility filter. Eligibility decides
+            # what may be COPIED onto other memories; it has no business
+            # deciding whether a memory keeps a tag its own text says out loud.
+            # Conflating the two pruned exactly the tags most worth keeping:
+            # the rare, specific ones a person chose on purpose.
+            if prune:
+                for tag, pat in _vocab_pattern(set(own) - spoken).items():
+                    if pat.search(text):
+                        spoken.add(tag)
 
     keep = []
     for tag in own:
-        if prune and tag not in lexical and support.get(tag, 0.0) < PRUNE_SHARE:
+        if prune and tag not in spoken and support.get(tag, 0.0) < PRUNE_SHARE:
             continue                                # unsupported and unspoken
         keep.append(tag)
 

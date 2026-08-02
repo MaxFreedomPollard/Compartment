@@ -264,12 +264,41 @@ def test_a_tag_spreads_on_meaning_alone(vault):
 
 
 def test_a_known_tag_said_out_loud_in_the_text_is_attached(vault):
-    vault.store("Some unrelated memory about fastmail.", caller="test",
-                tags=["fastmail"])
+    # The tag must already be a CATEGORY (MIN_TAG_SUPPORT records) before it is
+    # eligible to spread; a label used once belongs to the memory that has it.
+    for i in range(retag.MIN_TAG_SUPPORT):
+        vault.store(f"Some unrelated memory about fastmail, {i}.",
+                    caller="test", tags=["fastmail"])
     rid = vault.store("Billing for fastmail renews annually.", caller="test",
                       tags=[])["id"]
     retag.run(vault, caller="test")
     assert "fastmail" in _tags(vault, rid)
+
+
+def test_a_tag_used_only_once_is_not_spread_to_anything(vault):
+    """A one-off label names a particular memory rather than a class of them,
+    and copying it onto a neighbour asserts a category that never existed."""
+    vault.store("A memory with a private label.", caller="test",
+                tags=["max-automation-philosophy"])
+    for i in range(4):
+        vault.store(f"A closely related memory, number {i}.", caller="test",
+                    tags=["notes"])
+    retag.run(vault, caller="test")
+    for row in vault.db.conn.execute("SELECT id FROM records"):
+        tags = _tags(vault, row["id"])
+        assert tags.count("max-automation-philosophy") <= 1
+
+
+def test_a_date_shaped_tag_never_travels(vault):
+    """Propagating "2026-07-26" onto a neighbour claims that neighbour was
+    about that day, which is a different kind of claim entirely."""
+    for i in range(5):
+        vault.store(f"A memory about the release, number {i}.", caller="test",
+                    tags=["release", "2026-07-26"])
+    rid = vault.store("Another memory about the same release work.",
+                      caller="test", tags=[])["id"]
+    retag.run(vault, caller="test")
+    assert "2026-07-26" not in _tags(vault, rid)
 
 
 def test_a_short_tag_does_not_match_inside_a_longer_word(vault):
