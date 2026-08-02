@@ -140,7 +140,10 @@ def import_files(vault, files: list[Path], caller: str = "import-claude",
             continue
         try:
             out = vault.store(rec["text"], caller=caller, namespace=namespace,
-                              tags=rec["tags"], importance=rec["importance"])
+                              tags=rec["tags"], importance=rec["importance"],
+                              # Read off disk, not learned in conversation: the
+                              # method has to say which of the two it was.
+                              source=f"read from {f.name}")
         except Exception as exc:                       # noqa: BLE001
             failed += 1
             errors.append(f"{f.name}: {exc}")

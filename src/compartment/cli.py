@@ -607,7 +607,8 @@ def cmd_store(args) -> None:
     v = _open_vault(args)
     out = v.store(args.text, caller=args.caller, namespace=args.namespace,
                   tags=args.tag or [], importance=args.importance,
-                  quarantined=args.quarantined)
+                  quarantined=args.quarantined, source=args.source,
+                  discovered=args.discovered)
     _print(out)
 
 
@@ -1723,6 +1724,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--tag", action="append")
     p.add_argument("--importance", type=float, default=0.5)
     p.add_argument("--quarantined", action="store_true")
+    p.add_argument("--source", required=True,
+                   help="how this fact was established, in a few words: "
+                        "'web search', 'read from pyproject.toml', 'from chat'. "
+                        "Required: a memory that cannot say where it came from "
+                        "is a claim with no way to check it")
+    p.add_argument("--discovered",
+                   help="the DAY the fact became known (YYYY-MM-DD). Defaults "
+                        "to today; pass it only when the fact was established "
+                        "before the day you are recording it")
     p.set_defaults(fn=cmd_store)
 
     p = sub.add_parser("search", help="hybrid search")

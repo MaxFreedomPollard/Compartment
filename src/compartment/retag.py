@@ -253,8 +253,24 @@ def _vocab_pattern(vocab: set[str]) -> dict[str, re.Pattern]:
     return out
 
 
+def targets(vault, *, include_seeded: bool = False) -> list[str]:
+    """The record ids a pass would consider, in a stable order.
+
+    Exposed so a caller can retag in slices. The background pass has to: it
+    shares one lock with every memory tool, and on a large vault a single
+    whole-vault pass would hold that lock for a minute and a half, during which
+    every search an agent makes simply stops. Bookkeeping must never be
+    something a user can feel."""
+    from .vault import is_seeded
+    out = []
+    for row in vault.db.conn.execute("SELECT id, tags FROM records ORDER BY id"):
+        if include_seeded or not is_seeded(row["tags"]):
+            out.append(row["id"])
+    return out
+
+
 def plan(vault, *, include_seeded: bool = False, prune: bool = False,
-         limit: int | None = None) -> list[Change]:
+         limit: int | None = None, only: list[str] | None = None) -> list[Change]:
     """Work out what every record's tags should be. Writes nothing.
 
     `include_seeded` is off because a vault's starting memories are curated
@@ -284,8 +300,13 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
     allowed = eligible_tags(desc_by_id)
     patterns = _vocab_pattern(allowed)
 
+    # `only` slices the work; the VOTERS are always the whole vault, because a
+    # neighbourhood computed from one slice would give a record different tags
+    # depending on which chunk it happened to land in.
+    wanted = None if only is None else set(only)
     targets = [rid for rid in ids
-               if rid in rows and (include_seeded or not is_seeded(rows[rid]))]
+               if rid in rows and (include_seeded or not is_seeded(rows[rid]))
+               and (wanted is None or rid in wanted)]
     if limit is not None:
         targets = targets[:limit]
 

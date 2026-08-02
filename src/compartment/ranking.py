@@ -118,6 +118,32 @@ LEX_COVERAGE_DEPTH = 256
 # enough: it may sit in another namespace and mask a real duplicate below it.
 DEDUP_CANDIDATES = 5
 
+# --- how many results to return -----------------------------------------------
+# A fixed count is the wrong shape for this. Eight results was tuned when a
+# memory was a paragraph; against memories that are one fact each, eight is a
+# few hundred characters and answers nothing, while against a vault of
+# paragraphs the same eight is seventeen thousand. The number of RELEVANT
+# memories is a property of the question, not a constant.
+#
+# The cut is RELATIVE, and that is forced by measurement rather than taste.
+# Scores are not comparable across queries: on a real vault, the nonsense query
+# "how to bake sourdough bread" peaked at 2.73 while the genuine question "what
+# did Max decide about Airtable" peaked at 1.59. Any fixed score threshold
+# therefore admits the nonsense and rejects the question. What IS meaningful
+# is a result's standing against the best answer to its own query, so a memory
+# is returned when its evidence is within this factor of the strongest hit.
+RESULT_RELATIVE_FLOOR = 0.5
+# Below this a match is noise in absolute terms too - it catches the case where
+# NOTHING in the vault is relevant and the "best" hit is itself meaningless
+# ("the capital of France" peaked at 0.64 against a vault with no geography in
+# it). It cannot separate a weak question from a wrong one, and is not asked to.
+RESULT_ABSOLUTE_FLOOR = 0.7
+# The generous cap. Deliberately far above any plausible answer size: it exists
+# so a pathological query cannot return the whole vault, not to shape ordinary
+# results. Even 100 atomic memories is less text than the eight paragraph-sized
+# ones the old fixed default returned.
+MAX_RESULTS = 100
+
 SECONDS_PER_DAY = 86400.0
 _CERTAINTY_CAP = 0.999          # keeps -log(1 - p) finite
 

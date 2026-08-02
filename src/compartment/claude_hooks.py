@@ -202,7 +202,10 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
     try:
         rec = claude_memory.parse(p)
         out = v.store(rec["text"], caller="claude-code-hook",
-                      tags=rec["tags"], importance=rec["importance"])
+                      tags=rec["tags"], importance=rec["importance"],
+                      # Captured from the conversation as it happened, which is
+                      # the truthful method for anything the user said.
+                      source="from chat")
         v.save()
     except Exception as exc:                            # noqa: BLE001
         return {"stored": False, "reason": f"store failed: {exc}"}

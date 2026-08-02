@@ -367,3 +367,129 @@ def test_protected_prefixes_are_declared_where_both_modules_can_see_them():
     """retag.py and vault.is_seeded must agree on what marks a seeded record;
     if they ever drift, propagation silently starts smearing identities."""
     assert "id:" in Store.PROTECTED_TAG_PREFIXES
+
+
+# --- searching by when a fact was learned, not when it was written down -------
+
+def test_search_can_filter_on_the_day_a_fact_was_discovered(vault):
+    vault.store("The old rate was measured at 40 requests per second.",
+                caller="test", source="ran the benchmark", discovered="2026-01-15")
+    vault.store("The new rate was measured at 90 requests per second.",
+                caller="test", source="ran the benchmark", discovered="2026-07-20")
+    got = vault.search("requests per second rate", caller="test",
+                       discovered_since="2026-06-01")["results"]
+    assert len(got) == 1 and "90" in got[0]["text"]
+    got = vault.search("requests per second rate", caller="test",
+                       discovered_until="2026-06-01")["results"]
+    assert len(got) == 1 and "40" in got[0]["text"]
+
+
+def test_the_two_date_filters_are_independent(vault):
+    """Saved today, discovered long ago: a save-date filter must find it and a
+    discovery-date filter for the same window must not."""
+    vault.store("A fact established years ago.", caller="test",
+                source="read from the archive", discovered="2020-03-01")
+    recent = vault.search("fact established", caller="test",
+                          since=time.time() - 3600)["results"]
+    assert recent, "it was saved just now, so a save-date filter must see it"
+    old = vault.search("fact established", caller="test",
+                       discovered_since="2026-01-01")["results"]
+    assert not old, "it was not discovered this year"
+
+
+def test_a_memory_with_no_discovery_date_is_excluded_not_assumed(vault):
+    rid = vault.store("A fact from an older vault.", caller="test")["id"]
+    vault.db.conn.execute("UPDATE records SET discovered = NULL WHERE id = ?",
+                          (rid,))
+    assert not vault.search("older vault fact", caller="test",
+                            discovered_since="2000-01-01")["results"]
+
+
+# --- retagging in slices ------------------------------------------------------
+
+def test_retagging_in_slices_gives_the_same_answer_as_one_pass(vault):
+    """The background pass retags in chunks so it never holds the tool lock for
+    long. Chunking must not change WHAT a record gets: neighbourhoods are
+    computed from the whole vault, never from the slice."""
+    for i in range(12):
+        vault.store(f"A memory about mail relays, number {i}.", caller="test",
+                    tags=["relays", "mail"])
+    for i in range(6):
+        vault.store(f"An untagged memory about relaying mail, {i}.",
+                    caller="test", tags=[])
+    whole = {c.record_id: sorted(c.after) for c in retag.plan(vault)}
+
+    ids = retag.targets(vault)
+    sliced = {}
+    for i in range(0, len(ids), 5):
+        for c in retag.plan(vault, only=ids[i:i + 5]):
+            sliced[c.record_id] = sorted(c.after)
+    assert sliced == whole
+
+
+def test_targets_covers_exactly_the_organic_records(seeded_vault):
+    # Read-only: `seeded_vault` is shared across the whole session, so storing
+    # into it here would silently change what every other test that counts
+    # organic records sees.
+    ids = retag.targets(seeded_vault)
+    assert len(ids) == seeded_vault.status()["organic_records"]
+    assert len(ids) < seeded_vault.db.count(), "seeded records must be excluded"
+
+
+def test_targets_on_a_fresh_vault_is_every_record(vault):
+    for i in range(3):
+        vault.store(f"A memory, number {i}.", caller="test", source="test")
+    assert len(retag.targets(vault)) == vault.db.count() == 3
+
+
+# --- how many results come back ----------------------------------------------
+
+def _fill(vault, n, text, **kw):
+    for i in range(n):
+        vault.store(text.format(i=i), caller="test", source="test", **kw)
+
+
+def test_an_explicit_top_k_is_still_an_exact_window(vault):
+    """Callers that page, benchmark, or budget context ask for a fixed number
+    and must keep getting exactly that."""
+    _fill(vault, 20, "Memory number {i} about vault encryption keys.")
+    assert len(vault.search("vault encryption keys", caller="test",
+                            top_k=5)["results"]) == 5
+
+
+def test_the_default_is_not_a_fixed_eight(vault):
+    """The whole point of the change: with many equally relevant atomic facts,
+    a fixed eight silently withheld the rest."""
+    _fill(vault, 40, "Fact {i} about vault encryption keys and passphrases.")
+    got = vault.search("vault encryption keys passphrases", caller="test")["results"]
+    assert len(got) > 8, f"expected more than the old fixed 8, got {len(got)}"
+
+
+def test_one_clear_winner_does_not_drag_in_the_whole_vault(vault):
+    """Relevance is judged against the best answer to THIS query, so a decisive
+    hit should not be padded out with weak ones."""
+    _fill(vault, 30, "An unrelated note about printer trays, number {i}.")
+    vault.store("The vault passphrase hint is stored in the keychain.",
+                caller="test", source="test")
+    got = vault.search("vault passphrase hint keychain", caller="test")["results"]
+    assert 1 <= len(got) <= 5, f"expected a tight result set, got {len(got)}"
+    assert "passphrase hint" in got[0]["text"]
+
+
+def test_results_never_exceed_the_generous_cap(vault):
+    from compartment.ranking import MAX_RESULTS
+    _fill(vault, 130, "Fact {i} about vault encryption keys and passphrases.")
+    got = vault.search("vault encryption keys passphrases", caller="test")["results"]
+    assert len(got) <= MAX_RESULTS
+
+
+def test_every_returned_result_clears_the_relevance_floor(vault):
+    from compartment.ranking import RESULT_ABSOLUTE_FLOOR, RESULT_RELATIVE_FLOOR
+    _fill(vault, 25, "Fact {i} about vault encryption keys.")
+    got = vault.search("vault encryption keys", caller="test")["results"]
+    assert got
+    floor = max(RESULT_ABSOLUTE_FLOOR, got[0]["score"] * RESULT_RELATIVE_FLOOR)
+    assert all(r["score"] >= floor for r in got)
+    # and best-first ordering is preserved
+    assert [r["score"] for r in got] == sorted((r["score"] for r in got),
+                                               reverse=True)
