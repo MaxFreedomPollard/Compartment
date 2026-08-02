@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS records (
     -- look alike to the encoder. Rendered back into view on every read, so a
     -- reader never sees a bare assertion with no idea where it came from.
     source TEXT,
+    -- The DATE the fact became known, no time of day. Distinct from `created`,
+    -- which is when this row was written: a fact observed on Friday and
+    -- recorded on Monday has two different dates and conflating them makes the
+    -- older one unrecoverable. Date only, because a claim about the world is
+    -- true or false on a day, and a time of day implies a precision that
+    -- reading a web page or being told something does not have.
+    discovered TEXT,
     -- The tags the memory was born with. `tags` drifts as the retagger learns
     -- what a memory turned out to relate to; this never moves, so "what did we
     -- think this was about at the time" stays answerable and a retagger bug
@@ -134,7 +141,8 @@ class Store:
     # Every entry here is nullable with no default, which is what lets an old
     # row stay valid without being rewritten: a memory stored before this
     # version simply has no recorded source, and reads as such.
-    _ADDED_COLUMNS = (("source", "TEXT"), ("tags_origin", "TEXT"))
+    _ADDED_COLUMNS = (("source", "TEXT"), ("tags_origin", "TEXT"),
+                      ("discovered", "TEXT"))
 
     def _migrate_columns(self) -> None:
         have = {r["name"] for r in
@@ -184,7 +192,7 @@ class Store:
     def insert(self, *, record_id: str | None, ns: str, text: str, vec: np.ndarray,
                tags: list[str], importance: float, quarantined: bool, pack: str | None,
                prov: dict, master_key: bytes, created: float | None = None,
-               source: str | None = None) -> str:
+               source: str | None = None, discovered: str | None = None) -> str:
         rid = record_id or uuid.uuid4().hex
         rk, wrapped = crypto.new_record_key(master_key, rid)
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
@@ -197,13 +205,14 @@ class Store:
         head = allv[0]
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
-            " quarantined, pack, prov, created, accessed, source, tags_origin)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " quarantined, pack, prov, created, accessed, source, tags_origin,"
+            " discovered)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, self.next_ikey(), ns, ct, wrapped,
              head.tobytes(), int(head.shape[0]),
              json.dumps(tags), float(importance), int(quarantined), pack,
              json.dumps(prov), created or now, now,
-             source, json.dumps(tags)),
+             source, json.dumps(tags), discovered),
         )
         self.set_vectors(rid, allv)
         self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)", (rid, text))

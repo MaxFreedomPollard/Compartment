@@ -32,6 +32,7 @@ import pathlib
 import pytest
 
 from compartment import crypto, store, vaultfile, wire
+from compartment.vault import strip_provenance  # noqa: E402
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "compartment"
 
@@ -140,7 +141,8 @@ def test_a_legacy_vault_opens_migrates_and_keeps_every_memory(
     assert reopened.header.extra["wire"] == wire.WIRE_FORMAT
     texts = {reopened.db.decrypt_text(r, reopened._master)
              for r in reopened.db.conn.execute("SELECT * FROM records")}
-    assert {"the first memory", "the second memory", "the third"} <= texts
+    assert {"the first memory", "the second memory", "the third"} <= {
+        strip_provenance(t) for t in texts}
 
     # The migration persisted, and it is genuinely current rather than just
     # marked so: every layer now authenticates under the current label with no

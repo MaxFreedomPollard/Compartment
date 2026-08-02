@@ -5,7 +5,9 @@ that refused to open would be noticed in a second; a retagger that quietly
 reclassified thousands of seeded memories, or an upgrade that dropped every
 recorded date, would not be noticed until the vault was already wrong.
 """
+import datetime
 import json
+import re
 import sqlite3
 import time
 
@@ -14,7 +16,8 @@ import pytest
 
 from compartment import retag
 from compartment.store import Store
-from compartment.vault import Vault, is_seeded, local_stamp
+from compartment.vault import (Vault, is_seeded, local_stamp, strip_provenance,
+                               with_provenance)
 
 from conftest import PASS
 
@@ -130,6 +133,73 @@ def test_many_facts_become_many_records_each_with_its_own_date(vault):
         got = vault.get(rid, caller="test")
         assert got["source"] == "web search"
         assert got["created_local"]
+
+
+# --- the two dates ------------------------------------------------------------
+
+def test_the_fact_carries_its_own_method_and_discovery_date(vault):
+    rid = vault.store("Zoho's free tier no longer includes IMAP.",
+                      caller="test", source="web search")["id"]
+    text = vault.get(rid, caller="test")["text"]
+    today = datetime.date.today().isoformat()
+    assert text.endswith(f"[web search, {today}]")
+
+
+def test_the_discovery_date_carries_no_time_of_day(vault):
+    rid = vault.store("A fact.", caller="test", source="web search")["id"]
+    got = vault.get(rid, caller="test")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", got["discovered"])
+    # while the SAVED stamp does keep the time, because that is a fact about
+    # this vault rather than a claim about the world
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", got["created_local"])
+
+
+def test_a_fact_learned_earlier_than_it_was_written_down_keeps_both_dates(vault):
+    rid = vault.store("The outage began on the Friday.", caller="test",
+                      source="read from the incident log",
+                      discovered="2026-07-12")["id"]
+    got = vault.get(rid, caller="test")
+    assert got["discovered"] == "2026-07-12"
+    assert got["created_local"].startswith(datetime.date.today().isoformat())
+    assert "2026-07-12" in got["text"]
+
+
+def test_discovery_date_accepts_a_timestamp_or_a_datetime_and_drops_the_time():
+    from compartment.vault import discovery_date
+    assert discovery_date("2026-07-12T14:32:00") == "2026-07-12"
+    assert discovery_date(time.mktime((2026, 7, 12, 14, 32, 0, 0, 0, -1))) \
+        == "2026-07-12"
+    assert discovery_date(None) == datetime.date.today().isoformat()
+
+
+def test_the_clause_is_not_stacked_when_a_memory_is_re_imported(vault):
+    vault.store("A fact worth keeping.", caller="test", source="web search")
+    line = vault.export_jsonl(caller="test").splitlines()[0]
+    text = json.loads(line)["text"]
+    # importing an export must not append a second clause
+    v2_text = strip_provenance(with_provenance(text, "web search", "2026-01-01"))
+    assert v2_text == "A fact worth keeping."
+    assert with_provenance(text, "other", "2026-01-01") == text
+
+
+def test_the_embedding_is_of_the_claim_not_of_the_provenance(vault):
+    """Two records of the SAME fact learned on different days by different
+    means must still be recognised as the same fact, which they cannot be if
+    the clause is part of what gets embedded."""
+    a = vault.store("The vault lives at ~/.compartment/memory.vault.",
+                    caller="test", source="web search", discovered="2026-01-02")
+    b = vault.store("The vault lives at ~/.compartment/memory.vault.",
+                    caller="test", source="the user said so",
+                    discovered="2026-08-01")
+    assert b.get("duplicate") is True and b["id"] == a["id"]
+
+
+def test_curated_pack_content_is_installed_verbatim(vault):
+    out = vault.store("A curated starting fact.", caller="test",
+                      pack="somepack")
+    text = vault.get(out["id"], caller="test")["text"]
+    assert text == "A curated starting fact.", \
+        "pack content must not be stamped with the day someone ran init"
 
 
 # --- the retagger -------------------------------------------------------------

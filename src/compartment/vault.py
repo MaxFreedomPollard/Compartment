@@ -20,6 +20,7 @@ import json
 import math
 import os
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -65,6 +66,65 @@ def local_stamp(created: float | None) -> str:
             float(created)).strftime("%Y-%m-%d %H:%M")
     except (TypeError, ValueError, OSError):
         return ""
+
+
+# A memory's own account of where it came from, written at the end of its text
+# as "[method, YYYY-MM-DD]". Recognised on the way back IN so that re-importing
+# an exported memory does not stack a second clause onto the first.
+PROVENANCE_RE = re.compile(r"\s*\[[^\[\]]{0,80}?(\d{4}-\d{2}-\d{2})\]\s*$")
+
+
+def discovery_date(value=None) -> str:
+    """A discovery date as YYYY-MM-DD, with no time of day.
+
+    Accepts a date string, an ISO datetime, or a unix timestamp, and falls back
+    to today. Time is deliberately discarded: a claim about the world is true
+    or false on a DAY, and stamping "14:32" onto something read off a web page
+    asserts a precision that reading a web page does not have. The saved date,
+    which is a fact about this vault rather than about the world, keeps its
+    time and lives in `created`."""
+    if value in (None, ""):
+        return datetime.date.today().isoformat()
+    if isinstance(value, (int, float)):
+        return datetime.date.fromtimestamp(float(value)).isoformat()
+    s = str(value).strip()
+    try:
+        return datetime.date.fromisoformat(s[:10]).isoformat()
+    except ValueError:
+        # Unparseable: keep what the caller meant rather than inventing a date
+        # that would read as verified. Truncated so a whole sentence smuggled
+        # into this field cannot become the provenance clause.
+        return s[:40]
+
+
+def strip_provenance(text: str) -> str:
+    """The claim on its own, without its provenance clause.
+
+    This is what gets EMBEDDED. The clause is bookkeeping: two memories from
+    the same session share a method and a date, and letting that boilerplate
+    into the vector makes every fact learned on one afternoon look alike to the
+    encoder, which is the opposite of what a semantic index is for. It also
+    keeps the near-duplicate guard honest, so the same fact learned twice on
+    different days is still recognised as the same fact."""
+    return PROVENANCE_RE.sub("", text.rstrip()).rstrip()
+
+
+def with_provenance(text: str, source: str | None, discovered: str) -> str:
+    """Append the succinct provenance clause a memory carries in its own text.
+
+    Kept INSIDE the text, not only beside it, so a fact stays self-describing
+    wherever it ends up - pasted into a document, exported to JSONL, read years
+    later by something that never saw this schema. A bare claim with no
+    indication of how it was established is exactly how a single web lookup
+    hardens into a permanent truth.
+
+    Idempotent: text that already ends in a clause is returned unchanged, so
+    an export/import round trip does not accumulate them."""
+    body = text.rstrip()
+    if PROVENANCE_RE.search(body):
+        return body
+    parts = [p for p in ((source or "").strip(), discovered) if p]
+    return f"{body} [{', '.join(parts)}]" if parts else body
 
 
 def is_seeded(tags_json: str) -> bool:
@@ -482,7 +542,8 @@ class Vault:
                            # .get: entries written by an older version have no
                            # source field, and a replay must never be the thing
                            # that refuses to restore a memory.
-                           source=r.get("source"))
+                           source=r.get("source"),
+                           discovered=r.get("discovered"))
         elif op == "forget":
             self.db.delete(e["id"], shred=e["shred"])
         elif op == "link":
@@ -518,6 +579,7 @@ class Vault:
               quarantined: bool = False, pack: str | None = None,
               vec: np.ndarray | None = None, prov: dict | None = None,
               source: str | None = None, created: float | None = None,
+              discovered: str | None = None,
               _journal: bool = True, _dedup: bool = True) -> dict:
         self._require_open()
         ns = namespace or self.config.default_namespace(caller)
@@ -525,10 +587,24 @@ class Vault:
             self.config.check(caller, ns, write=True)
         if not text.strip():
             raise CryptoError("Refusing to store empty text")
+        # A memory carries its own account of how it came to be known, always.
+        # The DATE here is the day the fact was established, which is not
+        # necessarily today: `created` records when this row was written, and
+        # the two differ whenever something learned earlier is written down
+        # later.
+        # Pack and seed content installs VERBATIM, exactly as the rest of this
+        # method already treats it (dedup is skipped for the same reason): its
+        # text is curated, it is the same on every machine, and stamping each
+        # line with the day someone happened to run `init` would assert a
+        # discovery that never took place.
+        disc = discovery_date(discovered) if pack is None else discovered
+        if pack is None:
+            text = with_provenance(text.strip(), source, disc)
         if vec is None:
             # Every window, not just the first 512 tokens. A long memory used
-            # to be searchable only by its opening.
-            vec = self.embedder.embed_record(text)
+            # to be searchable only by its opening. The provenance clause is
+            # excluded so the vector represents the claim itself.
+            vec = self.embedder.embed_record(strip_provenance(text))
         vec = np.atleast_2d(np.asarray(vec, dtype=np.float32))
         # near-duplicate check within the namespace (organic memories only -
         # curated pack/seed contents install verbatim)
@@ -565,7 +641,7 @@ class Vault:
                              # two-year-old fact is fresh - and the migration
                              # that restates a memory more atomically would
                              # destroy the one date it exists to preserve.
-                             created=created)
+                             created=created, discovered=disc)
         row = self.db.get_row(rid)
         for seq, k in enumerate(self.db.vector_keys(rid)):
             self._id_by_ikey[k] = rid
@@ -578,11 +654,12 @@ class Vault:
                 "tags": tags or [], "importance": importance,
                 "quarantined": quarantined, "pack": pack, "prov": prov,
                 "created": row["created"], "source": row["source"],
+                "discovered": row["discovered"],
             }})
         return {"id": rid, "duplicate": False, "namespace": ns,
                 "created": row["created"],
                 "created_local": local_stamp(row["created"]),
-                "source": row["source"]}
+                "source": row["source"], "discovered": row["discovered"]}
 
     def _importance_of(self, rid: str) -> float:
         row = self.db.conn.execute(
@@ -656,6 +733,7 @@ class Vault:
                 "created": row["created"],
                 "created_local": local_stamp(row["created"]),
                 "source": row["source"],
+                "discovered": row["discovered"],
                 "provenance": json.loads(row["prov"]),
                 "pack": row["pack"],
             }
@@ -693,7 +771,8 @@ class Vault:
         total = organic = 0
         rows = []
         for row in self.db.conn.execute(
-                "SELECT id, ns, tags, created, importance, quarantined, source "
+                "SELECT id, ns, tags, created, importance, quarantined, source, "
+                "discovered "
                 "FROM records ORDER BY created"):
             if row["ns"] not in allowed:
                 continue
@@ -719,7 +798,8 @@ class Vault:
                    "tags": json.loads(row["tags"]),
                    "importance": row["importance"], "created": created,
                    "created_local": local_stamp(created),
-                   "source": row["source"], "seeded": seeded}
+                   "source": row["source"],
+                   "discovered": row["discovered"], "seeded": seeded}
             if row["quarantined"]:
                 rec["quarantined"] = True
             out.append(rec)
@@ -743,6 +823,7 @@ class Vault:
                "created": row["created"],
                "created_local": local_stamp(row["created"]),
                "source": row["source"],
+               "discovered": row["discovered"],
                "provenance": json.loads(row["prov"]),
                "pack": row["pack"]}
         if row["quarantined"]:
@@ -1030,7 +1111,7 @@ class Vault:
                 "quarantined": bool(row["quarantined"]), "pack": row["pack"],
                 "provenance": json.loads(row["prov"]), "created": row["created"],
                 "created_local": local_stamp(row["created"]),
-                "source": row["source"],
+                "source": row["source"], "discovered": row["discovered"],
             }, sort_keys=True))
         self._audit_and_capture(caller, "export", f"{len(lines)} records")
         return "\n".join(lines) + ("\n" if lines else "")
@@ -1054,6 +1135,7 @@ class Vault:
                              importance=r.get("importance", 0.5),
                              quarantined=r.get("quarantined", False),
                              source=r.get("source"),
+                             discovered=r.get("discovered"),
                              created=r.get("created"),
                              vec=vec, _journal=False)
             if res.get("duplicate"):

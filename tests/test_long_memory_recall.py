@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from compartment.embed import CHUNK_STRIDE, CHUNK_WINDOW, MAX_CHUNKS, Embedder
+from compartment.vault import strip_provenance  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -83,7 +84,7 @@ def test_a_fact_past_the_encoder_window_is_retrievable(vault, emb):
                 caller="test", namespace="main")
     hits = vault.search("uppercase word boundary Summer Hammer pairing codes",
                         caller="test", top_k=3)["results"]
-    assert hits and hits[0]["text"] == text
+    assert hits and strip_provenance(hits[0]["text"]) == text
 
 
 def test_the_same_fact_is_missed_when_only_the_opening_is_embedded(vault, emb):
@@ -138,7 +139,7 @@ def test_rebuild_windows_backfills_an_older_vault(vault, emb):
     assert len(vault.db.vector_keys(r["id"])) > 1
     hits = vault.search("uppercase word boundary Summer Hammer pairing codes",
                         caller="test", top_k=3)["results"]
-    assert hits and hits[0]["text"] == text
+    assert hits and strip_provenance(hits[0]["text"]) == text
 
 
 def test_rebuild_windows_is_idempotent(vault):

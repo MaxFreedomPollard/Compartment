@@ -6,6 +6,7 @@ import pytest
 
 from compartment import bench, offline_guard, selftest
 from compartment.vindex import BruteForceIndex, UsearchIndex, build_index
+from compartment.vault import strip_provenance  # noqa: E402
 
 import numpy as np
 
@@ -125,7 +126,7 @@ def test_bench_teardown_spares_user_records_in_bench_namespace(vault):
     assert out["synthetic_records"] == 200
 
     # the user's record is untouched, content and all
-    assert vault.get(keep["id"], caller="user")["text"] == \
+    assert strip_provenance(vault.get(keep["id"], caller="user")["text"]) == \
         "the spare key lives under the third flowerpot"
     # and it is the ONLY thing left in the namespace: the 20 bench records went
     assert _ns_count(vault) == 1

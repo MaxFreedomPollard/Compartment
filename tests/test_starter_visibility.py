@@ -14,6 +14,7 @@ import pytest
 from compartment import cli, menubar, packs
 from compartment.acl import VaultConfig
 from compartment.vault import Vault, is_seeded
+from compartment.vault import strip_provenance  # noqa: E402
 
 DATA = pathlib.Path(__file__).resolve().parents[1] / "src" / "compartment" / "data"
 PASS = "CorrectHorse"
@@ -144,7 +145,8 @@ def test_turning_starter_facts_off_keeps_what_the_agent_stored(sv):
     sv.config.settings["search_starter_facts"] = False
     hits = sv.search("master-detail layout preference", caller="test", top_k=5)
     texts = [h["text"] for h in hits["results"]]
-    assert "Max prefers the master-detail layout" in texts
+    assert "Max prefers the master-detail layout" in [
+        strip_provenance(t) for t in texts]
     assert not any(is_seeded(json.dumps(h["tags"])) for h in hits["results"])
 
 

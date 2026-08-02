@@ -13,6 +13,7 @@ import pytest
 
 from compartment import audit, store, vaultfile
 from compartment.vault import Vault
+from compartment.vault import strip_provenance  # noqa: E402
 
 from conftest import PASS
 
@@ -38,7 +39,8 @@ def test_replaying_a_journalled_write_keeps_the_chain_linked(vault_path):
     assert ok, msg
     texts = {reopened.db.decrypt_text(r, reopened._master)
              for r in reopened.db.conn.execute("SELECT * FROM records")}
-    assert "a memory written after a search" in texts
+    assert "a memory written after a search" in {
+        strip_provenance(t) for t in texts}
 
 
 def test_replay_preserves_when_the_operation_happened(vault_path):

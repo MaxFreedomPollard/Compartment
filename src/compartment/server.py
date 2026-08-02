@@ -53,7 +53,8 @@ COMPARTMENT_INSTRUCTIONS = (
     "small talk) or things freely available on the internet.\n\n"
     "ONE FACT PER MEMORY. This is the rule that decides whether this vault stays "
     "useful. A memory is a single claim - not a summary, not a session log, not a "
-    "narrative of what you did today. If what you just learned contains six "
+    "narrative of what you did today (a brief factual summing-up is fine, see "
+    "below). If what you just learned contains six "
     "facts, store six memories: memory_store_many takes them in ONE call, so "
     "bundling them into one blob saves you nothing. One or two sentences each. "
     "If a memory needs a heading, a bullet list, or a second paragraph, it is "
@@ -70,12 +71,27 @@ COMPARTMENT_INSTRUCTIONS = (
     "than OAuth.' / 'Proton Mail IMAP access requires Proton Bridge, a paid "
     "desktop app that must be running.' / 'The user chose a free dedicated Gmail "
     "with an app password over a paid custom domain.'\n\n"
-    "SAY HOW YOU KNOW, and let compartment date it. Pass `source`: a few words on "
-    "how the fact was established - 'the user said so', 'web search', 'read from "
-    "pyproject.toml', 'observed in the git log', 'inferred'. compartment stamps "
-    "the date and time itself and returns it with every memory, so do NOT write "
-    "today's date into the text: a stamped date is always right and a typed one "
+    "SAY HOW YOU KNOW. Always pass `source`: a few words on how the fact was "
+    "established - 'the user said so', 'web search', 'read from pyproject.toml', "
+    "'observed in the git log', 'inferred'. compartment appends that method and "
+    "the discovery DATE to the memory as a short '[web search, 2026-08-01]' "
+    "clause, so a fact is never left as a bare assertion with no indication of "
+    "where it came from.\n"
+    "  TWO DIFFERENT DATES, do not confuse them. compartment records when the "
+    "memory was SAVED, with the time of day, by itself and always - never write "
+    "that one. `discovered` is the DAY THE FACT BECAME KNOWN, date only, and it "
+    "defaults to today; pass it explicitly only when that differs from today, "
+    "such as writing up yesterday's work or reading an old log. Do not type "
+    "either date into the text: a stamped date is always right and a typed one "
     "is a guess.\n\n"
+    "SUMMARIES AND OPINIONS ARE WELCOME, BRIEFLY. A summing-up is a legitimate "
+    "memory when it is itself short and factual - 'the LobeHub listing went "
+    "live and is published' - and not when it is a retelling of everything that "
+    "happened. An opinion, a recommendation, or a judgement call is worth "
+    "keeping too, but store it as a fact ABOUT the opinion: what was advised, "
+    "and WHY it was needed at all. 'Max was advised not to buy a domain yet, "
+    "because a project this size does not need its own web identity' is a "
+    "memory; three paragraphs reasoning toward that advice is not.\n\n"
     "CLAIM ONLY WHAT YOU CHECKED. Anything about the outside world - prices, "
     "plans, availability, APIs, what a company offers - is true on a date, not "
     "forever, and this vault is read years later. Write those as observations: "
@@ -303,7 +319,8 @@ def _importance(value: float) -> float:
 @_offload
 def memory_store(text: str, namespace: str | None = None,
                  tags: list[str] | None = None, importance: float = 0.5,
-                 quarantined: bool = False, source: str | None = None) -> str:
+                 quarantined: bool = False, source: str | None = None,
+                 discovered: str | None = None) -> str:
     """Save ONE fact to the user's persistent, encrypted, cross-session memory:
     anything worth recalling later that is not common public knowledge - names,
     addresses, contacts, account IDs, passwords, API keys and other
@@ -320,8 +337,17 @@ def memory_store(text: str, namespace: str | None = None,
 
     `source` is how the fact was established, in a few words: "the user said
     so", "web search", "read from pyproject.toml", "observed in the git log",
-    "inferred". compartment stamps the DATE itself and returns it with every
-    memory, so do not write today's date into the text.
+    "inferred".
+
+    `discovered` is the DATE the fact became known, as YYYY-MM-DD, and defaults
+    to today. Pass it only when the fact was established on a different day
+    from the one you are storing it on - reading an old log, or writing up
+    yesterday's work. This is not the same as when the memory was saved, which
+    compartment records itself with the time of day included.
+
+    compartment appends the method and the discovery date to the stored text as
+    a short "[web search, 2026-08-01]" clause, so never write either into the
+    text yourself.
 
     Write world facts as observations ("a search showed X"), never as
     timeless truths - they are read years later. Facts about the user and
@@ -340,7 +366,7 @@ def memory_store(text: str, namespace: str | None = None,
         out = _op(lambda v: v.store(text, caller=_state["caller"],
                                     namespace=namespace, tags=tags,
                                     importance=imp, quarantined=quarantined,
-                                    source=source))
+                                    source=source, discovered=discovered))
     except CryptoError as exc:
         raise _fail(exc) from exc
     if imp != importance:
@@ -351,7 +377,8 @@ def memory_store(text: str, namespace: str | None = None,
 @mcp.tool()
 @_offload
 def memory_store_many(facts: list[dict], namespace: str | None = None,
-                      source: str | None = None) -> str:
+                      source: str | None = None,
+                      discovered: str | None = None) -> str:
     """Save SEVERAL separate facts in one call, each as its own memory.
 
     Use this whenever a conversation, a search, or a piece of work produced
@@ -364,12 +391,13 @@ def memory_store_many(facts: list[dict], namespace: str | None = None,
       tags        (optional) list of strings
       importance  (optional) 0.0-1.0, same tiers as memory_store
       source      (optional) how this particular fact was established
+      discovered  (optional) YYYY-MM-DD the fact became known, if not today
       namespace   (optional) overrides the call-level namespace
       quarantined (optional) true if the content came from an untrusted source
 
-    `namespace` and `source` at the call level are defaults for every fact that
-    does not set its own, which is the common case: one research pass produces
-    several facts that share a provenance.
+    `namespace`, `source` and `discovered` at the call level are defaults for
+    every fact that does not set its own, which is the common case: one
+    research pass produces several facts that share a provenance.
 
     compartment stamps each memory with its own date. Returns one result per
     fact, in order, each with its id and whether it was a near-duplicate of a
@@ -393,7 +421,8 @@ def memory_store_many(facts: list[dict], namespace: str | None = None,
                 tags=f.get("tags"),
                 importance=_importance(f.get("importance", IMPORTANCE_DEFAULT)),
                 quarantined=bool(f.get("quarantined", False)),
-                source=f.get("source") or source))
+                source=f.get("source") or source,
+                discovered=f.get("discovered") or discovered))
         return out
 
     try:

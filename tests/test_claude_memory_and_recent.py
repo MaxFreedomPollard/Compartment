@@ -9,6 +9,7 @@ import pytest
 
 from compartment import claude_memory
 from compartment.crypto import CryptoError
+from compartment.vault import strip_provenance  # noqa: E402
 
 MEM = """---
 name: six-forks-housing
@@ -135,9 +136,8 @@ def test_recent_returns_newest_last(vault):
     for t in ("first thing", "second thing", "third thing"):
         vault.store(t, caller="test")
     out = vault.recent(caller="test")
-    assert [r["text"] for r in out["results"]] == ["first thing",
-                                                   "second thing",
-                                                   "third thing"]
+    assert [strip_provenance(r["text"]) for r in out["results"]] == [
+        "first thing", "second thing", "third thing"]
     assert out["counts"]["organic"] == 3
 
 
@@ -145,14 +145,15 @@ def test_recent_limit_keeps_the_newest(vault):
     for i in range(5):
         vault.store(f"memory number {i}", caller="test")
     out = vault.recent(caller="test", limit=2)
-    assert [r["text"] for r in out["results"]] == ["memory number 3",
-                                                   "memory number 4"]
+    assert [strip_provenance(r["text"]) for r in out["results"]] == [
+        "memory number 3", "memory number 4"]
 
 
 def test_recent_hides_seeded_facts_by_default(seeded_vault):
     seeded_vault.store("an organic memory", caller="test")
     hidden = seeded_vault.recent(caller="test", limit=50)
-    assert [r["text"] for r in hidden["results"]] == ["an organic memory"]
+    assert [strip_provenance(r["text"])
+            for r in hidden["results"]] == ["an organic memory"]
     assert hidden["counts"]["seeded"] > 1000
     shown = seeded_vault.recent(caller="test", limit=50, include_seeded=True)
     assert len(shown["results"]) == 50      # starter facts drown it out
