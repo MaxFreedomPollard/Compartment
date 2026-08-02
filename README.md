@@ -236,6 +236,16 @@ was established, appended as a short `[web search, 2026-08-01]` clause. Those
 are two different dates: a price you check on the Friday and write up on the
 Monday keeps Friday as its discovery and Monday as its save.
 
+**Search returns what is relevant, not a fixed number.** How many memories
+answer a question is a property of the question, so Compartment returns every
+memory whose evidence stands up against the best answer to that same question,
+capped generously. The cut has to be relative, because scores are not
+comparable between questions - on a real vault the nonsense query "how to bake
+sourdough bread" scored higher than the genuine "what did Max decide about
+Airtable". Ask it something the vault knows nothing about and it returns
+nothing at all rather than a page of polite irrelevancies. Pass an explicit
+`top_k` when you want exactly that many.
+
 **Tags that stay true.**
 
 What a memory is about never changes. What it is
