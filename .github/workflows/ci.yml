@@ -53,8 +53,8 @@ jobs:
       - name: A vault to look at
         run: |
           compartment init --passphrase ci-only-not-a-secret --no-app
-          compartment store "Deploys go out Tuesday and Thursday mornings."
-          compartment store "Staging runs Postgres 16 behind pgbouncer."
+          compartment store --source "from chat" "Deploys go out Tuesday and Thursday mornings."
+          compartment store --source "from chat" "Staging runs Postgres 16 behind pgbouncer."
 
       - name: The panel, without a display (what it would say)
         run: compartment panel --self-check
@@ -130,11 +130,11 @@ jobs:
         # doing its job instead of an empty list.
         run: |
           compartment init --passphrase ci-only-not-a-secret
-          compartment store "Deploys go out Tuesday and Thursday mornings, never on a Friday."
-          compartment store "Approved (answered OK): send the release notes to the team now?"
-          compartment store "Staging runs Postgres 16 behind pgbouncer on port 6432."
-          compartment store "Prefers spaces over tabs everywhere except Go."
-          compartment store "This laptop has 16 GB, so keep parallel jobs at 4."
+          compartment store --source "from chat" "Deploys go out Tuesday and Thursday mornings, never on a Friday."
+          compartment store --source "from chat" "Approved (answered OK): send the release notes to the team now?"
+          compartment store --source "from chat" "Staging runs Postgres 16 behind pgbouncer on port 6432."
+          compartment store --source "from chat" "Prefers spaces over tabs everywhere except Go."
+          compartment store --source "from chat" "This laptop has 16 GB, so keep parallel jobs at 4."
           python -c "from compartment import menubar as m; m.set_setting(m.default_vault(), 'capture_hook', True)"
 
       - name: The panel, without a window (what it would say)

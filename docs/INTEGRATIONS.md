@@ -176,7 +176,7 @@ the local compartment engine) is planned; the MCP path above works today.
 |---|---|---|
 | Any MCP-capable host (Cursor, Windsurf, custom SDK agents, …) | MCP stdio | the same one-block config as Claude, with its own `--caller` name |
 | Python frameworks (LangChain/LlamaIndex-style) | vector-store adapter | import `compartment.vault.Vault` directly, or use the CLI; a drop-in `VectorStore` adapter class is on the roadmap |
-| Anything that can run a subprocess | CLI/JSON | `compartment search "query" --json`, `compartment store "text"` |
+| Anything that can run a subprocess | CLI/JSON | `compartment search "query" --json`, `compartment store "text" --source "how you know"` |
 
 One vault serves all of them at once: writes are serialized across
 processes, every host gets its own `--caller` identity and namespace, and
