@@ -227,14 +227,15 @@ that real use produced are actually visible - and `compartment status` reports
 `organic_records` beside the total, so a vault that has learned nothing can
 never look busy. Same view over MCP as `memory_recent`.
 
-**One fact per memory, dated.** A memory is a single claim, not a session log.
-`memory_store_many` takes a whole batch in one call, so storing six facts
-separately costs the same one round trip as bundling them into a paragraph -
-which is what made agents write paragraphs. Every memory carries the moment it
-was saved, and separately the day the fact was discovered together with how it
-was established, appended as a short `[web search, 2026-08-01]` clause. Those
-are two different dates: a price you check on the Friday and write up on the
-Monday keeps Friday as its discovery and Monday as its save.
+**One fact per memory, dated.** A memory is an atomized data point, not a
+session log. `memory_store_many` takes a whole batch in one call, so storing
+six facts separately costs the same one round trip as bundling them into a
+longer format description - which is what made agents write longer format
+descriptions. Every memory carries the moment it was saved, and separately the
+day the fact was discovered together with how it was established, appended as a
+short `[web search, 2026-08-01]` clause. Those are two different dates: a price
+you check on the Friday and write up on the Monday keeps Friday as its
+discovery and Monday as its save.
 
 **Search returns what is relevant, not a fixed number.** How many memories
 answer a question is a property of the question, so Compartment returns every
@@ -246,17 +247,15 @@ Airtable". Ask it something the vault knows nothing about and it returns
 nothing at all rather than a page of polite irrelevancies. Pass an explicit
 `top_k` when you want exactly that many.
 
-**Tags that stay true.**
-
-What a memory is about never changes. What it is
+**Tags that stay true.** What a memory is about never changes. What it is
 relevant to changes constantly, and a tag written once, on the day the memory
 was stored, cannot know that.
 
-Here is the failure this solves. Working on a project called Northwind, you
-learn that your client wants figures before conclusions: never open with the
-recommendation, open with the numbers. That is a durable fact about a person.
-The agent stores it and tags it `northwind`, `reporting`, because Northwind is
-what was in front of it that day.
+Here is an example of the failure this solves. Working on a project called
+Northwind, you learn that your client wants figures before conclusions: never
+open with the recommendation, open with the numbers. That is a durable fact
+about a person. The agent stores it and tags it `northwind`, `reporting`,
+because Northwind is what was in front of it that day.
 
 Northwind ends. Two years later the same client, now going by the name Harbour,
 hires you again. Your agent narrows recall to `harbour`, the way anyone narrows
@@ -268,14 +267,14 @@ set. The memory did not decay. Its index entry did.
 
 Compartment repairs that automatically, offline, in the background, without
 using an LLM. As Harbour memories accumulate - the client asking for numbers up
-front again, a deck reordered to lead with them - they land beside that old
-preference in embedding space, because they are about the same subject. A
-background pass gives every memory the tags its nearest neighbours carry,
-weighted by cosine, and the preference picks up `harbour` from them. Two more
-offline signals run alongside it: tags that nearly always occur together come
-to imply one another, and any existing tag whose phrase appears in a memory's
-own text is attached. Nothing in Compartment ever knew what Northwind or
-Harbour were.
+front again, a deck reordered to lead with them - they land by design beside
+that old preference in embedding space, because they are about the same subject
+and placed similarly through ordered logic. A background pass gives every
+memory the tags its nearest neighbours carry, weighted by cosine, and the
+preference picks up `harbour` from them. Two more offline signals run alongside
+it: tags that nearly always occur together come to imply one another, and any
+existing tag whose phrase appears in a memory's own text is attached. Nothing
+in Compartment ever knew what Northwind or Harbour were.
 
 The pass can only write the tags column, never the text, the dates or the
 embeddings. It is additive unless you pass `--prune`, `tags_origin` keeps the
