@@ -4,6 +4,8 @@
 
 <a href="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment"><img width="380" height="200" src="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment/badge" alt="Compartment MCP server" /></a>
 
+**Listed on:** [PyPI](https://pypi.org/project/compartment/) · [Glama](https://glama.ai/mcp/servers/@MaxFreedomPollard/Compartment) · [LobeHub](https://lobehub.com/mcp/maxfreedompollard-compartment) · [MCP Toplist](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment) · [mcpservers.org](https://mcpservers.org/servers/maxfreedompollard/compartment) · [TensorBlock](https://www.tensorblock.co/mcp/servers/github-maxfreedompollard-compartment-4ab11161) · [Libraries.io](https://libraries.io/pypi/compartment) · [Snyk Advisor](https://snyk.io/advisor/python/compartment) · [deps.dev](https://deps.dev/pypi/compartment)
+
 ### Durable agentic memory, encrypted at rest.
 
 Your AI agent forgets you the moment the session ends. Compartment ends
