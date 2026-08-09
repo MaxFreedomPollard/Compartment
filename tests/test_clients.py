@@ -233,6 +233,14 @@ def test_the_printed_block_is_valid_json_for_json_clients():
     assert "compartment" in parsed[c.root]
 
 
+def test_omp_resolves_and_writes_agent_level_mcp_json():
+    c = clients.CLIENTS["omp"]
+    assert c.writes is True
+    entry = json.loads(clients.snippet(c, VAULT))["mcpServers"]["compartment"]
+    assert entry["args"][:2] == ["--vault", VAULT]
+    assert entry["args"][-1] == "serve"
+
+
 # -------------------------------------------------------------------- status
 
 def test_present_is_false_when_nothing_is_installed(tmp_path, monkeypatch):

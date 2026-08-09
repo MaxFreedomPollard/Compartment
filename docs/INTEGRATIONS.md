@@ -1,9 +1,10 @@
 # Selecting Compartment as your agent's memory
 
-How to make Compartment the active memory in each ecosystem. Three mechanisms
+How to make Compartment the active memory in each ecosystem. Four mechanisms
 exist in the wild - a native provider slot (Hermes, OpenClaw), MCP tool
-registration (Claude and most modern agents), and plain CLI/JSON (anything
-that can run a subprocess). Compartment supports all three from one install.
+registration (Claude and most modern agents), agent-extension hooks (Oh My
+Pi), and plain CLI/JSON (anything that can run a subprocess). Compartment
+supports all four from one install.
 
 ---
 
@@ -170,7 +171,10 @@ mechanism its LanceDB memory uses). A native `openclaw-memory-compartment`
 slot plugin (auto-recall via the `before_prompt_build` hook, bridging to
 the local compartment engine) is planned; the MCP path above works today.
 
-## Oh My Pi (omp) - one command
+## Oh My Pi (omp) - one command, plus an extension
+
+omp is a local-first coding agent (TUI + CLI) with a full MCP client and an
+extension system (`~/.omp/agent/extensions/`). Both paths work today.
 
 ```bash
 pip install compartment && compartment init && compartment integrate omp
@@ -191,6 +195,22 @@ hand to wire the vault to a single project instead of the user-level file:
     "args": ["--vault", "~/.compartment/memory.vault",
              "--caller", "omp", "serve"] } } }
 ```
+
+### The extension - deterministic read and write paths
+
+The MCP entry leaves recall and capture to the model. The extension in
+[`integrations/omp/`](../integrations/omp/README.md) adds the paths the
+Claude Code integration gets from its hooks:
+
+```bash
+cp integrations/omp/extension.ts ~/.omp/agent/extensions/compartment.ts
+```
+
+`before_agent_start` recalls project memory automatically (DATA, not
+instructions), user turns are buffered and flushed to the vault at session
+shutdown and before compaction, and recalled memory is injected into the
+compaction context so summaries do not drop prior decisions. `memory_search`
+and `memory_store` are also registered as tools, independent of MCP wiring.
 
 ## Everything else
 
