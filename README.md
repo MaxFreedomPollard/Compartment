@@ -508,6 +508,19 @@ any time with **`compartment dash`** - one command, and the vault opens in
 your browser (memories by kind, growth, the relation graph, live
 search); Ctrl-C closes it.
 
+Hermes also reads the portable [Agent Plugins](https://agent-plugins.org)
+format, and this repository is one. That route installs the MCP server and
+the `/compartmentalize` skill straight from GitHub:
+```bash
+pip install compartment && compartment init
+hermes plugins install MaxFreedomPollard/Compartment
+hermes plugins enable compartment
+```
+The provider above remains the fuller integration, because recall and
+persistence run automatically on every turn where the portable package is
+tool-invoked. On macOS and Windows the two resolve to the same plugin
+directory name, so install one or the other.
+
 **OpenClaw** - macOS / Linux:
 ```bash
 pip install compartment && compartment init && compartment integrate openclaw

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "compartment": {
+      "type": "stdio",
+      "command": "compartment",
+      "args": ["--caller", "hermes", "serve"],
+      "cwd": "${PLUGIN_DATA}"
+    }
+  }
+}
