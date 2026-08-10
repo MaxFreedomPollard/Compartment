@@ -169,6 +169,12 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
            aliases=("qwen-code",)),
     Client("copilot-cli", "GitHub Copilot CLI",
            _home(".copilot", "mcp-config.json")),
+    # Oh My Pi reads a project-level .omp/mcp.json as well, but that one is
+    # relative to whatever repository you happen to be in, so the user-level
+    # file is the only one an integrate command can honestly write.
+    Client("omp", "Oh My Pi", _home(".omp", "agent", "mcp.json"),
+           aliases=("oh-my-pi",),
+           note="run `/mcp reload` in omp to pick it up without restarting"),
 
     # -- coding agents that spell the key differently ----------------------
     Client("vscode", "VS Code", lambda: _vscode_user() / "mcp.json",

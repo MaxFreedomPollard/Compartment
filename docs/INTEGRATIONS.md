@@ -170,6 +170,28 @@ mechanism its LanceDB memory uses). A native `openclaw-memory-compartment`
 slot plugin (auto-recall via the `before_prompt_build` hook, bridging to
 the local compartment engine) is planned; the MCP path above works today.
 
+## Oh My Pi (omp) - one command
+
+```bash
+pip install compartment && compartment init && compartment integrate omp
+```
+
+`integrate omp` writes the server entry under `mcpServers` in
+`~/.omp/agent/mcp.json` (backing the file up first). A running session
+picks it up with `/mcp reload`, which rediscovers servers and rebinds the
+tools without a restart.
+
+omp also reads a project-level `.omp/mcp.json`, relative to whichever
+repository you are in. `integrate` never writes that one, because which
+repository it means depends on where you were standing. Paste the block by
+hand to wire the vault to a single project instead of the user-level file:
+
+```json
+{ "mcpServers": { "compartment": { "command": "compartment",
+    "args": ["--vault", "~/.compartment/memory.vault",
+             "--caller", "omp", "serve"] } } }
+```
+
 ## Everything else
 
 | Agent kind | Mechanism | What to do |
