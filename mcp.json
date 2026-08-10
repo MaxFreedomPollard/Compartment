@@ -4,7 +4,7 @@
     "compartment": {
       "type": "stdio",
       "command": "compartment",
-      "args": ["--caller", "hermes", "serve"],
+      "args": ["--caller", "agent-plugin", "serve"],
       "cwd": "${PLUGIN_DATA}"
     }
   }

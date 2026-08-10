@@ -1,11 +1,10 @@
 ---
 name: compartmentalize
 description: Sweep this conversation and save everything potentially worth knowing again into Compartment, the encrypted memory vault. Run it before compacting or summarizing so nothing is lost to the summary, or on its own at any point to bank the session.
-version: 1.0.0
-platforms: [macos, linux, windows]
-disable-model-invocation: true
 metadata:
   tags: "memory, compartment, context, session, recall"
+  version: "1.0.0"
+  platforms: "macos, linux, windows"
 ---
 
 **Save to Compartment before compacting.**
