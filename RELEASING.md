@@ -31,10 +31,17 @@ server without the app.
 #      src/compartment/__init__.py     __version__ = "2.1"
 #      server.json   packages[0].version = "2.1"    the string PyPI serves
 #      server.json   version             = "2.1.0"  the SEMVER form
+#      plugin.json   version             = "2.1.0"  Agent Plugins manifest
 #
 #    The two server.json fields are deliberately NOT the same value. Step 5
 #    explains why; setting them both to "2.1" is what published a registry
 #    entry that never became latest.
+#
+#    plugin.json is the fifth field and the easiest to forget, because
+#    nothing downstream fails when it drifts. It is what a portable host
+#    prints in its own plugin list - `hermes plugins list` shows it in the
+#    Version column - so a stale number there tells the user they are
+#    running something they are not.
 
 python -m pytest -q                          # must be green
 
