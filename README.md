@@ -510,7 +510,8 @@ search); Ctrl-C closes it.
 
 Hermes also reads the portable [Agent Plugins](https://agent-plugins.org)
 format, and this repository is one. That route installs the MCP server and
-the `/compartmentalize` skill straight from GitHub:
+the `/compartmentalize` skill straight from GitHub, and wants Hermes 0.20.0
+or newer, which is where the portable plugin loader arrived:
 ```bash
 pip install compartment && compartment init
 hermes plugins install MaxFreedomPollard/Compartment
@@ -539,10 +540,10 @@ backup), then: `openclaw gateway restart` and confirm with
 pip install compartment && compartment init
 ```
 
-`compartment integrate --list` names the thirty MCP clients it knows - Cursor,
-VS Code, Cline, Roo Code, Zed, OpenCode, Codex CLI, Gemini CLI, LM Studio,
-AnythingLLM, BoltAI and the rest - and `compartment integrate --all` writes the
-block below into every one of them that is installed here.
+`compartment integrate --list` names the twenty-eight MCP clients it knows -
+Cursor, VS Code, Cline, Roo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Oh My
+Pi, LM Studio, AnythingLLM, BoltAI and the rest - and `compartment integrate
+--all` writes the block below into every one of them that is installed here.
 
 Then add the server to your client's MCP config (stdio transport, no API
 key, no environment variables):
