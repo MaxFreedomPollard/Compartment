@@ -100,3 +100,23 @@ mcp-publisher login github --token "$(gh auth token)" \
 
 Uploading ~250 MB of installers takes minutes; run it in the background rather
 than letting a foreground timeout kill it half way.
+
+## The directories mirror, they do not publish
+
+Those two checks above are the whole of the release. Once PyPI serves the new
+version and the registry entry carrying `isLatest` names it, there is nothing
+further to push anywhere.
+
+Everything on the **Listed on** line in the README - Glama, LobeHub, MCP
+Toplist, mcpservers.org, TensorBlock, Libraries.io, Snyk Advisor, deps.dev - is
+a mirror of one of those two, or of this repository. Each re-crawls on its own
+schedule and none of them is told when a release happens, so they update hours
+to days later, at their own pace and in no particular order. Snyk Advisor and
+deps.dev are reliably the last to move.
+
+A directory still showing the previous version the same day is therefore lag,
+and waiting is the correct response. It is worth knowing this in advance,
+because the failure it imitates - a release that published nothing - looks
+identical from the outside and is the one everybody checks for first. Re-running
+a workflow does not hurry a mirror along; nothing on our side does. Confirm the
+two sources that are ours, and if they are right, the release is right.
