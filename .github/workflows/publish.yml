@@ -46,17 +46,25 @@ jobs:
           skip-existing: true   # a re-run for an already-uploaded version is a no-op, not a failure
 
   # The old distribution name, kept alive as a tombstone that just depends on
-  # compartment. PyPI names cannot be deleted or redirected, so leaving
-  # engram-memory-vault frozen at 1.14.0 would silently strand everyone who
-  # installed it before the rename.
+  # compartment, so that `pip install engram-memory-vault` keeps working for
+  # anyone who installed it before the rename.
   #
   # This is a second PyPI project, so it needs its own trusted publisher on
   # PyPI - same owner, repo, workflow and environment as the one above, just
   # registered against engram-memory-vault.
+  #
+  # As of 2026-08-11 the engram-memory-vault project was deleted from PyPI, so
+  # both the project and its trusted publisher are gone and this job cannot
+  # authenticate. It is continue-on-error so that a retired tombstone can never
+  # turn a real release red. To bring it back, register a pending publisher at
+  # pypi.org/manage/account/publishing/ for project name engram-memory-vault
+  # (owner MaxFreedomPollard, repo Compartment, workflow publish.yml,
+  # environment pypi); the next release then re-claims the name by itself.
   publish-tombstone:
     runs-on: ubuntu-latest
     needs: build-and-publish        # never orphan the name it points at
     environment: pypi
+    continue-on-error: true         # see above: the name is currently unclaimed
     permissions:
       id-token: write
     steps:
