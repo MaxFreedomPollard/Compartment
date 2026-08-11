@@ -5,7 +5,8 @@
   "description": "Durable agentic memory, encrypted at rest. Fully offline: no network, no API key, no cloud.",
   "repository": {
     "url": "https://github.com/MaxFreedomPollard/Compartment",
-    "source": "github"
+    "source": "github",
+    "id": "1306651494"
   },
   "version": "4.6.0",
   "packages": [
