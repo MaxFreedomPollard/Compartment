@@ -1,6 +1,5 @@
 # Compartment
 
-[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
 [![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
 [![PyPI](https://img.shields.io/pypi/v/compartment)](https://pypi.org/project/compartment/)
 [![Downloads](https://static.pepy.tech/badge/compartment)](https://pepy.tech/project/compartment)
