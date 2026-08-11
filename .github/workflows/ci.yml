@@ -26,12 +26,23 @@ jobs:
       - name: Test suite with offline guard active
         env:
           COMPARTMENT_ASSERT_OFFLINE: "1"
-        run: pytest tests/ -q
+        run: pytest tests/ -q --cov=compartment --cov-report=xml --cov-append
 
       - name: Dashboard tests (loopback socket; offline guard intentionally off)
         # `compartment dash` binds 127.0.0.1 by design and is never run under the
         # offline guard, so its tests run here with the guard off.
-        run: pytest tests/test_dash.py -q
+        run: pytest tests/test_dash.py -q --cov=compartment --cov-report=xml --cov-append
+
+      - name: Coverage to Codecov
+        # Never fail the build on a reporting service: the offline guard and the
+        # test suite are the gate here, not the upload.
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: ./coverage.xml
+          flags: ${{ matrix.os }}-py${{ matrix.python }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   linux-panel:
     # Linux has no notification area worth relying on, so it draws the same

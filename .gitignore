@@ -22,3 +22,7 @@ tools/akc_source/
 
 # local drafts, never publish
 discord-post/
+
+# coverage run artifacts
+.coverage
+coverage.xml
