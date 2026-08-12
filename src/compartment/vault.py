@@ -184,9 +184,20 @@ class Vault:
         return (st.st_mtime_ns, st.st_size)
 
     def is_stale(self) -> bool:
-        """True if another process wrote the vault file since we read it."""
-        return (self._disk_state is not None and os.path.exists(self.path)
-                and self._stat_disk() != self._disk_state)
+        """True if the vault file changed under us since we read it.
+
+        A file that has been DELETED counts as changed. It used to count as
+        unchanged, because the existence test was ANDed into the answer, and
+        the consequence was silent and permanent: _journal appends with
+        open(path, "ab"), which recreates the file with journal frames and no
+        header, so every later write reported success into something no
+        version of this program can ever open again.
+        """
+        if self._disk_state is None:
+            return False
+        if not os.path.exists(self.path):
+            return True
+        return self._stat_disk() != self._disk_state
 
     def _with_file_lock(self, fn, timeout: float = 10.0):
         """Advisory single-writer lock: serializes journal appends and saves
@@ -194,6 +205,13 @@ class Vault:
         Cross-platform via platforms.FileLock (POSIX flock / Windows msvcrt)."""
         with FileLock(self.path + ".flock", timeout=timeout):
             if self.is_stale():
+                if not os.path.exists(self.path):
+                    raise VaultStaleError(
+                        f"Vault file {self.path} is gone (deleted or moved "
+                        "since it was opened). Refusing to write: an append "
+                        "here would create a headerless file that cannot be "
+                        "opened again. Restore it, or run `compartment init` "
+                        "for a new one.")
                 raise VaultStaleError(
                     "Vault file changed on disk (another process wrote "
                     "to it). Reopen the vault and retry.")
