@@ -172,3 +172,43 @@ def test_the_rrf_residue_breaks_ties_without_deciding_them():
     assert tie_a > tie_b, "agreement at the top should win a tie"
     clearly_better = R.evidence(0.9, 0.5, vec_rank=40, lex_rank=40)
     assert clearly_better > tie_a, "the residue must not outweigh real evidence"
+
+
+# ------------------------------------- matching the index that weighs it ---
+# information_coverage used a raw `in` test while the document frequency
+# behind every weight is measured by FTS5, which splits on non-alphanumerics.
+# The two disagreed in both directions.
+
+def test_a_trailing_question_mark_does_not_destroy_coverage():
+    """FTS counts "Airtable?" as `airtable` in the denominator, so a raw
+    substring test never credited it: ending a question with "?" halved the
+    lexical evidence for a perfect match."""
+    text = "Max decided to use Airtable for the ledger"
+    clean = R.information_coverage({"Max": 4.6, "Airtable": 4.6}, text)
+    asked = R.information_coverage({"Max": 4.6, "Airtable?": 4.6}, text)
+    assert asked == pytest.approx(clean)
+    assert asked > 0.99
+
+
+def test_punctuation_around_a_term_is_ignored():
+    for term in ("keys,", "(keys)", "keys.", '"keys"', "keys!"):
+        assert R.information_coverage({term: 1.0}, "the keys are here") > 0.99
+
+
+def test_a_term_is_not_credited_for_matching_inside_a_longer_word():
+    """"key" scored full conclusive-literal-evidence against "keyboard", so a
+    search for an SSH key was handed every memory mentioning a keychain."""
+    assert R.information_coverage({"key": 1.0}, "my keyboard is loud") == 0.0
+    assert R.information_coverage({"ssh": 2.0, "key": 3.0},
+                                  "the keychain is unlocked, sshd is off") == 0.0
+
+
+def test_a_multi_token_term_needs_all_of_its_tokens():
+    assert R.information_coverage({"hall-table": 1.0},
+                                  "the hall table is bare") > 0.99
+    assert R.information_coverage({"hall-table": 1.0},
+                                  "the hall is bare") == 0.0
+
+
+def test_matching_is_still_case_insensitive():
+    assert R.information_coverage({"Commit": 2.0}, "the COMMIT landed") > 0.99
