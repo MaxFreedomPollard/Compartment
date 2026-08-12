@@ -166,3 +166,43 @@ def test_importance_boosts_ranking(vault):
     # the high-importance memory should not rank below the low one
     imps = [h["importance"] for h in hits]
     assert imps[0] >= 0.5
+
+
+def test_document_frequencies_do_not_go_stale_after_a_write(vault):
+    """The lexical channel died silently mid-session. A term first asked for
+    when nothing matched it cached at df 0, term_information then dropped it,
+    and the whole literal-evidence half of ranking went quiet for that query -
+    for a server holding one vault open, that is the rest of the session."""
+    db = vault.db
+    assert db.doc_frequency("airtable") == 0          # cold, caches the 0
+    # Distinct enough that the near-duplicate guard keeps all three.
+    for text in ("The Airtable base holds the pen name roster",
+                 "Billing for Airtable renews in March",
+                 "Airtable rate limits are five requests a second"):
+        vault.store(text, caller="test")
+    assert db.doc_frequency("airtable") == 3
+    assert "Airtable" in db.term_information("Airtable roster")
+
+
+def test_document_frequencies_are_refreshed_after_a_delete(vault):
+    r = vault.store("a memory mentioning quokkas", caller="test")
+    assert vault.db.doc_frequency("quokkas") == 1
+    vault.forget(r["id"], caller="test")
+    assert vault.db.doc_frequency("quokkas") == 0
+
+
+def test_writing_into_a_deleted_vault_file_is_refused(vault, vault_path):
+    """is_stale() ANDed in an existence test, so a missing file read as "not
+    stale". _journal then appended with open(path, "ab"), recreating it as
+    journal frames with no header: every later write reported success into a
+    file nothing can ever open again."""
+    vault.store("a first memory that should survive", caller="test")
+    vault.save()
+    os.unlink(vault_path)
+
+    assert vault.is_stale() is True
+    with pytest.raises(Exception) as exc:
+        vault.store("written into a file that no longer exists", caller="test")
+    assert "gone" in str(exc.value).lower()
+    assert not os.path.exists(vault_path), \
+        "the refused write recreated the file anyway"

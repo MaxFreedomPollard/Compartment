@@ -114,9 +114,14 @@ class Store:
         self.conn = sqlite3.connect(":memory:", isolation_level=None,
                                     check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        # Document frequencies are read once per term per session: they change
-        # only when records are written, and a search asks for the same handful
-        # of terms repeatedly while scoring.
+        # Document frequencies are read once per term per session: a search
+        # asks for the same handful of terms repeatedly while scoring. They
+        # change whenever the FTS table does, so every insert and delete drops
+        # the cache (see _invalidate_df). Without that, a term first asked for
+        # when nothing matched it stayed at df 0 for the life of the process,
+        # term_information dropped it, and the whole lexical channel went
+        # silent for that query - for a server that holds one vault open for
+        # weeks, that is the rest of the session.
         self._df_cache: dict[str, int] = {}
         if image is not None:
             self.conn.deserialize(image)
@@ -216,7 +221,13 @@ class Store:
         )
         self.set_vectors(rid, allv)
         self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)", (rid, text))
+        self._invalidate_df()
         return rid
+
+    def _invalidate_df(self) -> None:
+        """Drop cached document frequencies. Called wherever FTS content
+        changes, which is the only thing df depends on."""
+        self._df_cache.clear()
 
     def get_row(self, record_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
@@ -262,6 +273,7 @@ class Store:
         # answering searches for text the vault no longer holds, which is the
         # one thing forget() must never do.
         self.conn.execute("DELETE FROM vecs WHERE id = ?", (record_id,))
+        self._invalidate_df()
         if cur.rowcount == 0:
             return False
         if shred:

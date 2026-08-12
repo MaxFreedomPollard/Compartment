@@ -77,6 +77,7 @@ against the previous scorer end to end:
 from __future__ import annotations
 
 import math
+import re
 import time
 
 # --- reading a cosine as a probability ---------------------------------------
@@ -171,13 +172,32 @@ def p_from_cosine(cos: float | None) -> float:
     return min(VEC_CERTAINTY_CAP, max(0.0, p))
 
 
+# Matching has to agree with the index that produced these weights. The
+# document frequency behind each weight is measured by FTS5, which splits on
+# non-alphanumerics, so the term "Airtable?" is counted as `airtable` in the
+# denominator. A raw `in` test then never credits it, and ending a question
+# with a question mark halved the lexical evidence for a perfect match.
+# The same test also matched inside longer words, so "key" scored full
+# conclusive-literal-evidence against "my keyboard is loud".
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _tokens(s: str) -> list[str]:
+    """Alphanumeric runs, lowercased: how FTS5's unicode61 tokenizer splits."""
+    return _TOKEN_RE.findall(s.lower())
+
+
 def information_coverage(term_info: dict[str, float], text: str) -> float:
     """Share of the query's self-information this text accounts for."""
     total = sum(term_info.values())
     if total <= 0:
         return 0.0
-    low = text.lower()
-    got = sum(w for t, w in term_info.items() if t.lower() in low)
+    present = set(_tokens(text))
+    got = 0.0
+    for t, w in term_info.items():
+        toks = _tokens(t)
+        if toks and all(tok in present for tok in toks):
+            got += w
     return min(_CERTAINTY_CAP, max(0.0, got / total))
 
 
