@@ -12,8 +12,8 @@
 
 Your AI agent forgets you the moment the session ends. Compartment ends
 that. With Compartment, your AI agent gets better with experience: it notices 
-and permanently stores every decision, preference and detail, encrypted,
-on your own computer. Hermes, Claude, OpenClaw and other AI Agents can
+and permanently stores every decision, preference and detail offline, encrypted,
+to your own computer. Hermes, Claude, OpenClaw and other AI Agents can
 install in one command. One fully-transferable memory store is shared
 simultaneously by all agents on the computer. 100% offline: no network, no
 API key, no cloud account, no telemetry. The embedding model ships inside
