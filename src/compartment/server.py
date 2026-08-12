@@ -576,7 +576,7 @@ def memory_forget(record_id: str, shred: bool = False) -> str:
 def memory_list_namespaces() -> str:
     """List namespaces and record counts."""
     try:
-        return json.dumps(_op(lambda v: v.db.namespaces()))
+        return json.dumps(_op(lambda v: v.namespaces(caller=_state["caller"])))
     except CryptoError as exc:
         raise _fail(exc) from exc
 
@@ -608,7 +608,7 @@ def memory_status() -> str:
         # the session works) and reloads a vault another process has written
         # (so the counts and audit head describe the current file, not a
         # superseded snapshot).
-        return json.dumps(_op(lambda v: v.status()))
+        return json.dumps(_op(lambda v: v.status(caller=_state["caller"])))
     except VaultLockedError as exc:
         # genuinely locked: say so, do not fail the call
         return json.dumps({"vault": _state["path"], "locked": True,

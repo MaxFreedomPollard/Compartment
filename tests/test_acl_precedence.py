@@ -244,3 +244,35 @@ def test_rw_only_configs_are_unaffected():
     with pytest.raises(AclError):
         cfg.grant_for("agent", "elsewhere")
     assert cfg.default_namespace("agent") == "mine"
+
+
+# -- 5. listing namespaces is a read, and reads go through the ACL -----------
+
+def test_listing_namespaces_only_shows_what_the_caller_may_read(vault):
+    """memory_list_namespaces called db.namespaces() raw, so a caller granted
+    one namespace still learned the name and record count of every other
+    namespace in the vault - the only read tool that skipped the filter."""
+    vault.store("an ordinary memory", caller="test", namespace="main")
+    vault.store("a private key lives here", caller="test", namespace="secret")
+    vault.config.callers["limited"] = {"default_namespace": "main",
+                                       "grants": {"main": "rw"}}
+
+    listed = {e["namespace"] for e in vault.namespaces(caller="limited")}
+    assert listed == {"main"}
+
+    everything = {e["namespace"] for e in vault.db.namespaces()}
+    assert "secret" in everything, "fixture did not create the second namespace"
+
+
+def test_status_scopes_its_namespace_list_to_the_caller(vault):
+    vault.store("an ordinary memory", caller="test", namespace="main")
+    vault.store("a private key lives here", caller="test", namespace="secret")
+    vault.config.callers["limited"] = {"default_namespace": "main",
+                                       "grants": {"main": "rw"}}
+
+    scoped = {e["namespace"] for e in vault.status(caller="limited")["namespaces"]}
+    assert scoped == {"main"}
+    # The local operator holds the passphrase, so an unscoped call still sees
+    # the whole vault: that is what `compartment status` prints.
+    unscoped = {e["namespace"] for e in vault.status()["namespaces"]}
+    assert "secret" in unscoped

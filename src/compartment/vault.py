@@ -703,6 +703,18 @@ class Vault:
         return out
 
     @_synchronized
+    def namespaces(self, caller: str) -> list[dict]:
+        """Namespaces this caller may read, with record counts.
+
+        Every other read goes through the ACL; this one used to hand back
+        db.namespaces() raw, so a caller granted one namespace still learned
+        the name and record count of every other namespace in the vault.
+        """
+        self._require_open()
+        allowed = set(self._readable_namespaces(caller))
+        return [e for e in self.db.namespaces() if e["namespace"] in allowed]
+
+    @_synchronized
     def search(self, query: str, caller: str, namespace: str | None = None,
                tags: list[str] | None = None, top_k: int | None = None,
                since: float | None = None, until: float | None = None,
@@ -1031,7 +1043,10 @@ class Vault:
     # ---------------------------------------------------------------- status
 
     @_synchronized
-    def status(self) -> dict:
+    def status(self, caller: str | None = None) -> dict:
+        """Vault status. Pass `caller` to scope the namespace list to what that
+        caller may read; the local operator (who holds the passphrase) calls it
+        without one and sees the whole vault."""
         self._require_open()
         n = self.db.count()
         dim = int(self.header.model["dim"])
@@ -1053,7 +1068,10 @@ class Vault:
             "organic_records": organic,
             "seeded_records": n - organic,
             "relations": self.db.relation_count(),
-            "namespaces": self.db.namespaces(),
+            "namespaces": (self.db.namespaces() if caller is None else
+                           [e for e in self.db.namespaces()
+                            if e["namespace"] in
+                            set(self._readable_namespaces(caller))]),
             "packs": self.pack_list(),
             "model": self.header.model,
             "index": self.index.kind,
