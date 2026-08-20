@@ -77,12 +77,24 @@ def test_an_unknown_target_never_runs_anything(monkeypatch):
     assert called == []
 
 
+def _connects(monkeypatch, target):
+    """A machine where `target` is installed and the wiring lands."""
+    seen = {"n": 0}
+
+    def status(_vault):
+        seen["n"] += 1
+        return {target: seen["n"] > 1}      # not wired before, wired after
+    monkeypatch.setattr(menubar, "agent_present", lambda t: True)
+    monkeypatch.setattr(menubar, "integration_status", status)
+
+
 def test_it_runs_the_documented_command(monkeypatch):
     seen = {}
 
     def fake_run(args, timeout=60):
         seen["args"] = args
         return 0, "registered."
+    _connects(monkeypatch, "claude")
     monkeypatch.setattr(menubar, "_run", fake_run)
     ok, _ = menubar.integrate("/path/to/v.vault", "claude")
     assert ok is True
@@ -93,7 +105,7 @@ def test_it_runs_the_documented_command(monkeypatch):
 
 
 def test_success_tells_the_user_to_restart_the_agent(monkeypatch):
-    monkeypatch.setattr(menubar, "integration_status", lambda v: {})
+    _connects(monkeypatch, "claude")
     monkeypatch.setattr(menubar, "_run", lambda *a, **k: (0, "registered."))
     ok, msg = menubar.integrate("/v", "claude")
     assert ok is True
@@ -103,12 +115,24 @@ def test_success_tells_the_user_to_restart_the_agent(monkeypatch):
 def test_a_missing_agent_is_reported_as_normal_not_as_failure(monkeypatch):
     """Not having Hermes installed is not an error, and must not read as
     one: the wiring that can be done is still done."""
+    monkeypatch.setattr(menubar, "agent_present", lambda t: False)
     monkeypatch.setattr(menubar, "integration_status", lambda v: {})
     monkeypatch.setattr(menubar, "_run",
                         lambda *a, **k: (0, "hermes not found; finish with…"))
     ok, msg = menubar.integrate("/v", "hermes")
     assert ok is True
     assert "Could not find Hermes" in msg
+
+
+def test_the_verdict_is_never_read_out_of_the_commands_prose(monkeypatch):
+    """"not found" appears in the output of a run that connected an agent
+    perfectly, because `integrate claude` wires two programs and reports on
+    both. What the panel says comes from the agent's own configuration."""
+    _connects(monkeypatch, "claude")
+    monkeypatch.setattr(menubar, "_run", lambda *a, **k: (
+        0, "Claude Code CLI not found; register manually with: ..."))
+    ok, msg = menubar.integrate("/v", "claude")
+    assert ok is True and "Could not find" not in msg
 
 
 def test_a_real_failure_surfaces_its_reason(monkeypatch):
@@ -139,6 +163,16 @@ def test_wiring_gets_a_longer_leash_than_a_status_call(monkeypatch):
 
 
 # ----------------------------------------------------------------- the panel
+
+def test_the_tray_panel_offers_the_first_run_step(monkeypatch):
+    """With no vault there is nothing to unlock, so the Unlock control is
+    correctly hidden - which used to leave the panel with no control at all
+    and a pointer to a terminal command the app install never provided."""
+    kinds = [k for k, _ in systray.panel_rows(_state(exists=False, locked=True,
+                                                     recent=[]))]
+    assert "create" in kinds
+    assert "unlock" not in kinds and "lock" not in kinds
+
 
 def test_the_tray_panel_has_a_button_per_agent():
     rows = systray.panel_rows(_state())

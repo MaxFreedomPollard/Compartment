@@ -311,6 +311,7 @@ def read_settings(vault: str) -> dict:
         "capture_hook": hook,
         "search_starter_facts": bool(
             cfg.settings.get("search_starter_facts", True)),
+        "expire_memories": bool(cfg.settings.get("expire_memories", True)),
         "auto_lock_minutes": int(cfg.settings.get("auto_lock_minutes", 30)),
     }
 
@@ -327,6 +328,8 @@ def set_setting(vault: str, key: str, value) -> dict:
     cfg = VaultConfig.load(vault)
     if key == "search_starter_facts":
         cfg.settings["search_starter_facts"] = bool(value)
+    elif key == "expire_memories":
+        cfg.settings["expire_memories"] = bool(value)
     elif key == "auto_lock_minutes":
         cfg.settings["auto_lock_minutes"] = int(value)
     else:
@@ -343,13 +346,15 @@ def fetch_state(vault: str) -> dict:
              "integrations": integration_status(vault),
              "settings": {"capture_hook": False,
                           "search_starter_facts": True,
+                          "expire_memories": True,
                           "auto_lock_minutes": 30}}
     try:
         state["settings"] = read_settings(vault)
     except Exception as exc:                            # noqa: BLE001
         state["error"] = str(exc)
     if not state["exists"]:
-        state["error"] = "no vault yet - run: compartment init"
+        state["error"] = ("no vault yet - choose a passphrase below to "
+                          "create one")
         return state
 
     status = _json_cmd(vault, "status")
@@ -408,6 +413,52 @@ def unlock_vault(vault: str, passphrase: str) -> tuple[bool, str]:
     if "keyfile" in low:
         return False, "needs its 2FA keyfile - plug it in and try again"
     return False, (out[:120] or "could not unlock")
+
+
+def create_vault(vault: str, passphrase: str, repeat: str) -> tuple[bool, str]:
+    """Create the vault from the panel. Returns (ok, what to show the user).
+
+    The first-run step that was missing. Someone who installs the .pkg gets
+    Compartment.app in /Applications and nothing at all on their PATH, so
+    "no vault yet - run: compartment init" named a command their Terminal
+    does not have; and the panel's only other control, Unlock, is hidden
+    while there is no vault to unlock. Between the two, a fresh install had
+    no reachable way to get a vault.
+
+    `--no-app` because the app asking for this IS the app: without it `init`
+    loads the login agent and starts a second copy, which then has to fight
+    this one for the menu bar. Everything else `init` does on the way -
+    seeding the starting memories, storing the session so the vault comes
+    back unlocked, wiring the agents already installed here - is wanted.
+
+    Both entries are compared here, where the user can see them, and the one
+    they agreed on goes down the child's stdin: a command line is readable by
+    every process on the machine.
+    """
+    if not passphrase:
+        return False, "choose a passphrase"
+    if passphrase != repeat:
+        return False, "the two entries do not match"
+    if os.path.exists(vault):
+        return False, "there is already a vault here"
+    try:
+        p = subprocess.run(
+            [*_cli_argv(), "--vault", vault, "init", "--passphrase-stdin",
+             "--no-app"],
+            input=passphrase + "\n", capture_output=True, text=True,
+            timeout=900, encoding="utf-8", errors="replace",
+            env={**os.environ, "PATH": user_path()})
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
+    if p.returncode == 0:
+        return True, "Vault created, and open. Nothing else to set up."
+    low = out.lower()
+    if "unrecognized arguments" in low or low.startswith("usage:"):
+        return False, "internal error: could not run the CLI"
+    if "already exists" in low:
+        return False, "there is already a vault here"
+    return False, (out[:160] or "could not create the vault")
 
 
 def change_passphrase(vault: str, new: str, repeat: str) -> tuple[bool, str]:
@@ -498,6 +549,51 @@ def integration_status(vault: str) -> dict:
     return out
 
 
+def agent_present(target: str, path: str | None = None) -> bool:
+    """Whether this agent is installed on this machine at all.
+
+    Kept separate from `integration_status` because the two questions have
+    different answers and the panel needs both: `integrate hermes` writes the
+    provider plugin whether or not Hermes is installed, so a config file we
+    just wrote proves nothing about the program that is supposed to read it.
+
+    Generous on purpose: a CLI on PATH, or the directory the agent keeps its
+    own configuration in. Wiring an agent that is not installed writes a
+    config nobody will ever read, and missing one that is installed leaves
+    exactly the unpressed button the Connect row is here to avoid.
+
+    `path` defaults to the PATH a terminal on this machine would have, which
+    is not the one this process has: a login item inherits launchd's four
+    system directories, and every agent CLI worth finding installs somewhere
+    else.
+
+    It lives here, in the module with no heavy imports, and not beside the
+    rest of `integrate` in the CLI. The status bar app may import this one;
+    importing the CLI for a shutil.which would cost it numpy for as long as
+    it runs, and this is an app that is meant to be a quiet neighbour.
+
+    Never raises. Not being able to tell must not stop the button working.
+    """
+    if path is None:
+        path = user_path()
+    try:
+        from . import claude_desktop
+        if target == "claude":
+            return (bool(shutil.which("claude", path=path))
+                    or claude_desktop.present())
+        if target == "hermes":
+            return (bool(shutil.which("hermes", path=path))
+                    or Path(os.environ.get("HERMES_HOME",
+                                           Path.home() / ".hermes")).is_dir())
+        if target == "openclaw":
+            return (bool(shutil.which("openclaw", path=path))
+                    or Path(os.environ.get("OPENCLAW_HOME",
+                                           Path.home() / ".openclaw")).is_dir())
+    except Exception:                                   # noqa: BLE001
+        return False
+    return False
+
+
 def connected_summary(vault: str) -> str:
     """One line naming the agents already wired, for the panel."""
     names = [n for t, n in INTEGRATION_TARGETS
@@ -518,20 +614,36 @@ def integrate(vault: str, target: str) -> tuple[bool, str]:
     Wiring an agent edits that agent's own configuration, so this reports
     what happened rather than assuming - a Claude Code CLI that is not
     installed is a normal outcome, not an error to hide.
+
+    What it reports is read back off the machine afterwards, never scraped
+    out of the command's own prose. `integrate claude` wires two separate
+    programs, and a Claude Desktop that was found, registered and backed up
+    perfectly still leaves the line "Claude Code CLI not found" in the
+    output. Searching that output for "not found" therefore answered a click
+    with "Could not find Claude on this machine" on machines where Claude was
+    installed, running, and by then connected - the one thing the button
+    exists to tell the truth about.
     """
     if target not in dict(INTEGRATION_TARGETS):
         return False, f"unknown target {target!r}"
     name = dict(INTEGRATION_TARGETS)[target]
+    present = agent_present(target)
     already = integration_status(vault).get(target, False)
     code, out = _run([*_cli_argv(), "--vault", vault, "integrate", target],
                      timeout=300)
     text = " ".join(out.split())
     if code != 0:
         return False, (text[:200] or f"could not connect {name}")
-    if "not found" in text.lower():
+    # Asked before the wiring ran, because `integrate` writes some of the
+    # configuration either way: after the fact there is no telling an agent
+    # that is here from one whose config file we just created for it.
+    if not present:
         return True, (f"Could not find {name} on this machine. Everything "
                       f"that does not need it is set up; install {name} and "
                       f"click again.")
+    if not integration_status(vault).get(target, False):
+        return False, (f"{name} is installed here, but the registration did "
+                       f"not land. {text[-160:]}".strip())
     # Wiring is idempotent, so the button always runs it: someone clicking it
     # a second time usually has a reason, like a vault that has moved. What
     # changes is what it says afterwards, because "connected" in answer to a
@@ -547,7 +659,7 @@ def summarise(state: dict) -> str:
     if not state["exists"]:
         return "no vault"
     if state["locked"]:
-        return "locked - unlock in Terminal: compartment unlock"
+        return "locked - enter your passphrase to unlock"
     return (f"{state['records']:,} memories · "
             f"{state['organic']:,} stored by you")
 
@@ -1287,6 +1399,10 @@ def run(vault: str | None = None, show: bool = False,
             self.change_note = None
             self.connect_note = None  # what the last Connect button reported
             self.connect_busy = None  # the agent being wired right now
+            self.new_pw = None        # only while there is no vault yet
+            self.new_repeat = None
+            self.create_note = None   # "the two entries do not match", etc
+            self.creating = False     # the vault is being made right now
             return self
 
         # ---- building the popover contents -----------------------------
@@ -1363,18 +1479,52 @@ def run(vault: str | None = None, show: bool = False,
             if self.changing_pw and st["exists"] and not st["locked"]:
                 return self.buildChangeBody(st)
             views = []
+            # "locked" over an empty disk describes a vault that is not
+            # there, and sends the user looking for the Unlock control that
+            # sentence implies.
+            if not st["exists"]:
+                badge = "not set up"
+            else:
+                badge = "locked" if st["locked"] else "unlocked"
             title = row(label("Compartment", 15, bold=True),
-                        label("locked" if st["locked"] else "unlocked", 11,
-                              secondary=True))
+                        label(badge, 11, secondary=True))
             views.append(title)
             views.append(label(summarise(st), 11, secondary=True))
             if st["error"]:
                 views.append(label(st["error"], 11, secondary=True, wrap=True))
 
-            # Locking and unlocking belong here. The vault is the product, and
-            # opening it should not mean finding a terminal.
+            # Making the vault, and then opening it, belong here. The vault
+            # is the product, and neither should mean finding a terminal -
+            # least of all on an install that never put a `compartment`
+            # command in one.
             self.pw_field = None
-            if st["exists"] and st["locked"]:
+            self.new_pw = self.new_repeat = None
+            if not st["exists"]:
+                def newfield(placeholder):
+                    f = NSSecureTextField.alloc().initWithFrame_(
+                        NSMakeRect(0, 0, CONTENT_WIDTH, 24))
+                    f.setPlaceholderString_(placeholder)
+                    f.setTarget_(self)
+                    f.setAction_("createVault:")      # Return creates too
+                    return f
+
+                self.new_pw = newfield("Choose a passphrase")
+                self.new_repeat = newfield("Repeat it")
+                views.append(row(self.new_pw))
+                views.append(row(self.new_repeat))
+                create_b = NSButton.buttonWithTitle_target_action_(
+                    "Create vault", self, "createVault:")
+                create_b.setKeyEquivalent_("\r")
+                create_b.setEnabled_(not self.creating)
+                views.append(row(create_b, _spacer()))
+                if self.create_note:
+                    views.append(label(self.create_note, 11, bold=True,
+                                       wrap=True))
+                views.append(label("There is no recovery phrase - if you "
+                                   "forget this, the memories are "
+                                   "unrecoverable.", 10, secondary=True,
+                                   wrap=True))
+            elif st["locked"]:
                 field = NSSecureTextField.alloc().initWithFrame_(
                     NSMakeRect(0, 0, CONTENT_WIDTH - 92, 24))
                 field.setPlaceholderString_("Passphrase")
@@ -1418,6 +1568,16 @@ def run(vault: str | None = None, show: bool = False,
             views.append(row(label("Search starter facts"), _spacer(),
                              self.starter_switch))
 
+            # A memory stored with a last day on it is removed once that day
+            # has gone. Off, the date is recorded and shown and nothing is
+            # ever deleted. Nothing without an expiry is touched either way.
+            self.expire_switch = NSSwitch.alloc().init()
+            self.expire_switch.setState_(1 if s["expire_memories"] else 0)
+            self.expire_switch.setTarget_(self)
+            self.expire_switch.setAction_("toggleExpire:")
+            views.append(row(label("Forget memories when they expire"),
+                             _spacer(), self.expire_switch))
+
             seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
                 [auto_lock_label(m) for m in AUTO_LOCK_CHOICES], 0, self,
                 "changeAutoLock:")
@@ -1459,7 +1619,10 @@ def run(vault: str | None = None, show: bool = False,
 
             views.append(label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,
                                secondary=True))
-            if st["locked"]:
+            if not st["exists"]:
+                views.append(label("nothing yet - create the vault above", 11,
+                                   secondary=True))
+            elif st["locked"]:
                 views.append(label("unlock the vault to see them", 11,
                                    secondary=True))
             elif not st["recent"]:
@@ -1595,6 +1758,10 @@ def run(vault: str | None = None, show: bool = False,
             set_setting(vault_path, "search_starter_facts", bool(sender.state()))
             self.rebuild()
 
+        def toggleExpire_(self, sender):
+            set_setting(vault_path, "expire_memories", bool(sender.state()))
+            self.rebuild()
+
         def changeAutoLock_(self, sender):
             idx = int(sender.selectedSegment())
             set_setting(vault_path, "auto_lock_minutes", AUTO_LOCK_CHOICES[idx])
@@ -1631,6 +1798,46 @@ def run(vault: str | None = None, show: bool = False,
                 msg = f"could not connect: {exc}"
             self.connect_busy = None
             self.connect_note = msg
+            self.rebuild()
+
+        def createVault_(self, sender):
+            """Say it is working, then work.
+
+            Seeding the starting memories and wiring the agents already on
+            the machine takes a few seconds, and AppKit paints nothing while
+            a handler runs. Painting first and working on the next turn of
+            the run loop is what stops the only first-run button in the app
+            from looking dead while it succeeds."""
+            if self.creating or self.new_pw is None or self.new_repeat is None:
+                return
+            pw = str(self.new_pw.stringValue() or "")
+            rep = str(self.new_repeat.stringValue() or "")
+            if not pw or pw != rep:
+                self.create_note = ("choose a passphrase" if not pw
+                                    else "the two entries do not match")
+                self.rebuild()
+                return
+            self.creating = True
+            self.create_note = "Creating the vault…"
+            self.rebuild()
+            self.performSelector_withObject_afterDelay_("runCreate:", pw, 0.05)
+
+        def runCreate_(self, passphrase):
+            pw = str(passphrase)
+            try:
+                _ok, note = create_vault(vault_path, pw, pw)
+            except Exception as exc:            # noqa: BLE001
+                # An exception raised inside an action is swallowed by the
+                # run loop, and the button then genuinely does nothing.
+                note = f"could not create the vault: {exc}"
+            self.creating = False
+            self.create_note = note
+            # Clear the fields whichever way it went: a passphrase must not
+            # sit on screen after the attempt. rebuild() replaces them, and
+            # on success there is no form to come back to at all.
+            for f in (self.new_pw, self.new_repeat):
+                if f is not None:
+                    f.setStringValue_("")
             self.rebuild()
 
         def refresh_(self, sender):

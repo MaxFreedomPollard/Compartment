@@ -34,7 +34,7 @@ def test_read_settings_defaults_for_a_fresh_vault(vault_path, monkeypatch):
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
     s = menubar.read_settings(vault_path)
     assert s == {"capture_hook": False, "search_starter_facts": True,
-                 "auto_lock_minutes": 30}
+                 "expire_memories": True, "auto_lock_minutes": 30}
 
 
 def test_set_setting_persists_to_the_config_file(vault_path, monkeypatch):
@@ -59,6 +59,21 @@ def test_settings_work_on_a_locked_vault(vault_path, monkeypatch):
     Vault.create(vault_path, PASS, creator="t").lock()
     menubar.set_setting(vault_path, "search_starter_facts", False)
     assert menubar.read_settings(vault_path)["search_starter_facts"] is False
+
+
+def test_the_expiry_toggle_is_on_by_default_and_persists(vault_path,
+                                                        monkeypatch):
+    """The one setting this release adds. An expiry the user took the trouble
+    to set should do something, so it starts on; turning it off makes the
+    date a label and deletes nothing."""
+    from compartment import claude_hooks
+    monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
+    assert menubar.read_settings(vault_path)["expire_memories"] is True
+    menubar.set_setting(vault_path, "expire_memories", False)
+    assert VaultConfig.load(vault_path).settings["expire_memories"] is False
+    assert menubar.read_settings(vault_path)["expire_memories"] is False
+    menubar.set_setting(vault_path, "expire_memories", True)
+    assert menubar.read_settings(vault_path)["expire_memories"] is True
 
 
 def test_unknown_setting_is_rejected(vault_path, monkeypatch):
@@ -89,8 +104,105 @@ def test_fetch_state_reports_a_missing_vault_instead_of_raising(tmp_path,
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
     st = menubar.fetch_state(str(tmp_path / "nope.vault"))
     assert st["exists"] is False and st["recent"] == []
-    assert "compartment init" in st["error"]
     assert menubar.summarise(st) == "no vault"
+    # It must point at the control that is on screen. The .pkg installs
+    # Compartment.app and puts nothing on PATH, so "run: compartment init"
+    # named a command the machine reading it does not have.
+    assert "compartment init" not in st["error"]
+    assert "passphrase" in st["error"]
+
+
+# --------------------------------------------------------- creating a vault
+
+def test_creating_a_vault_needs_a_passphrase(tmp_path):
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), "", "")
+    assert ok is False and "passphrase" in msg
+
+
+def test_the_two_entries_have_to_match(tmp_path):
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), "one", "two")
+    assert ok is False and "do not match" in msg
+
+
+def test_an_existing_vault_is_never_overwritten(vault_path):
+    open(vault_path, "wb").write(b"x")
+    ok, msg = menubar.create_vault(vault_path, PASS, PASS)
+    assert ok is False and "already a vault" in msg
+
+
+def test_the_passphrase_goes_down_stdin_and_never_into_argv(tmp_path,
+                                                            monkeypatch):
+    """A command line is readable by every process on the machine."""
+    seen = {}
+
+    class _Done:
+        returncode, stdout, stderr = 0, "vault ready", ""
+
+    def fake(args, **kw):
+        seen["args"], seen["input"] = args, kw.get("input")
+        return _Done()
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), PASS, PASS)
+    assert ok is True and msg
+    assert "--passphrase-stdin" in seen["args"]
+    assert seen["input"].strip() == PASS
+    assert PASS not in " ".join(seen["args"])
+    assert "init" in seen["args"]
+
+
+def test_creating_from_the_app_does_not_start_a_second_app(tmp_path,
+                                                           monkeypatch):
+    """`init` loads the login agent and starts the status bar app. The app
+    asking for this IS the status bar app, and two copies then fight over
+    one menu bar."""
+    seen = {}
+
+    class _Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda args, **kw: (seen.update(args=args), _Done())[1])
+    menubar.create_vault(str(tmp_path / "v.vault"), PASS, PASS)
+    assert "--no-app" in seen["args"]
+
+
+def test_a_failed_creation_says_why(tmp_path, monkeypatch):
+    class _Failed:
+        returncode, stdout, stderr = 1, "", "disk is full"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Failed())
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), PASS, PASS)
+    assert ok is False and "disk is full" in msg
+
+
+def test_a_creation_that_cannot_run_the_cli_says_so(tmp_path, monkeypatch):
+    """argparse's usage line is about our command line, never about the
+    vault - the panel used to read a vault diagnosis out of one."""
+    class _Usage:
+        returncode, stdout, stderr = 2, "", "usage: compartment [-h] ..."
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Usage())
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), PASS, PASS)
+    assert ok is False and "could not run the CLI" in msg
+
+
+def test_creating_a_vault_really_works(tmp_path, monkeypatch):
+    """End to end, through the real CLI: the panel's button is the only way
+    in on an install that never put `compartment` on PATH, so this path is
+    not allowed to be only unit-tested."""
+    from compartment import claude_hooks
+    monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home" / ".hermes"))
+    monkeypatch.setenv("OPENCLAW_HOME", str(tmp_path / "home" / ".openclaw"))
+    vault = str(tmp_path / "home" / ".compartment" / "memory.vault")
+    ok, msg = menubar.create_vault(vault, PASS, PASS)
+    assert ok is True, msg
+    assert pathlib.Path(vault).exists()
+    st = menubar.fetch_state(vault)
+    assert st["exists"] is True and st["locked"] is False
+    assert st["records"] > 0
 
 
 def test_fetch_state_uses_the_cli(vault_path, monkeypatch):

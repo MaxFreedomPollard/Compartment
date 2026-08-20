@@ -20,10 +20,11 @@ ENTRY_ARGS = ["--vault", "/v/memory.vault", "--caller", "claude-desktop",
 
 # ------------------------------------------------------------------ location
 
-def test_the_config_path_is_the_apps_own_per_platform(monkeypatch, tmp_path):
+def test_the_config_path_is_the_apps_own_per_platform(
+        monkeypatch, tmp_path, real_claude_desktop_config_path):
     monkeypatch.setattr(claude_desktop.Path, "home",
                         classmethod(lambda cls: tmp_path))
-    p = claude_desktop.config_path()
+    p = real_claude_desktop_config_path()
     assert p.name == "claude_desktop_config.json"
     assert p.parent.name == "Claude"
     if sys.platform == "darwin":
@@ -31,11 +32,12 @@ def test_the_config_path_is_the_apps_own_per_platform(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX layout")
-def test_linux_honours_xdg_config_home(monkeypatch, tmp_path):
+def test_linux_honours_xdg_config_home(monkeypatch, tmp_path,
+                                       real_claude_desktop_config_path):
     if sys.platform == "darwin":
         pytest.skip("macOS uses Application Support")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
-    assert claude_desktop.config_path() == (
+    assert real_claude_desktop_config_path() == (
         tmp_path / "cfg" / "Claude" / "claude_desktop_config.json")
 
 
@@ -124,3 +126,18 @@ def test_unregister_removes_only_ours(tmp_path):
     assert json.loads(cfg.read_text())["mcpServers"] == {
         "someone-else": {"command": "theirs"}}
     assert claude_desktop.unregister(cfg) is False
+
+
+def test_the_suite_never_writes_the_real_claude_desktop_config(
+        tmp_path, real_claude_desktop_config_path):
+    """A guard on the guard.
+
+    `integrate claude` writes Claude Desktop's config, and for several
+    releases the suite wrote the developer's own - pointing a real
+    installation at a pytest temp vault that no longer existed by the time
+    the run finished. Nothing failed, and nothing said so.
+    """
+    from compartment import claude_desktop
+    here = claude_desktop.config_path()
+    assert here != real_claude_desktop_config_path()
+    assert "pytest" in str(here)

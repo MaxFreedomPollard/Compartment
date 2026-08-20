@@ -269,8 +269,30 @@ def executable() -> str:
 
     An absolute path is better than the bare name, because a GUI application
     launched from the Dock does not inherit the shell PATH that put
-    `compartment` on it.
+    `compartment` on it. On a Mac where the .app is the whole install there
+    is no `compartment` on any PATH to inherit either: the installer puts
+    Compartment.app in /Applications and nothing anywhere else, so falling
+    back to the bare name wrote a config naming a command that does not
+    exist on that machine - registered, reported as connected, and dead on
+    the first launch.
+
+    The console script beside the running interpreter is the one that is
+    certainly there. Inside Compartment.app that is the copy sealed in the
+    bundle, which is exactly the one that should be answering.
+
+    Never anything from a bundle's MacOS folder. The launcher there is named
+    `Compartment`, macOS filesystems are case-insensitive by default, and a
+    config pointed at it would start the menu bar app every time a client
+    tried to open a memory server.
     """
+    prefix = Path(sys.prefix)
+    for c in (prefix / "bin" / NAME, prefix / "Scripts" / f"{NAME}.exe",
+              Path(sys.executable).parent / NAME):
+        try:
+            if c.is_file() and c.parent.name != "MacOS":
+                return str(c)
+        except OSError:
+            pass
     return shutil.which(NAME) or NAME
 
 

@@ -253,3 +253,46 @@ def test_status_has_a_row_for_every_client():
     rows = clients.status()
     assert len(rows) == len(clients.CLIENTS)
     assert {r["key"] for r in rows} == set(clients.CLIENTS)
+
+
+# ---------------------------------------------------------- the command itself
+
+def test_the_written_command_is_an_absolute_path(tmp_path, monkeypatch):
+    """A GUI client launched from the Dock inherits launchd's PATH, and an
+    install that is only Compartment.app never put `compartment` on any PATH
+    for it to inherit. A bare name there names nothing."""
+    import sys
+    binf = tmp_path / "bin"
+    binf.mkdir()
+    (binf / "compartment").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(clients.shutil, "which", lambda n: None)
+    assert clients.executable() == str(binf / "compartment")
+
+
+def test_the_written_command_is_never_the_app_launcher(tmp_path, monkeypatch):
+    """Inside Compartment.app the launcher sits in MacOS/ and is called
+    `Compartment`; macOS filesystems are case-insensitive, so looking beside
+    the interpreter for "compartment" finds it. A client pointed there would
+    start the menu bar app instead of a memory server."""
+    import sys
+    macos = tmp_path / "Compartment.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "compartment").write_text("#!/bin/sh\n", encoding="utf-8")
+    (macos / "python3").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(macos / "python3"))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(clients.shutil, "which",
+                        lambda n: "/usr/local/bin/compartment")
+    assert clients.executable() == "/usr/local/bin/compartment"
+
+
+def test_the_command_falls_back_to_path_then_to_the_bare_name(tmp_path,
+                                                              monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "nowhere"))
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "nowhere" / "python"))
+    monkeypatch.setattr(clients.shutil, "which", lambda n: "/opt/bin/compartment")
+    assert clients.executable() == "/opt/bin/compartment"
+    monkeypatch.setattr(clients.shutil, "which", lambda n: None)
+    assert clients.executable() == "compartment"

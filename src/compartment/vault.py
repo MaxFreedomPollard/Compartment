@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from .home import env, home
 import base64
+import calendar
 import datetime
 import hmac
 import json
@@ -111,7 +112,8 @@ def strip_provenance(text: str) -> str:
     return PROVENANCE_RE.sub("", text.rstrip()).rstrip()
 
 
-def with_provenance(text: str, source: str | None, discovered: str) -> str:
+def with_provenance(text: str, source: str | None, discovered: str,
+                    expires: str | None = None) -> str:
     """Append the succinct provenance clause a memory carries in its own text.
 
     Kept INSIDE the text, not only beside it, so a fact stays self-describing
@@ -126,7 +128,94 @@ def with_provenance(text: str, source: str | None, discovered: str) -> str:
     if PROVENANCE_RE.search(body):
         return body
     parts = [p for p in ((source or "").strip(), discovered) if p]
+    # The expiry rides in the same clause, last, so the claim carries its own
+    # shelf life wherever it ends up - exported to JSONL, pasted into a
+    # document, read by something that never saw this schema. A price that
+    # was true for a fortnight should not read as a standing truth just
+    # because it left the vault. Last so the regex above still finds a date
+    # immediately before the bracket and the clause stays idempotent.
+    if expires:
+        parts.append(f"until {expires}")
     return f"{body} [{', '.join(parts)}]" if parts else body
+
+
+#: `2w`, `10d`, `3m`, `1y`. The compact form exists because the shortest way
+#: to say a thing is the one that gets used: an expiry that costs a sentence
+#: of ISO arithmetic is an expiry nobody sets, and the memory goes in
+#: permanent instead.
+_DURATION_RE = re.compile(r"^(\d{1,4})\s*([dwmy]?)$", re.IGNORECASE)
+
+
+def _add_months(day: datetime.date, months: int) -> datetime.date:
+    """Calendar months, not thirty-day blocks.
+
+    Somebody who says a lease runs `3m` from the 20th means the 20th, and a
+    ninety-day approximation quietly moves it. The last day of a short month
+    clamps rather than rolling into the next one, so `1m` from 31 January is
+    the end of February and never 3 March.
+    """
+    m = day.month - 1 + months
+    year = day.year + m // 12
+    month = m % 12 + 1
+    return datetime.date(year, month,
+                         min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def expiry_date(value, today: datetime.date | None = None,
+                strict: bool = True) -> str | None:
+    """The last day a fact is true, as YYYY-MM-DD. None means permanent.
+
+    Accepts the day itself (`2026-09-03`) or how long from now it lasts, in
+    as few characters as it can be said: `14d`, `2w`, `3m`, `1y`, or a bare
+    number for days. Inclusive, so `2w` is live through the fourteenth day.
+    Months and years are calendar ones: `3m` from the 20th is the 20th.
+
+    Unparseable input is REFUSED, and so is a day already past. This is the
+    one date field where being wrong deletes something: `discovered` can
+    afford to keep whatever the caller meant and let a human read it later,
+    because nothing acts on it. A garbled expiry either never fires or fires
+    at once, and the second one takes the memory with it.
+
+    `strict=False` accepts a day that has gone, for the paths that RESTORE a
+    memory rather than author one. An import is repeating a date somebody
+    else already chose, and refusing it there would turn one stale line into
+    a failed restore of the whole file.
+    """
+    if value in (None, ""):
+        return None
+    today = today or datetime.date.today()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        s = str(int(value))
+    else:
+        s = str(value).strip()
+    if not s:
+        return None
+    m = _DURATION_RE.match(s)
+    if m:
+        n = int(m.group(1))
+        if n <= 0:
+            raise CryptoError(
+                f"expires={value!r}: a duration has to be at least one day")
+        unit = (m.group(2) or "d").lower()
+        if unit == "m":
+            return _add_months(today, n).isoformat()
+        if unit == "y":
+            return _add_months(today, n * 12).isoformat()
+        return (today + datetime.timedelta(
+            days=n * (7 if unit == "w" else 1))).isoformat()
+    try:
+        day = datetime.date.fromisoformat(s[:10])
+    except ValueError:
+        raise CryptoError(
+            f"expires={value!r} is not a date or a duration. Give the last "
+            f"day it is true (2026-09-03), or how long it lasts (14d, 2w, "
+            f"3m, 1y).") from None
+    if day < today and strict:
+        raise CryptoError(
+            f"expires={day.isoformat()} has already passed. Storing a memory "
+            f"that is already expired would only delete it again; leave the "
+            f"expiry off, or give a day that has not gone.")
+    return day.isoformat()
 
 
 def is_seeded(tags_json: str) -> bool:
@@ -172,6 +261,9 @@ class Vault:
         self._embedder: Embedder | None = None
         self._locked = False
         self._id_by_ikey: dict[int, str] = {}
+        #: When the expiry sweep last ran. Zero means never, so the first read
+        #: after opening always sweeps.
+        self._last_expiry_sweep = 0.0
         self._disk_state: tuple[int, int] | None = None
         if os.path.exists(path):
             self._disk_state = self._stat_disk()
@@ -316,6 +408,13 @@ class Vault:
         else:
             v._embedder = None  # caller must reembed() before searching
         v._rebuild_index()
+        # Rule 6, the first half. After the index exists, because the sweep
+        # takes windows out of it. Never fatal: a vault that cannot be tidied
+        # is still a vault that opens.
+        try:
+            v.expire()
+        except Exception:                               # noqa: BLE001
+            pass
         return v
 
     def _migrate_wire_format(self) -> int:
@@ -563,9 +662,16 @@ class Vault:
                            # source field, and a replay must never be the thing
                            # that refuses to restore a memory.
                            source=r.get("source"),
-                           discovered=r.get("discovered"))
+                           discovered=r.get("discovered"),
+                           expires=r.get("expires"))
         elif op == "forget":
             self.db.delete(e["id"], shred=e["shred"])
+        elif op == "expire":
+            # A batch forget, and it MUST be replayable: the branch below
+            # raises TamperError on an op it does not know, so a vault whose
+            # journal happened to record a sweep would refuse to open at all.
+            for rid in e.get("ids") or []:
+                self.db.delete(rid, shred=False)
         elif op == "link":
             r = e["relation"]
             self.db.insert_relation(
@@ -599,8 +705,9 @@ class Vault:
               quarantined: bool = False, pack: str | None = None,
               vec: np.ndarray | None = None, prov: dict | None = None,
               source: str | None = None, created: float | None = None,
-              discovered: str | None = None,
-              _journal: bool = True, _dedup: bool = True) -> dict:
+              discovered: str | None = None, expires: str | None = None,
+              _journal: bool = True, _dedup: bool = True,
+              _expiry_strict: bool = True) -> dict:
         self._require_open()
         ns = namespace or self.config.default_namespace(caller)
         if pack is None:
@@ -618,8 +725,15 @@ class Vault:
         # line with the day someone happened to run `init` would assert a
         # discovery that never took place.
         disc = discovery_date(discovered) if pack is None else discovered
+        # Parsed before anything is written, so a bad expiry is a refusal at
+        # the door rather than a memory stored with a date nothing can read.
+        # Never on pack content: those records are curated, identical on
+        # every machine, and shipped inside the vault, so an expiry on one
+        # would be a sweep deleting part of the product.
+        exp = (expiry_date(expires, strict=_expiry_strict)
+               if pack is None else None)
         if pack is None:
-            text = with_provenance(text.strip(), source, disc)
+            text = with_provenance(text.strip(), source, disc, exp)
         if vec is None:
             # Every window, not just the first 512 tokens. A long memory used
             # to be searchable only by its opening. The provenance clause is
@@ -661,7 +775,7 @@ class Vault:
                              # two-year-old fact is fresh - and the migration
                              # that restates a memory more atomically would
                              # destroy the one date it exists to preserve.
-                             created=created, discovered=disc)
+                             created=created, discovered=disc, expires=exp)
         row = self.db.get_row(rid)
         for seq, k in enumerate(self.db.vector_keys(rid)):
             self._id_by_ikey[k] = rid
@@ -674,12 +788,15 @@ class Vault:
                 "tags": tags or [], "importance": importance,
                 "quarantined": quarantined, "pack": pack, "prov": prov,
                 "created": row["created"], "source": row["source"],
-                "discovered": row["discovered"],
+                "discovered": row["discovered"], "expires": row["expires"],
             }})
-        return {"id": rid, "duplicate": False, "namespace": ns,
-                "created": row["created"],
-                "created_local": local_stamp(row["created"]),
-                "source": row["source"], "discovered": row["discovered"]}
+        out = {"id": rid, "duplicate": False, "namespace": ns,
+               "created": row["created"],
+               "created_local": local_stamp(row["created"]),
+               "source": row["source"], "discovered": row["discovered"]}
+        if row["expires"]:
+            out["expires"] = row["expires"]
+        return out
 
     def _importance_of(self, rid: str) -> float:
         row = self.db.conn.execute(
@@ -725,6 +842,7 @@ class Vault:
         An explicit `top_k` still means exactly that many, unchanged, because
         callers that page or benchmark need a fixed window."""
         self._require_open()
+        self._maybe_expire()
         if namespace is not None:
             self.config.grant_for(caller, namespace)  # raises if no access
             allowed = {namespace}
@@ -759,6 +877,11 @@ class Vault:
                 continue
             if not starter and is_seeded(row["tags"]):
                 continue
+            # Rule 9: never hand back a fact whose last day has gone, even in
+            # the hour before the sweep gets to it. Being told a price that
+            # expired is worse than not being told it.
+            if self._is_expired(row):
+                continue
             if tags and not set(tags) <= set(json.loads(row["tags"])):
                 continue
             if since and row["created"] < since:
@@ -790,6 +913,7 @@ class Vault:
                 "created_local": local_stamp(row["created"]),
                 "source": row["source"],
                 "discovered": row["discovered"],
+                "expires": row["expires"],
                 "provenance": json.loads(row["prov"]),
                 "pack": row["pack"],
             }
@@ -831,6 +955,7 @@ class Vault:
         bury the handful of records that real use produced.
         """
         self._require_open()
+        self._maybe_expire()
         if namespace is not None:
             self.config.grant_for(caller, namespace)
             allowed = {namespace}
@@ -841,9 +966,11 @@ class Vault:
         rows = []
         for row in self.db.conn.execute(
                 "SELECT id, ns, tags, created, importance, quarantined, source, "
-                "discovered "
+                "discovered, expires "
                 "FROM records ORDER BY created"):
             if row["ns"] not in allowed:
+                continue
+            if self._is_expired(row):
                 continue
             total += 1
             seeded = is_seeded(row["tags"])
@@ -868,7 +995,8 @@ class Vault:
                    "importance": row["importance"], "created": created,
                    "created_local": local_stamp(created),
                    "source": row["source"],
-                   "discovered": row["discovered"], "seeded": seeded}
+                   "discovered": row["discovered"], "expires": row["expires"],
+                   "seeded": seeded}
             if row["quarantined"]:
                 rec["quarantined"] = True
             out.append(rec)
@@ -893,6 +1021,7 @@ class Vault:
                "created_local": local_stamp(row["created"]),
                "source": row["source"],
                "discovered": row["discovered"],
+               "expires": row["expires"],
                "provenance": json.loads(row["prov"]),
                "pack": row["pack"]}
         if row["quarantined"]:
@@ -920,6 +1049,144 @@ class Vault:
         if shred:
             self.save()  # rewrite the payload now so the content is gone from disk
         return {"id": record_id, "shredded": shred}
+
+    # ---------------------------------------------------------------- expiry
+    #
+    # The rules, in one place, because every one of them exists to stop a
+    # memory disappearing for a reason its owner did not choose:
+    #
+    #   1. Nothing expires that was not given an expiry when it was stored.
+    #      There is no default, and none is ever inferred. Silence means
+    #      permanent, which is what every memory written before this existed
+    #      is, and what almost every memory should be.
+    #   2. The date is the LAST day the fact is true, inclusive. "For the next
+    #      two weeks" includes the fourteenth day.
+    #   3. A date already past is refused when the memory is stored, rather
+    #      than accepted and swept a moment later.
+    #   4. Only organic memories can carry one. Pack and seed records are the
+    #      shipped product.
+    #   5. The `expire_memories` setting decides whether an expiry DELETES or
+    #      only LABELS. On, the sweep removes them. Off, nothing is ever
+    #      deleted: the date is still recorded, still written into the text,
+    #      still returned to readers, and the memory stays searchable. Turning
+    #      it off stops the next sweep; it does not bring back what has gone.
+    #   6. The sweep runs when the vault is opened, and at most once an hour
+    #      while it stays open. Opening alone is not enough - the MCP server
+    #      holds one vault open for weeks - and an hour is fine grain for a
+    #      date and cheap enough to be free.
+    #   7. Clearing goes through `forget`, so the index, the full-text rows
+    #      and the audit chain stay consistent, and every removal is written
+    #      into the audit log with its ids. Nothing vanishes unrecorded.
+    #   8. Clearing DELETES, it does not shred. Shredding rewrites the whole
+    #      payload and is a deliberate per-memory choice; a sweep tidying up a
+    #      shop price should not do it.
+    #   9. While the setting is on, a memory past its date is never handed to
+    #      a reader, including in the window before the sweep reaches it.
+    #  10. The sweep does not run under the ACL of whichever caller happened
+    #      to trigger it. It is the vault's own housekeeping, acting on a
+    #      date the OWNER set, so it clears every namespace. Making it obey a
+    #      caller's grants would mean a memory expiring or not depending on
+    #      which agent's search fired the sweep, which is not a rule anyone
+    #      could reason about. No caller gains anything by it either: what
+    #      goes is fixed by the owner's dates, not by who asked.
+
+    #: Rule 6. Seconds between sweeps of a vault that stays open.
+    EXPIRY_SWEEP_SECONDS = 3600
+
+    def expiry_enabled(self) -> bool:
+        """Rule 5. Default on: an expiry the user set should do something."""
+        return bool(self.config.settings.get("expire_memories", True))
+
+    def _expired_today(self) -> list[str]:
+        """Rule 4, enforced where it can actually be enforced.
+
+        `store` refuses an expiry on pack content, but a SEEDED starting
+        memory goes in as an ordinary record with `pack` NULL and an "id:"
+        tag, so that refusal never sees one. Filtering them here means no
+        future pack format that grew an expiry field could ever get a sweep
+        to delete the memories that shipped with the vault.
+        """
+        today = datetime.date.today().isoformat()
+        return [rid for rid, tags in self.db.expired_candidates(today)
+                if not is_seeded(tags)]
+
+    @_synchronized
+    def expiring(self, caller: str = "user") -> list[tuple[str, str, str]]:
+        """(last day, id, text) for every memory that carries an expiry.
+
+        Soonest first, and readable in both settings: with expiry on it is
+        what goes next, with it off it is everything the dates describe.
+        """
+        self._require_open()
+        allowed = set(self._readable_namespaces(caller))
+        out = []
+        for exp, rid, tags in self.db.expiring_candidates():
+            if is_seeded(tags):                       # rule 4
+                continue
+            row = self.db.get_row(rid)
+            if row is None or row["ns"] not in allowed:
+                continue
+            out.append((exp, rid, self.db.decrypt_text(row, self._master)))
+        return out
+
+    @_synchronized
+    def expire(self, caller: str = "expiry") -> dict:
+        """Clear every memory whose last day has passed. Returns what went.
+
+        Safe to call at any time and on any vault: with nothing expired, or
+        with the setting off, it does nothing and says so.
+        """
+        self._require_open()
+        self._last_expiry_sweep = time.time()
+        if not self.expiry_enabled():
+            return {"enabled": False, "removed": 0, "ids": []}
+        ids = self._expired_today()
+        if not ids:
+            return {"enabled": True, "removed": 0, "ids": []}
+        for rid in ids:
+            row = self.db.get_row(rid)
+            if row is None:
+                continue
+            # Rule 7: through the same delete every other removal uses, so a
+            # window left in the index cannot keep answering searches for
+            # text that is gone.
+            keys = set(self.db.vector_keys(rid)) | {row["ikey"]}
+            self.db.delete(rid, shred=False)          # rule 8
+            for k in keys:
+                self.index.remove(k)
+                self._id_by_ikey.pop(k, None)
+        # An audit line is read by a person, so the id list is capped - but
+        # it says that it is capped rather than trailing off, and the journal
+        # entry below carries every id whatever the count.
+        shown = ",".join(ids[:20])
+        if len(ids) > 20:
+            shown += f" (+{len(ids) - 20} more, all in the journal)"
+        arow = self._audit_and_capture(
+            caller, "expire", f"n={len(ids)} ids={shown}")
+        self._journal({"op": "expire", "ids": ids, "audit": arow})
+        return {"enabled": True, "removed": len(ids), "ids": ids}
+
+    def _maybe_expire(self) -> None:
+        """Rule 6, on the read paths. Never raises: a sweep that cannot run
+        must not take a search down with it."""
+        if not self.expiry_enabled():
+            return
+        now = time.time()
+        if now - self._last_expiry_sweep < self.EXPIRY_SWEEP_SECONDS:
+            return
+        try:
+            self.expire()
+        except Exception:                               # noqa: BLE001
+            self._last_expiry_sweep = now
+
+    def _is_expired(self, row) -> bool:
+        """Rule 9. A row past its day, while the setting says to drop them."""
+        try:
+            exp = row["expires"]
+        except (IndexError, KeyError):                  # a row read without it
+            return False
+        return bool(exp) and self.expiry_enabled() and \
+            exp < datetime.date.today().isoformat()
 
     # ------------------------------------------------------- relations (map)
 
@@ -1068,6 +1335,10 @@ class Vault:
             "organic_records": organic,
             "seeded_records": n - organic,
             "relations": self.db.relation_count(),
+            "expiring_records": self.db.expiring_count(),
+            "expired_pending": (len(self._expired_today())
+                                if not self.expiry_enabled() else 0),
+            "expire_memories": self.expiry_enabled(),
             "namespaces": (self.db.namespaces() if caller is None else
                            [e for e in self.db.namespaces()
                             if e["namespace"] in
@@ -1187,6 +1458,7 @@ class Vault:
                 "provenance": json.loads(row["prov"]), "created": row["created"],
                 "created_local": local_stamp(row["created"]),
                 "source": row["source"], "discovered": row["discovered"],
+                "expires": row["expires"],
             }, sort_keys=True))
         self._audit_and_capture(caller, "export", f"{len(lines)} records")
         return "\n".join(lines) + ("\n" if lines else "")
@@ -1200,7 +1472,18 @@ class Vault:
         vecs = self.embedder.embed_passages(texts) if texts else []
         n = 0
         skipped = 0
+        stale = 0
+        today = datetime.date.today().isoformat()
         for r, vec in zip(records, vecs):
+            # A restore must not resurrect a memory whose last day has gone:
+            # it would live until the next sweep and then vanish again, which
+            # reads as an import that quietly lost records. Counted and
+            # reported instead. With expiry switched off the date is only a
+            # label, so the memory comes back like any other.
+            exp = r.get("expires")
+            if exp and self.expiry_enabled() and exp < today:
+                stale += 1
+                continue
             # store() returns without inserting when the record is a
             # near-duplicate, so counting every line would report a file that
             # was already present as fully imported.
@@ -1211,14 +1494,16 @@ class Vault:
                              quarantined=r.get("quarantined", False),
                              source=r.get("source"),
                              discovered=r.get("discovered"),
+                             expires=exp,
                              created=r.get("created"),
-                             vec=vec, _journal=False)
+                             vec=vec, _journal=False, _expiry_strict=False)
             if res.get("duplicate"):
                 skipped += 1
             else:
                 n += 1
         self._audit_and_capture(
-            caller, "import", f"{n} records, {skipped} duplicates skipped")
+            caller, "import", f"{n} records, {skipped} duplicates skipped"
+                              + (f", {stale} expired skipped" if stale else ""))
         self.save()
         return n
 

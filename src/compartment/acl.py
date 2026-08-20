@@ -27,6 +27,11 @@ DEFAULT_CONFIG = {
         "include_packs_in_search": True,
         "search_starter_facts": True,
         "unlock_tool_enabled": False,
+        # On: a memory stored with an expiry date is removed once that day has
+        # passed. Off: the date is recorded and shown, and nothing is ever
+        # deleted. Default on, because an expiry the user took the trouble to
+        # set should do something.
+        "expire_memories": True,
         "duplicate_threshold": 0.97,
         "index_precision": "f32",
     },

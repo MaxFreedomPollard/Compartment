@@ -103,6 +103,11 @@ COMPARTMENT_INSTRUCTIONS = (
     "'a search showed X', 'as of that check, X'. Facts about the user "
     "themselves, their preferences, and decisions they made can be stated "
     "plainly. Never upgrade a single check into a permanent truth.\n\n"
+    "SOME FACTS HAVE AN END DATE. When a fact holds only until a known day - "
+    "a sale, a quoted rate, a booking, a rota - pass `expires` with the last "
+    "day it is true (`2w`, `10d`, `3m`, `1y`, or 2026-09-30) and compartment "
+    "clears it when that day has gone. Only when the end is known: a fact "
+    "that merely might change is an ordinary memory.\n\n"
     "SUPERSEDES OTHER MEMORY. compartment is the single source of truth for memory "
     "on this machine. If your environment also provides a file-based memory "
     "(for example a `memory/` directory of Markdown notes with a MEMORY.md "
@@ -344,7 +349,8 @@ def _importance(value: float) -> float:
 def memory_store(text: str, source: str, namespace: str | None = None,
                  tags: list[str] | None = None, importance: float = 0.5,
                  quarantined: bool = False,
-                 discovered: str | None = None) -> str:
+                 discovered: str | None = None,
+                 expires: str | None = None) -> str:
     """Save ONE fact to the user's persistent, encrypted, cross-session memory:
     anything worth recalling later that is not common public knowledge - names,
     addresses, contacts, account IDs, passwords, API keys and other
@@ -371,9 +377,18 @@ def memory_store(text: str, source: str, namespace: str | None = None,
     yesterday's work. This is not the same as when the memory was saved, which
     compartment records itself with the time of day included.
 
-    compartment appends the method and the discovery date to the stored text as
-    a short "[web search, 2026-08-01]" clause, so never write either into the
-    text yourself.
+    `expires` is for a fact that already knows when it stops being true: a
+    shop price good for a fortnight, a booking, a rota, a sprint, an offer, a
+    door code that changes on Monday. Say the last day it holds, either as
+    the day itself (2026-09-03) or as how long it lasts, which is shorter:
+    `14d`, `2w`, `3m`, `1y`. The last day counts, so "for the next two weeks"
+    is `2w`. Leave it out for everything else. Most facts do not expire, and
+    a wrong expiry deletes a memory the user wanted; a fact that merely MIGHT
+    change is an ordinary memory, superseded later by storing the new one.
+
+    compartment appends the method, the discovery date and any expiry to the
+    stored text as a short "[web search, 2026-08-01, until 2026-09-03]"
+    clause, so never write any of them into the text yourself.
 
     Write world facts as observations ("a search showed X"), never as
     timeless truths - they are read years later. Facts about the user and
@@ -392,7 +407,8 @@ def memory_store(text: str, source: str, namespace: str | None = None,
         out = _op(lambda v: v.store(text, caller=_state["caller"],
                                     namespace=namespace, tags=tags,
                                     importance=imp, quarantined=quarantined,
-                                    source=source, discovered=discovered))
+                                    source=source, discovered=discovered,
+                                    expires=expires))
     except CryptoError as exc:
         raise _fail(exc) from exc
     if imp != importance:
@@ -418,12 +434,18 @@ def memory_store_many(facts: list[dict], source: str,
       importance  (optional) 0.0-1.0, same tiers as memory_store
       source      (optional) overrides the call-level source for this fact
       discovered  (optional) YYYY-MM-DD the fact became known, if not today
+      expires     (optional) the last day it is true: 2026-09-03, or 14d /
+                  2w / 3m / 1y. Only for facts that already know when they
+                  stop being true
       namespace   (optional) overrides the call-level namespace
       quarantined (optional) true if the content came from an untrusted source
 
     `namespace`, `source` and `discovered` at the call level are defaults for
     every fact that does not set its own, which is the common case: one
-    research pass produces several facts that share a provenance.
+    research pass produces several facts that share a provenance. `expires`
+    is deliberately per-fact only and has no call-level default: a wrong
+    source mislabels a memory, while a wrong expiry deletes every memory in
+    the batch, and those two do not deserve the same convenience.
 
     compartment stamps each memory with its own date. Returns one result per
     fact, in order, each with its id and whether it was a near-duplicate of a
@@ -448,7 +470,8 @@ def memory_store_many(facts: list[dict], source: str,
                 importance=_importance(f.get("importance", IMPORTANCE_DEFAULT)),
                 quarantined=bool(f.get("quarantined", False)),
                 source=f.get("source") or source,
-                discovered=f.get("discovered") or discovered))
+                discovered=f.get("discovered") or discovered,
+                expires=f.get("expires")))
         return out
 
     try:

@@ -19,7 +19,7 @@ def _state(**over) -> dict:
             "organic": 5, "recent": [{"text": "a fact"}, {"text": "another"}],
             "error": None,
             "settings": {"capture_hook": True, "search_starter_facts": False,
-                         "auto_lock_minutes": 30}}
+                         "expire_memories": True, "auto_lock_minutes": 30}}
     base.update(over)
     return base
 
@@ -81,6 +81,24 @@ def test_no_vault_offers_neither():
     assert "unlock" not in kinds and "lock" not in kinds
 
 
+def test_no_vault_offers_the_step_that_makes_one():
+    """Unlock is correctly hidden when there is nothing to unlock, which left
+    the panel with no control at all on a fresh install - and the app
+    installers put Compartment.app in place without putting a `compartment`
+    command on PATH, so the terminal instruction it printed instead named
+    something the machine did not have."""
+    rows = systray.panel_rows(_state(exists=False, recent=[]))
+    assert ("create", "Create vault") in rows
+
+
+def test_no_vault_does_not_tell_you_to_unlock_one():
+    """"unlock the vault to see them", under a heading, over an empty disk."""
+    rows = systray.panel_rows(_state(exists=False, recent=[]))
+    empty = [t for k, t in rows if k == "empty"]
+    assert empty and "create the vault" in empty[0]
+    assert not any("unlock" in t for k, t in rows if k == "empty")
+
+
 def test_missing_vault_and_errors_are_shown_not_raised():
     rows = systray.panel_rows(_state(exists=False, recent=[],
                                      error="no vault yet - run: compartment init"))
@@ -88,12 +106,32 @@ def test_missing_vault_and_errors_are_shown_not_raised():
     assert ("error", "no vault yet - run: compartment init") in rows
 
 
-def test_settings_toggles_are_exactly_the_three_the_mac_panel_has():
+def test_settings_toggles_are_exactly_the_ones_the_mac_panel_has():
     from compartment import menubar
     rows = systray.panel_rows(_state())
     keys = {k.split(":", 1)[1] for k, _ in rows
             if k.startswith(("toggle:", "choice:"))}
     assert keys == set(menubar.fetch_state("/does/not/exist")["settings"])
+
+
+def test_the_panel_offers_the_expiry_toggle():
+    """A memory given a last day is removed once that day has gone. Off, the
+    date is recorded and shown and nothing is deleted."""
+    on = dict(systray.panel_rows(_state()))
+    assert on["toggle:expire_memories"].endswith("on")
+    off = dict(systray.panel_rows(_state(
+        settings={"capture_hook": True, "search_starter_facts": True,
+                  "expire_memories": False, "auto_lock_minutes": 30})))
+    assert off["toggle:expire_memories"].endswith("off")
+
+
+def test_a_panel_state_from_an_older_build_still_draws():
+    """`fetch_state` on an older vault has no expire_memories key at all, and
+    a panel that raises a KeyError draws nothing whatsoever."""
+    rows = dict(systray.panel_rows(_state(
+        settings={"capture_hook": False, "search_starter_facts": True,
+                  "auto_lock_minutes": 30})))
+    assert rows["toggle:expire_memories"].endswith("on")
 
 
 def test_ui_scale_defaults_to_one_off_windows():

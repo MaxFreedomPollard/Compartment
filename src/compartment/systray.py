@@ -33,8 +33,8 @@ from .home import env, home
 
 from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
-                      change_passphrase, claim_first_run, default_vault,
-                      fetch_state, integrate, lock_vault,
+                      change_passphrase, claim_first_run, create_vault,
+                      default_vault, fetch_state, integrate, lock_vault,
                       release_instance_lock, self_check,
                       set_setting, starter_note, summarise, unlock_vault)
 
@@ -93,9 +93,13 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = [("state", summarise(state))]
     if state.get("error"):
         rows.append(("error", str(state["error"])))
-    # Locking and unlocking belong in the panel. The vault is the product, and
-    # opening it should not mean finding a terminal.
-    if state.get("exists"):
+    # Making the vault, locking it and unlocking it all belong in the panel.
+    # The vault is the product, and none of the three should mean finding a
+    # terminal - least of all the first one, on an install that never put a
+    # `compartment` command in one.
+    if not state.get("exists"):
+        rows.append(("create", "Create vault"))
+    else:
         rows.append(("unlock", "Unlock") if state["locked"] else ("lock", "Lock"))
         # Changing the passphrase re-wraps the master key, which only exists
         # in hand while the vault is open - so it is offered only then.
@@ -109,6 +113,9 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     rows.append(("toggle:search_starter_facts",
                  f"Search starter facts: "
                  f"{'on' if s['search_starter_facts'] else 'off'}"))
+    rows.append(("toggle:expire_memories",
+                 f"Forget memories when they expire: "
+                 f"{'on' if s.get('expire_memories', True) else 'off'}"))
     rows.append(("choice:auto_lock_minutes",
                  f"Auto-lock: {auto_lock_label(s['auto_lock_minutes'])}"))
     # Installing leaves you with a vault that nothing is using until an agent
@@ -126,7 +133,9 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
         rows.append(("note", state["connect_note"]))
     rows.append(("heading", f"LAST {RECENT_COUNT} MEMORIES"))
     recent = state.get("recent") or []
-    if not recent:
+    if not state.get("exists"):
+        rows.append(("empty", "nothing yet - create the vault above"))
+    elif not recent:
         rows.append(("empty", starter_note(state)))
     for r in recent:
         rows.append(("memory", (r.get("text") or "").strip()))
@@ -910,6 +919,57 @@ def run(vault: str | None = None, show: bool = False,
             ttk.Label(frame, text=str(state["error"]), foreground="#b00020",
                       wraplength=WRAP).pack(anchor="w", pady=(4, 0))
 
+        if not state["exists"]:
+            # The first-run step. Without it the panel says there is no vault,
+            # names a command this install never put on PATH, and offers no
+            # control at all: Unlock is hidden precisely because there is
+            # nothing to unlock.
+            new_pw = ttk.Entry(frame, show="\u2022", width=34)
+            new_pw.pack(anchor="w", pady=(8, 0))
+            new_rep = ttk.Entry(frame, show="\u2022", width=34)
+            new_rep.pack(anchor="w", pady=(6, 0))
+            new_pw.focus_set()
+
+            def do_create(*_):
+                """Say it is working, then work. Tk repaints between events
+                and not during one, so seeding the starting memories from
+                inside the handler would freeze the panel and then change a
+                line, which is what a dead button looks like."""
+                if panel.get("creating"):
+                    return
+                pw, rep = new_pw.get(), new_rep.get()
+                if not pw or pw != rep:
+                    panel["create_note"] = ("choose a passphrase" if not pw
+                                            else "the two entries do not match")
+                    refresh()
+                    return
+                panel["creating"] = True
+                panel["create_note"] = "Creating the vault…"
+                refresh()
+
+                def work():
+                    try:
+                        _ok, note = create_vault(vault_path, pw, pw)
+                    except Exception as exc:      # noqa: BLE001
+                        note = f"could not create the vault: {exc}"
+                    panel["creating"] = False
+                    panel["create_note"] = note
+                    refresh()
+                (panel.get("win") or root).after(50, work)
+
+            new_pw.bind("<Return>", do_create)
+            new_rep.bind("<Return>", do_create)
+            ttk.Button(frame, text="Create vault",
+                       state="disabled" if panel.get("creating") else "normal",
+                       command=do_create).pack(anchor="w", pady=(8, 0))
+            if panel.get("create_note"):
+                ttk.Label(frame, text=panel["create_note"], wraplength=WRAP,
+                          justify="left").pack(anchor="w", pady=(4, 0))
+            ttk.Label(frame, text="There is no recovery phrase - if you forget "
+                                  "this, the memories are unrecoverable.",
+                      foreground="#666", wraplength=WRAP,
+                      justify="left").pack(anchor="w", pady=(4, 0))
+
         if state["exists"] and state["locked"]:
             unlock_row = ttk.Frame(frame)
             unlock_row.pack(fill="x", pady=(8, 0))
@@ -939,6 +999,7 @@ def run(vault: str | None = None, show: bool = False,
 
         hook = tk.BooleanVar(value=s["capture_hook"])
         starter = tk.BooleanVar(value=s["search_starter_facts"])
+        expiring = tk.BooleanVar(value=s.get("expire_memories", True))
 
         def toggle(key, var):
             set_setting(vault_path, key, bool(var.get()))
@@ -950,6 +1011,10 @@ def run(vault: str | None = None, show: bool = False,
                         ).pack(anchor="w", pady=(6, 0))
         ttk.Checkbutton(frame, text="Search starter facts", variable=starter,
                         command=lambda: toggle("search_starter_facts", starter)
+                        ).pack(anchor="w")
+        ttk.Checkbutton(frame, text="Forget memories when they expire",
+                        variable=expiring,
+                        command=lambda: toggle("expire_memories", expiring)
                         ).pack(anchor="w")
 
         row = ttk.Frame(frame)

@@ -52,7 +52,15 @@ CREATE TABLE IF NOT EXISTS records (
     -- what a memory turned out to relate to; this never moves, so "what did we
     -- think this was about at the time" stays answerable and a retagger bug
     -- can always be undone.
-    tags_origin TEXT
+    tags_origin TEXT,
+    -- The LAST DAY this fact is true, YYYY-MM-DD, or NULL for the ordinary
+    -- case: a memory with no expiry is permanent, which is every memory
+    -- written before this column existed. Inclusive, because "for the next
+    -- two weeks" includes the last day. Date only, like `discovered`, and for
+    -- the same reason: a claim about the world stops being true on a day, not
+    -- at a time of day. A shop price, a booking, a visa, a sprint: facts that
+    -- arrive already knowing when they die.
+    expires TEXT
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, text);
 -- One row per EMBEDDING WINDOW. A record longer than the encoder's 512-token
@@ -147,7 +155,16 @@ class Store:
     # row stay valid without being rewritten: a memory stored before this
     # version simply has no recorded source, and reads as such.
     _ADDED_COLUMNS = (("source", "TEXT"), ("tags_origin", "TEXT"),
-                      ("discovered", "TEXT"))
+                      ("discovered", "TEXT"), ("expires", "TEXT"))
+
+    #: Indexes on columns that arrive by migration. They cannot live in SCHEMA:
+    #: that runs BEFORE the ALTER TABLE above, so on a vault sealed by an older
+    #: version the index would name a column that does not exist yet and take
+    #: the whole schema script down with it.
+    _ADDED_INDEXES = (
+        ("records_by_expiry", "CREATE INDEX IF NOT EXISTS records_by_expiry "
+                              "ON records(expires)"),
+    )
 
     def _migrate_columns(self) -> None:
         have = {r["name"] for r in
@@ -156,6 +173,8 @@ class Store:
             if name not in have:
                 self.conn.execute(
                     f"ALTER TABLE records ADD COLUMN {name} {decl}")
+        for _name, ddl in self._ADDED_INDEXES:
+            self.conn.execute(ddl)
 
     def serialize(self) -> bytes:
         return self.conn.serialize()
@@ -197,7 +216,8 @@ class Store:
     def insert(self, *, record_id: str | None, ns: str, text: str, vec: np.ndarray,
                tags: list[str], importance: float, quarantined: bool, pack: str | None,
                prov: dict, master_key: bytes, created: float | None = None,
-               source: str | None = None, discovered: str | None = None) -> str:
+               source: str | None = None, discovered: str | None = None,
+               expires: str | None = None) -> str:
         rid = record_id or uuid.uuid4().hex
         rk, wrapped = crypto.new_record_key(master_key, rid)
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
@@ -211,13 +231,13 @@ class Store:
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
             " quarantined, pack, prov, created, accessed, source, tags_origin,"
-            " discovered)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " discovered, expires)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, self.next_ikey(), ns, ct, wrapped,
              head.tobytes(), int(head.shape[0]),
              json.dumps(tags), float(importance), int(quarantined), pack,
              json.dumps(prov), created or now, now,
-             source, json.dumps(tags), discovered),
+             source, json.dumps(tags), discovered, expires),
         )
         self.set_vectors(rid, allv)
         self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)", (rid, text))
@@ -359,6 +379,48 @@ class Store:
         rows = self.conn.execute(
             "SELECT ns, COUNT(*) c FROM records GROUP BY ns ORDER BY ns").fetchall()
         return [{"namespace": r["ns"], "records": r["c"]} for r in rows]
+
+    # -- expiry -------------------------------------------------------------
+
+    def expired_candidates(self, today: str) -> list[tuple[str, str]]:
+        """(id, tags) for every record whose last day is behind `today`.
+
+        The comparison is a string compare, which for ISO dates IS a date
+        compare, and it is strictly LESS so the expiry day itself is still
+        live: "for the next two weeks" includes the fourteenth day.
+
+        Installed packs are excluded here. Seeded starting memories cannot
+        be, because they are stored as ordinary records with `pack` NULL and
+        are marked only by an "id:" tag - so the tags come back with each
+        row and the caller, which owns the definition of "seeded", makes
+        that call. Both are curated content shipped inside the vault, and a
+        sweep deleting part of the product would look exactly like data loss.
+        """
+        rows = self.conn.execute(
+            "SELECT id, tags FROM records WHERE pack IS NULL"
+            " AND expires IS NOT NULL AND expires != '' AND expires < ?"
+            " ORDER BY expires, id", (today,)).fetchall()
+        return [(r["id"], r["tags"]) for r in rows]
+
+    def expiring_count(self) -> int:
+        """How many memories carry an expiry date at all."""
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM records WHERE expires IS NOT NULL"
+            " AND expires != ''").fetchone()["c"]
+
+    def expiring_candidates(self) -> list[tuple[str, str, str]]:
+        """(last day, id, tags) for every record carrying one, soonest first.
+
+        Distinct from `expired_candidates`, and the useful one to show a
+        person: the sweep runs when the vault opens, so by the time anybody
+        can ask, what has already expired is generally gone. What they
+        actually want to know is what is going to go, and when.
+        """
+        rows = self.conn.execute(
+            "SELECT id, expires, tags FROM records WHERE pack IS NULL"
+            " AND expires IS NOT NULL AND expires != ''"
+            " ORDER BY expires, id").fetchall()
+        return [(r["expires"], r["id"], r["tags"]) for r in rows]
 
     @staticmethod
     def _terms(query: str) -> list[str]:

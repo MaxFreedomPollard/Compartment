@@ -202,19 +202,30 @@ def test_a_broken_config_file_is_not_a_crash(fake_home, monkeypatch):
     assert menubar.integration_status("/v")["claude"] is False
 
 
-def test_clicking_again_says_it_was_already_connected(monkeypatch):
-    monkeypatch.setattr(menubar, "integration_status",
-                        lambda v: {"claude": True})
+def _wiring(monkeypatch, target, *, present, before, after=None):
+    """A machine to click Connect on: whether the agent is installed, and
+    what its own configuration says before and after `integrate` runs."""
+    seen = {"n": 0}
+
+    def status(_vault):
+        seen["n"] += 1
+        return {target: before if seen["n"] == 1 else
+                (before if after is None else after)}
+
+    monkeypatch.setattr(menubar, "agent_present", lambda t: present)
+    monkeypatch.setattr(menubar, "integration_status", status)
     monkeypatch.setattr(menubar, "_run", lambda *a, **k: (0, "registered."))
+
+
+def test_clicking_again_says_it_was_already_connected(monkeypatch):
+    _wiring(monkeypatch, "claude", present=True, before=True)
     ok, msg = menubar.integrate("/v", "claude")
     assert ok is True
     assert "already connected" in msg
 
 
 def test_the_first_click_says_it_connected(monkeypatch):
-    monkeypatch.setattr(menubar, "integration_status",
-                        lambda v: {"claude": False})
-    monkeypatch.setattr(menubar, "_run", lambda *a, **k: (0, "registered."))
+    _wiring(monkeypatch, "claude", present=True, before=False, after=True)
     ok, msg = menubar.integrate("/v", "claude")
     assert ok is True
     assert "already" not in msg and "connected" in msg
@@ -222,6 +233,7 @@ def test_the_first_click_says_it_connected(monkeypatch):
 
 def test_a_missing_agent_says_so_without_claiming_it_is_uninstallable(
         monkeypatch):
+    monkeypatch.setattr(menubar, "agent_present", lambda t: False)
     monkeypatch.setattr(menubar, "integration_status",
                         lambda v: {"hermes": False})
     monkeypatch.setattr(menubar, "_run",
@@ -229,6 +241,58 @@ def test_a_missing_agent_says_so_without_claiming_it_is_uninstallable(
     ok, msg = menubar.integrate("/v", "hermes")
     assert ok is True
     assert "Could not find Hermes" in msg and "click again" in msg
+
+
+def test_wiring_hermes_where_hermes_is_not_installed_is_not_connected(
+        monkeypatch):
+    """`integrate hermes` writes the provider plugin whether or not Hermes is
+    on the machine, so the plugin file it just created cannot be the proof
+    that Hermes is here. Presence is asked before the wiring runs, and it is
+    what decides this answer."""
+    monkeypatch.setattr(menubar, "agent_present", lambda t: False)
+    monkeypatch.setattr(menubar, "integration_status",
+                        lambda v: {"hermes": True})       # our own handiwork
+    monkeypatch.setattr(menubar, "_run", lambda *a, **k: (0, "installed"))
+    ok, msg = menubar.integrate("/v", "hermes")
+    assert ok is True
+    assert "Could not find Hermes" in msg
+
+
+def test_a_registration_that_did_not_land_is_not_called_connected(monkeypatch):
+    """The agent is here and `integrate` exited zero, but its config does not
+    name us. Saying "connected" there sends the user to restart an agent that
+    will come back with no memory tools."""
+    _wiring(monkeypatch, "claude", present=True, before=False, after=False)
+    ok, msg = menubar.integrate("/v", "claude")
+    assert ok is False
+    assert "did not land" in msg
+
+
+def test_claude_desktop_alone_is_reported_as_connected(monkeypatch):
+    """The regression this mechanism exists for.
+
+    `integrate claude` wires two separate programs. On a Mac with Claude
+    Desktop and no Claude Code CLI it registers Desktop perfectly and prints
+    "Claude Code CLI not found" on the way past. Reading that sentence back
+    as the verdict answered the click with "Could not find Claude on this
+    machine" - on a machine where Claude was installed, running, and by then
+    connected."""
+    monkeypatch.setattr(menubar, "agent_present", lambda t: True)
+    _n = {"i": 0}
+
+    def status(_v):
+        _n["i"] += 1
+        return {"claude": _n["i"] > 1}
+
+    monkeypatch.setattr(menubar, "integration_status", status)
+    monkeypatch.setattr(menubar, "_run", lambda *a, **k: (
+        0, "Claude Code CLI not found; register manually with: ...\n"
+           "registering the Compartment MCP server with Claude Desktop…\n"
+           "✓ registered in claude_desktop_config.json"))
+    ok, msg = menubar.integrate("/v", "claude")
+    assert ok is True
+    assert "Could not find" not in msg
+    assert "Claude is connected" in msg
 
 
 # ---------------------------------------------------------------- the panel

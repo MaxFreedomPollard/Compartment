@@ -6,9 +6,20 @@ import pytest
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
+from compartment import claude_desktop as _claude_desktop  # noqa: E402
 from compartment.vault import Vault  # noqa: E402
 
 PASS = "CorrectHorse"
+
+#: Captured before anything patches it, for the handful of tests that are
+#: about where Claude Desktop keeps its config rather than about writing it.
+_REAL_CLAUDE_DESKTOP_CONFIG_PATH = _claude_desktop.config_path
+
+
+@pytest.fixture()
+def real_claude_desktop_config_path():
+    """`claude_desktop.config_path` as it ships, past the isolation below."""
+    return _REAL_CLAUDE_DESKTOP_CONFIG_PATH
 
 
 def seed_pack_bytes() -> bytes:
@@ -46,7 +57,18 @@ def no_real_supervisors(monkeypatch, tmp_path, request):
     them for free. The one test that is about the live launchd asks for it by
     name with the real_launchctl marker, and is deselected by default.
     """
-    from compartment import menubar, systray
+    from compartment import claude_desktop, menubar, systray
+    # Claude Desktop keeps its MCP servers in a real file in the user's real
+    # Application Support directory, and `integrate claude` writes it. The
+    # Claude Code half of that path has a fixture faking its settings file;
+    # this half never had one, so a suite run pointed the developer's own
+    # Claude Desktop at a pytest temp vault, deleted the vault moments later,
+    # and left the config naming it. Silent, and it outlives the run: the
+    # damage is only visible the next time somebody opens Claude Desktop and
+    # finds it has no memory.
+    monkeypatch.setattr(claude_desktop, "config_path",
+                        lambda: tmp_path / "claude-desktop"
+                        / claude_desktop.FILENAME)
     if request.node.get_closest_marker("real_launchctl") is None:
         monkeypatch.setattr(menubar, "_launchctl",
                             lambda *a: (1, "launchctl: the test suite does "
