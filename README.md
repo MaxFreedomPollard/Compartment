@@ -38,8 +38,8 @@ those in the clear, and vectors can be inverted back toward text). Deletion
 is cryptographic: destroy the record's key and it is gone, unrecoverable.
 Tampering is detected, history is hash-chained, and the vault locks itself
 on restart or power loss. It runs fully offline: a runtime guard aborts on
-any network attempt, and CI proves it on three operating systems. This MF runs 
-in RAM but doesn't use much either. I run it on my 8MB RAM daily driver and it
+any network attempt, and CI proves it on three operating systems. This bad boy runs 
+in RAM but doesn't use much either. I use it on my 8GB RAM daily driver and it
 raises free RAM somehow. I think because my preference memories prevent Claude
 from sacrificing all my RAM to the Phoenician God Bal, or whatever it normally
 does to my RAM. 
