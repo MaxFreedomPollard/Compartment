@@ -13,9 +13,9 @@
 
 With Compartment, your AI agent gets better with experience: it notices 
 and permanently stores every decision, preference and detail offline, encrypted,
-to your own computer. Hermes, Claude, OpenClaw and other AI Agents can
-install in one command. One fully-transferable memory store is shared
-simultaneously by all agents on the computer. 100% offline: no network, no
+to your own computer. Hermes, Claude, OpenClaw and other AI Agents are all
+hooked up to Compartment in one single command. One fully-transferable memory store 
+is shared by all agents on the computer. 100% offline: no network, no
 API key, no cloud account, no telemetry. The embedding model ships inside
 the package, and a full search returns in about 12 ms, beating the round-trip
 a hosted memory charges you for. Every byte at rest is AEAD-encrypted, the
@@ -28,9 +28,9 @@ and GPUs, phones, game consoles, Raspberry Pi, storage, displays,
 connectors) to provide a map of computer geography, operating system
 versions and release names, network ports and HTTP, file signatures,
 character encodings, shell and Unix internals, git, regex, SQL and hashing,
-ISO country, currency and time codes, and more. Allows an offline agent to
+ISO country, currency and time codes, and more. This allows an offline agent to
 operate better without internet, and an online agent to operate faster and
-more accurately.
+more accurately with an accurate map of the computer-verse. 
 
 **More secure, by construction.** Every byte at rest is
 authenticated-encrypted, the embedding vectors included (most tools leave
@@ -38,7 +38,11 @@ those in the clear, and vectors can be inverted back toward text). Deletion
 is cryptographic: destroy the record's key and it is gone, unrecoverable.
 Tampering is detected, history is hash-chained, and the vault locks itself
 on restart or power loss. It runs fully offline: a runtime guard aborts on
-any network attempt, and CI proves it on three operating systems.
+any network attempt, and CI proves it on three operating systems. This MF runs 
+in RAM but doesn't use much either. I run it on my 8MB RAM daily driver and it
+raises free RAM somehow. I think because my preference memories prevent Claude
+from sacrificing all my RAM to the Phoenician God Bal, or whatever it normally
+does to my RAM. 
 
 **Not one step harder.** One command installs it, creates the vault, and
 wires your agent. No API key, no cloud account, no daemon. Unlock when you
