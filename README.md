@@ -68,23 +68,23 @@ compartment integrate claude
 also gets the **`/compartmentalize`** skill installed into its own skills
 directory.
 
-**`/compartmentalize` saves the conversation before it is thrown away.** Every
-agent eventually compacts or summarizes a long session, and the summary is
-written by a pass that has no tools, so nothing can be stored from inside it:
-whatever the model did not think to save is simply gone. Type
-`/compartmentalize` and the whole conversation is swept into the vault first -
-people and contacts, credentials and where they live, URLs and hosts, decisions
-and the reasoning behind them, and a narrative of the session itself. Then
-compact, and nothing is lost. It works on its own at any point too.
+**`/compartmentalize` saves the conversation and relevant facts about it completely, 
+when you have more important conversations that you feel deserve greater analysis and retention.** 
+This is an additional option to, and not a replacement for, the constant background 
+memory creation. 
 
 **One click install (for people not good with command line).** Download
 **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
 and open it. Python, the embedding model and every dependency are inside it.
 macOS only.
 
-After install, everything is managed from the app: the **menu bar** on macOS,
+After install, everything is managed from the minimal app: the **menu bar** on macOS,
 the **notification area** on Windows, and a **window** from your applications
-menu on Linux.
+menu on Linux. We design to be one of the many hundreds of software applications
+you have on your computer, we don't make the design mistake of assuming the user
+cares about Compartment and is going to study how to use it. All functions are there
+in simple button and selection format, and you dont need to fiddle with ratios or 
+specifics, we have the best high level mathematical and logical functions by default. 
 
 Compartment is an MCP server, so it works with all MCP capable agentic AI out
 of the box. Every option is in [Configuration](#configuration).
