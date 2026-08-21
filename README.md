@@ -171,9 +171,6 @@ turns are dropped. A bare "OK" is not noise, it is a decision: when the
 agent asks *"Want me to send this reply to the client now?"* and the user
 answers *"OK"*, Compartment resolves the question from the conversation and
 stores
-`[decision 2026-07-20] Approved (answered "OK"): Want me to send this
-reply to the client now?` at the top importance tier. Asking *"did the
-user say to email the client?"* later retrieves exactly that record.
 
 **Deterministic importance tiers rank recall**: decisions/consent 0.90,
 personal facts and preferences 0.80, the user's machine and configuration
