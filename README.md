@@ -11,8 +11,7 @@
 
 ### Durable agentic memory, encrypted at rest.
 
-Your AI agent forgets you the moment the session ends. Compartment ends
-that. With Compartment, your AI agent gets better with experience: it notices 
+With Compartment, your AI agent gets better with experience: it notices 
 and permanently stores every decision, preference and detail offline, encrypted,
 to your own computer. Hermes, Claude, OpenClaw and other AI Agents can
 install in one command. One fully-transferable memory store is shared
