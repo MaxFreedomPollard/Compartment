@@ -104,11 +104,35 @@ def _verify_hashes(d: Path, expected: dict[str, str], label: str) -> None:
             )
 
 
+def _missing_runtime_error(exc: ImportError) -> ModelError | None:
+    """The actionable form of onnxruntime's Windows DLL failure, or None.
+
+    A clean Windows install has no Microsoft Visual C++ runtime, and
+    onnxruntime will not import without it: `DLL load failed while importing
+    onnxruntime_pybind11_state`. CI never sees this because GitHub's runners
+    ship the runtime preinstalled; a fresh Windows 11 VM reproduced it on the
+    first `compartment init`. The bare ImportError names a module, not the
+    remedy, so someone hitting it has no way to know one download fixes it."""
+    if os.name == "nt" and "DLL load failed" in str(exc):
+        return ModelError(
+            "onnxruntime cannot load: this Windows machine is missing the "
+            "Microsoft Visual C++ runtime it is built against. Install "
+            "https://aka.ms/vs/17/release/vc_redist.x64.exe (one small "
+            "installer, no restart needed), then run this command again.")
+    return None
+
+
 class Embedder:
     """CLS-pooled, L2-normalized sentence embeddings from a local ONNX model."""
 
     def __init__(self, model_name: str = DEFAULT_MODEL):
-        import onnxruntime as ort          # local import: keeps CLI startup fast
+        try:
+            import onnxruntime as ort      # local import: keeps CLI startup fast
+        except ImportError as exc:
+            better = _missing_runtime_error(exc)
+            if better is not None:
+                raise better from exc
+            raise
         from tokenizers import Tokenizer
 
         # Errors only, and for the DEFAULT logger, not just the session's:

@@ -315,6 +315,26 @@ def test_a_missing_machineguid_is_no_id_rather_than_an_error(monkeypatch):
     assert platforms._platform_id() is None
 
 
+# ---------------------------------------------------------------------------
+# A fresh Windows install has no Microsoft Visual C++ runtime, and onnxruntime
+# will not import without it. The failure must name the one download that
+# fixes it, and must never fire anywhere else.
+# ---------------------------------------------------------------------------
+
+def test_windows_dll_failure_names_the_missing_runtime(monkeypatch):
+    from compartment import embed
+    dll = ImportError("DLL load failed while importing "
+                      "onnxruntime_pybind11_state: The specified module "
+                      "could not be found.")
+    monkeypatch.setattr(embed.os, "name", "nt")
+    err = embed._missing_runtime_error(dll)
+    assert err is not None and "vc_redist" in str(err)
+    assert embed._missing_runtime_error(
+        ImportError("No module named 'onnxruntime'")) is None
+    monkeypatch.setattr(embed.os, "name", "posix")
+    assert embed._missing_runtime_error(dll) is None
+
+
 # --- helpers ----------------------------------------------------------------
 
 @contextlib.contextmanager
