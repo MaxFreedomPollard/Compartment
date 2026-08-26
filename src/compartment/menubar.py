@@ -283,14 +283,35 @@ def _run(args: list[str], timeout: int = 60) -> tuple[int, str]:
 
 
 def _json_cmd(vault: str, *sub: str) -> dict | None:
-    code, out = _run([*_cli_argv(), "--vault", vault, *sub])
-    if code != 0:
+    """Run a CLI subcommand and parse the JSON it prints.
+
+    Its own runner, not `_run`: that one folds stderr into the output for
+    error reporting, and anything a library says on stderr then lands after
+    the JSON and breaks the parse. onnxruntime does exactly that on Azure -
+    its device discovery warns about Hyper-V's PCI paths - so the panel on
+    such a machine read a healthy, unlocked vault as "could not read vault
+    status" and showed it locked. Only stdout is the CLI's answer.
+
+    raw_decode rather than loads for the same reason at the other end: it
+    stops at the end of the first JSON value, so noise after the payload -
+    whatever prints it - can never invalidate the payload itself.
+    """
+    try:
+        p = subprocess.run([*_cli_argv(), "--vault", vault, *sub],
+                           capture_output=True, text=True, timeout=60,
+                           encoding="utf-8", errors="replace",
+                           env={**os.environ, "PATH": user_path()})
+    except (OSError, subprocess.SubprocessError):
         return None
+    if p.returncode != 0:
+        return None
+    out = p.stdout or ""
     start = out.find("{")
     if start < 0:
         return None
     try:
-        return json.loads(out[start:])
+        doc, _ = json.JSONDecoder().raw_decode(out[start:])
+        return doc
     except json.JSONDecodeError:
         return None
 

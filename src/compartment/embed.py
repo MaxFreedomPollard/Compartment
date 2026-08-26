@@ -111,6 +111,15 @@ class Embedder:
         import onnxruntime as ort          # local import: keeps CLI startup fast
         from tokenizers import Tokenizer
 
+        # Errors only, and for the DEFAULT logger, not just the session's:
+        # device discovery runs under the default logger and its warnings go
+        # to stderr - on Azure/Hyper-V it complains about the PCI paths every
+        # time, on every CLI call that embeds.
+        try:
+            ort.set_default_logger_severity(3)
+        except Exception:                                   # noqa: BLE001
+            pass
+
         self.model_name = model_name
         d = resolve_model_dir(model_name)
         if model_name == DEFAULT_MODEL:

@@ -187,6 +187,20 @@ def test_a_creation_that_cannot_run_the_cli_says_so(tmp_path, monkeypatch):
     assert ok is False and "could not run the CLI" in msg
 
 
+def test_stderr_noise_cannot_hide_the_vault_status(monkeypatch):
+    """A CLI child that answers on stdout while a library warns on stderr is
+    still an answer. onnxruntime's device discovery does exactly that on
+    Azure/Hyper-V, on every call - and the panel read the mix as "could not
+    read vault status" and showed an unlocked vault as locked."""
+    monkeypatch.setattr(menubar, "_cli_argv", lambda: [
+        sys.executable, "-c",
+        "import sys;"
+        "print('{\"locked\": false, \"records\": 1}');"
+        "print('[W:onnxruntime:Default] pci noise', file=sys.stderr)"])
+    assert menubar._json_cmd("ignored", "status") == {"locked": False,
+                                                      "records": 1}
+
+
 def test_creating_a_vault_really_works(tmp_path, monkeypatch):
     """End to end, through the real CLI: the panel's button is the only way
     in on an install that never put `compartment` on PATH, so this path is
