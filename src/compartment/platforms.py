@@ -174,31 +174,166 @@ def _windows_boot_token() -> str:
     return str(int(computed))
 
 
-def machine_id() -> str:
-    """A stable identifier for this machine that does NOT change with
-    network/hostname flaps (macOS renames the host per network). Falls back
-    to hostname only if no platform id is available."""
-    system = platform.system()
+# ---------------------------------------------------------------------------
+# Machine identity - bound into the boot-session credential as CONTEXT
+#
+# Load-bearing in a way its size hides. session._boot_context() folds this
+# value into the wrap key of the stored unlock credential, and session.get()
+# DELETES that credential when the key it rebuilds does not open it. So a
+# machine_id() that answers with a different value than the one used at store
+# time does not degrade gracefully: it destroys the credential, relocks the
+# vault for every process holding it, and leaves it locked after the
+# underlying fault clears, until the passphrase is typed again.
+#
+# Hence the two rules below, which are what boot_time() has always done:
+#
+#   1. A lookup that FAILED raises, and never substitutes. Answering with the
+#      hostname after a wedged ioreg or an unreadable machine-id file swaps in
+#      a value that cannot match what was stored, which is exactly the
+#      destructive case. Raising surfaces as CryptoError instead, which leaves
+#      the credential alone: the vault reports locked for that one call and
+#      opens again the moment the fault clears.
+#   2. A system that genuinely HAS no platform id still gets the documented
+#      hostname fallback, because there the hostname is the stable answer
+#      rather than a substitute for one.
+#
+# On top of both, the answer is PINNED per boot, so every process of this boot
+# agrees on one value and no later hiccup in the lookup can move it.
+# ---------------------------------------------------------------------------
+
+#: Read in order; the first non-empty one wins. A module constant so a test
+#: can point it somewhere writable instead of needing a container.
+_LINUX_MACHINE_ID_PATHS = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+
+
+def _machine_marker() -> Path:
+    base = Path(env("SESSION_DIR", home() / "session"))
+    return base / ".machineid"
+
+
+def _pinned_machine_id(boot: str) -> str | None:
+    """The id an earlier process of THIS boot already settled on, if any."""
     try:
-        if system == "Darwin":
+        rec = json.loads(_machine_marker().read_text(encoding="utf-8"))
+        if rec["boot"] == boot and isinstance(rec["id"], str) and rec["id"]:
+            return rec["id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _pin_machine_id(boot: str, value: str) -> None:
+    """Best effort: an unwritable marker costs a lookup next time, not
+    correctness.
+
+    Writing the id down gives away nothing. It is public - anything running as
+    this user can run ioreg or read /etc/machine-id - and it is only CONTEXT
+    for a wrap key whose actual secret is 32 random bytes in a volatile kernel
+    holder that no filesystem backs. The marker is also useless on another
+    machine, because it is rejected unless it names the current boot. That is
+    the same argument _windows_boot_token() already pins its own marker on."""
+    marker = _machine_marker()
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(marker.parent, 0o700)
+        except OSError:
+            pass
+        tmp = marker.with_name(marker.name + ".tmp")
+        # 0600 from the start rather than write-then-chmod, which publishes
+        # the file at whatever the umask allows first. The session directory
+        # is already 0700, so this is defence in depth, and it keeps the
+        # marker the same mode as the credentials beside it.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps({"boot": boot, "id": value}).encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, marker)          # atomic; a torn marker never appears
+    except OSError:
+        pass
+
+
+def _platform_id() -> str | None:
+    """This machine's OS-assigned identifier, or None where the system
+    genuinely has none.
+
+    Raises RuntimeError if the lookup itself failed, so the caller can tell
+    "there is no id here" from "I could not find out"."""
+    system = platform.system()
+    if system == "Darwin":
+        try:
             out = subprocess.run(
                 ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
                 capture_output=True, text=True, check=True,
                 timeout=_SUBPROCESS_TIMEOUT).stdout
-            for line in out.splitlines():
-                if "IOPlatformUUID" in line:
-                    return line.split('"')[-2]
-        elif system == "Linux":
-            for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
-                if os.path.exists(p):
-                    with open(p) as f:
-                        return f.read().strip()
-        elif system == "Windows":
-            import winreg
+        except (OSError, subprocess.SubprocessError) as exc:
+            # Missing binary, non-zero exit, or _SUBPROCESS_TIMEOUT exceeded
+            # because the machine is loaded. Every one of those is transient,
+            # and none is evidence about this machine's identity.
+            raise RuntimeError(f"ioreg could not be read ({exc})") from exc
+        for line in out.splitlines():
+            if "IOPlatformUUID" in line:
+                parts = line.split('"')
+                if len(parts) >= 2 and parts[-2]:
+                    return parts[-2]
+        return None
+    if system == "Linux":
+        failed = None
+        for p in _LINUX_MACHINE_ID_PATHS:
+            try:
+                with open(p) as f:
+                    value = f.read().strip()
+            except FileNotFoundError:
+                continue                 # this system does not use that path
+            except OSError as exc:       # it is there, we could not read it
+                failed = failed or exc
+                continue
+            if value:
+                return value
+            # An EMPTY /etc/machine-id is systemd's documented
+            # generate-on-first-boot state, and several container base images
+            # ship one. It is not an id, so keep looking: returning "" here
+            # used to shadow both the dbus path and the hostname fallback.
+        if failed is not None:
+            raise RuntimeError(
+                f"a machine-id file exists but could not be read ({failed})")
+        return None
+    if system == "Windows":
+        import winreg
+        try:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
                                 r"SOFTWARE\Microsoft\Cryptography") as k:
-                return winreg.QueryValueEx(k, "MachineGuid")[0]
-    except Exception:
-        pass
-    import socket
-    return socket.gethostname()
+                value = winreg.QueryValueEx(k, "MachineGuid")[0]
+        except FileNotFoundError:        # no such key or value on this install
+            return None
+        except OSError as exc:           # anything else is a failed read
+            raise RuntimeError(
+                f"MachineGuid could not be read ({exc})") from exc
+        return value if isinstance(value, str) and value else None
+    return None
+
+
+def machine_id() -> str:
+    """A stable identifier for this machine that does NOT change with
+    network/hostname flaps (macOS renames the host per network).
+
+    Pinned for the life of the boot, so every process agrees on one value and
+    a later hiccup in the lookup cannot move it. Falls back to the hostname
+    only where the system genuinely has no platform id - and pins that too, so
+    a rename cannot move it either.
+
+    Raises RuntimeError when it cannot tell, like boot_time() and for the same
+    reason: session._boot_context() turns that into a CryptoError, which
+    leaves the stored credential untouched, whereas substituting a different
+    value here gets that credential deleted."""
+    boot = boot_time()
+    pinned = _pinned_machine_id(boot)
+    if pinned is not None:
+        return pinned
+    value = _platform_id()
+    if value is None:
+        import socket
+        value = socket.gethostname()
+    _pin_machine_id(boot, value)
+    return value

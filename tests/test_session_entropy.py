@@ -15,6 +15,7 @@ must genuinely die with the boot.
 import hashlib
 import os
 import pathlib
+import platform
 import subprocess
 import sys
 
@@ -242,6 +243,61 @@ def test_no_boot_clock_is_a_cryptoerror_not_a_stray_runtimeerror(monkeypatch):
     assert path.is_file()
     with pytest.raises(CryptoError):
         session.store(VAULT, KEY)
+
+
+def test_a_substituted_machine_id_is_what_destroys_a_credential(monkeypatch):
+    """Guards the premise of the two tests below.
+
+    When machine_id ANSWERS with a different value rather than raising, get()
+    has no way to tell that from a credential nothing can open, so it deletes
+    it - correctly, on the information it has. That is the ending a wedged
+    ioreg used to reach through the hostname fallback."""
+    session.store(VAULT, KEY)
+    path = session._file_for(VAULT)
+    monkeypatch.setattr(session, "machine_id", lambda: "some-other-machine")
+    assert session.get(VAULT) is None
+    assert not path.is_file(), "a wrong key really does cost the credential"
+
+
+def test_an_unreadable_machine_id_does_not_destroy_the_credential(monkeypatch):
+    """A machine id that cannot be read must fail the way a missing boot clock
+    already does: loudly, for this call, without touching what is stored."""
+    session.store(VAULT, KEY)
+    path = session._file_for(VAULT)
+    healthy = session.machine_id
+
+    def wedged():
+        raise RuntimeError("ioreg could not be read (timed out after 5.0s)")
+
+    monkeypatch.setattr(session, "machine_id", wedged)
+    with pytest.raises(CryptoError):
+        session.get(VAULT)
+    assert path.is_file(), "the credential must survive a transient failure"
+
+    monkeypatch.setattr(session, "machine_id", healthy)
+    assert session.get(VAULT) == KEY, "and open again once the fault clears"
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="ioreg is macOS")
+def test_a_wedged_ioreg_neither_relocks_the_vault_nor_destroys_it(monkeypatch):
+    """The reported fault, with only the OS binary faulted.
+
+    Everything else here is the real code path: real machine_id, real
+    _boot_context, real get(). Before the per-boot pin and the raise, this
+    returned None and left no credential behind, and the vault stayed locked
+    for every process holding it long after ioreg recovered."""
+    session.store(VAULT, KEY)
+    path = session._file_for(VAULT)
+    real_run = subprocess.run
+
+    def wedged(cmd, *a, **k):
+        if cmd and cmd[0] == "ioreg":
+            raise subprocess.TimeoutExpired(cmd, 5.0)
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", wedged)
+    assert session.get(VAULT) == KEY, "a loaded machine must not relock it"
+    assert path.is_file(), "and must certainly not delete the credential"
 
 
 @pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")

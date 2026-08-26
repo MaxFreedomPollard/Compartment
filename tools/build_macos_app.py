@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 _EMBEDDED_VER = [""]              # X.Y of the interpreter actually embedded
@@ -407,9 +408,25 @@ def _verify_survives_running(app: pathlib.Path) -> None:
     obvious one - breaks the seal, and a broken seal means a quarantined copy
     is killed on sight. So: run it once for real, then check the signature
     again.
+
+    In a home of its own. `--self-check` with no vault named resolves
+    DEFAULT_VAULT, which is the vault of whoever is building - so this step
+    used to open, expiry-sweep and rewrite the developer's live memory vault,
+    and its child CLI processes read the real boot-session credential, on
+    every single build. A build is not allowed to touch the machine it runs
+    on. HOME moves the vault, the settings and the session directory
+    together; COMPARTMENT_VAULT is belt and braces for a HOME that some
+    other layer has already resolved.
     """
-    out = subprocess.run([str(app / "Contents" / "MacOS" / APP_NAME),
-                          "--self-check"], capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(prefix="compartment-buildprobe-") as tmp:
+        probe = pathlib.Path(tmp)
+        out = subprocess.run(
+            [str(app / "Contents" / "MacOS" / APP_NAME), "--self-check"],
+            capture_output=True, text=True,
+            env={**os.environ,
+                 "HOME": str(probe),
+                 "COMPARTMENT_VAULT": str(probe / "probe.vault"),
+                 "COMPARTMENT_SESSION_DIR": str(probe / "session")})
     if out.returncode != 0:
         raise SystemExit("error: the built app cannot run\n"
                          + (out.stderr or out.stdout).strip()[:2000])
