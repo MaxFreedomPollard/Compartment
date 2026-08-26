@@ -23,6 +23,7 @@ import time
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from . import __version__, offline_guard, selftest
 from .crypto import CryptoError, TamperError
@@ -344,7 +345,8 @@ def _importance(value: float) -> float:
     return min(1.0, max(0.0, v))
 
 
-@mcp.tool()
+@mcp.tool(title="Store a memory", annotations=ToolAnnotations(
+    title="Store a memory", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_store(text: str, source: str, namespace: str | None = None,
                  tags: list[str] | None = None, importance: float = 0.5,
@@ -416,7 +418,8 @@ def memory_store(text: str, source: str, namespace: str | None = None,
     return json.dumps(out)
 
 
-@mcp.tool()
+@mcp.tool(title="Store several memories", annotations=ToolAnnotations(
+    title="Store several memories", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_store_many(facts: list[dict], source: str,
                       namespace: str | None = None,
@@ -481,7 +484,8 @@ def memory_store_many(facts: list[dict], source: str,
     return json.dumps({"stored": results, "count": len(results)})
 
 
-@mcp.tool()
+@mcp.tool(title="Search memory", annotations=ToolAnnotations(
+    title="Search memory", readOnlyHint=True))
 @_offload
 def memory_search(query: str, namespace: str | None = None,
                   tags: list[str] | None = None, top_k: int = 8,
@@ -512,7 +516,8 @@ def memory_search(query: str, namespace: str | None = None,
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Link two entities", annotations=ToolAnnotations(
+    title="Link two entities", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_link(subject: str, predicate: str, object: str,
                 src_id: str | None = None, valid_from: float | None = None,
@@ -534,7 +539,8 @@ def memory_link(subject: str, predicate: str, object: str,
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Query the memory graph", annotations=ToolAnnotations(
+    title="Query the memory graph", readOnlyHint=True))
 @_offload
 def memory_relations(entity: str | None = None, subject: str | None = None,
                      predicate: str | None = None, object: str | None = None,
@@ -561,7 +567,8 @@ def memory_relations(entity: str | None = None, subject: str | None = None,
     return json.dumps(out)
 
 
-@mcp.tool()
+@mcp.tool(title="Remove a relation", annotations=ToolAnnotations(
+    title="Remove a relation", readOnlyHint=False, destructiveHint=True))
 @_offload
 def memory_unlink(relation_id: str) -> str:
     """Remove one relation from the memory graph (memories stay untouched)."""
@@ -572,7 +579,8 @@ def memory_unlink(relation_id: str) -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Fetch a memory", annotations=ToolAnnotations(
+    title="Fetch a memory", readOnlyHint=True))
 @_offload
 def memory_get(record_id: str) -> str:
     """Fetch one memory by id."""
@@ -583,7 +591,8 @@ def memory_get(record_id: str) -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Forget a memory", annotations=ToolAnnotations(
+    title="Forget a memory", readOnlyHint=False, destructiveHint=True))
 @_offload
 def memory_forget(record_id: str, shred: bool = False) -> str:
     """Delete a memory. shred=True crypto-shreds it (unrecoverable from this vault)."""
@@ -594,7 +603,8 @@ def memory_forget(record_id: str, shred: bool = False) -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="List namespaces", annotations=ToolAnnotations(
+    title="List namespaces", readOnlyHint=True))
 @_offload
 def memory_list_namespaces() -> str:
     """List namespaces and record counts."""
@@ -604,7 +614,8 @@ def memory_list_namespaces() -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Recent memories", annotations=ToolAnnotations(
+    title="Recent memories", readOnlyHint=True))
 @_offload
 def memory_recent(limit: int = 20, namespace: str | None = None,
                   include_seeded: bool = False) -> str:
@@ -621,7 +632,8 @@ def memory_recent(limit: int = 20, namespace: str | None = None,
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Vault status", annotations=ToolAnnotations(
+    title="Vault status", readOnlyHint=True))
 @_offload
 def memory_status() -> str:
     """Vault status: lock state, counts, packs, model, index, RAM, audit head."""
@@ -640,7 +652,8 @@ def memory_status() -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool()
+@mcp.tool(title="Memory self-test", annotations=ToolAnnotations(
+    title="Memory self-test", readOnlyHint=True))
 @_offload
 def memory_selftest() -> str:
     """Health check: canned queries against the built-in seed pack, with latencies."""
@@ -664,7 +677,8 @@ def _drop_key(v: Vault) -> None:
     v._locked = True
 
 
-@mcp.tool()
+@mcp.tool(title="Lock the vault", annotations=ToolAnnotations(
+    title="Lock the vault", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_lock() -> str:
     """PANIC LOCK: flush, seal, and drop key material now. Always available.
@@ -710,7 +724,8 @@ def memory_lock() -> str:
     return json.dumps(out)
 
 
-@mcp.tool()
+@mcp.tool(title="Unlock the vault", annotations=ToolAnnotations(
+    title="Unlock the vault", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_unlock(passphrase: str) -> str:
     """Unlock the vault for this session so the other memory tools can use it
