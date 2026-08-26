@@ -796,7 +796,15 @@ where they apply. Anything exported as `ENGRAM_*` still works.
 | [PACKS.md](PACKS.md) | authoring and shipping signed memory packs |
 | [RELEASING.md](RELEASING.md) | cutting a release: every download, every time |
 
+## Privacy Policy
+
+Compartment collects no data: no telemetry, no analytics, no account, and
+no network at runtime. Memories are stored only on your machine,
+AEAD-encrypted at rest with a passphrase that never leaves it, and nothing
+is shared with anyone. The full policy, covering collection, storage,
+network access, third-party sharing, retention, and contact, is at
+<https://maxfreedompollard.github.io/Compartment/privacy>.
+
 ---
 
 mcp-name: io.github.MaxFreedomPollard/compartment
-
