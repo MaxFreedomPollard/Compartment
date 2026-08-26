@@ -93,13 +93,47 @@ class FileLock:
 
 def boot_time() -> str:
     """Seconds-since-epoch of the current boot as a string. Distinct after
-    every restart, so a credential wrapped with it dies on reboot."""
+    every restart, so a credential wrapped with it dies on reboot.
+
+    Pinned for the life of the boot on every platform, the way Windows always
+    pinned its own. The kernels do not keep the boot instant fixed: Linux
+    derives `btime` and macOS `kern.boottime` from the wall clock, so an NTP
+    STEP - which chrony performs early on every freshly booted VM, and which
+    follows many a suspend/resume - moves the reported boot time by the size
+    of the step. This value is hashed into the session credential's wrap key,
+    and `session.get` deletes a credential its key will not open, so an
+    unpinned reading meant one clock step relocked every vault on the machine
+    and destroyed the stored credential with it."""
+    system = platform.system()
+    if system == "Windows":
+        try:
+            return _windows_boot_token()
+        except Exception:
+            pass
+    else:
+        est = _posix_boot_estimate()
+        if est is not None:
+            return _pinned_boot_token(est[0], est[1], _posix_marker())
+    raise RuntimeError(
+        "Cannot determine boot time on this platform; use --keychain (macOS) "
+        "or COMPARTMENT_PASSPHRASE instead of the boot-session credential")
+
+
+def _posix_boot_estimate() -> tuple[float, float] | None:
+    """(boot instant, uptime seconds) from the platform, or None.
+
+    Guarded and bounded: this runs on every vault open, so a missing or
+    wedged source must fall through to boot_time's actionable error instead
+    of raising something opaque or hanging the process forever.
+
+    The uptime source is deliberately step-immune, which is what lets
+    `_pinned_boot_token` tell a stepped clock (uptime kept growing) from a
+    real reboot (uptime shrank). Linux /proc/uptime counts from boot
+    regardless of wall-clock changes; on macOS the pair is derived from one
+    `kern.boottime` reading, so a step moves both ends equally and cancels.
+    """
     system = platform.system()
     if system == "Darwin":
-        # Guarded like the other branches, and bounded: this runs on every
-        # vault open, so a missing or wedged sysctl must fall through to the
-        # actionable error below instead of raising something opaque or
-        # hanging the process forever.
         try:
             out = subprocess.run(["sysctl", "-n", "kern.boottime"],
                                  capture_output=True, text=True, check=True,
@@ -107,25 +141,65 @@ def boot_time() -> str:
             import re
             m = re.search(r"sec = (\d+)", out)
             if m:
-                return m.group(1)
-        except (OSError, subprocess.SubprocessError):
+                sec = float(m.group(1))
+                return sec, time.time() - sec
+        except (OSError, subprocess.SubprocessError, ValueError):
             pass
     elif system == "Linux":
         try:
+            btime = None
             with open("/proc/stat") as f:
                 for line in f:
                     if line.startswith("btime "):
-                        return line.split()[1].strip()
-        except OSError:
+                        btime = float(line.split()[1])
+                        break
+            with open("/proc/uptime") as f:
+                up = float(f.read().split()[0])
+            if btime is not None:
+                return btime, up
+        except (OSError, ValueError):
             pass
-    elif system == "Windows":
-        try:
-            return _windows_boot_token()
-        except Exception:
-            pass
-    raise RuntimeError(
-        "Cannot determine boot time on this platform; use --keychain (macOS) "
-        "or COMPARTMENT_PASSPHRASE instead of the boot-session credential")
+    return None
+
+
+def _posix_marker() -> Path:
+    """The POSIX pin. Windows keeps its own `.winboot` - renaming a marker
+    that live installs already rely on would re-key their credentials."""
+    base = Path(env("SESSION_DIR", home() / "session"))
+    return base / ".boottime"
+
+
+def _pinned_boot_token(computed: float, uptime_s: float, marker: Path) -> str:
+    """First value seen this boot, pinned; reused while the machine is up.
+
+    Naively returning the platform's own reading re-keys the session
+    credential whenever that reading moves, which relocks the vault
+    mid-session in three ways this avoids:
+      1. sub-second int() truncation flapping between two processes;
+      2. wall-clock steps and NTP slew moving the derived boot instant;
+      3. a jump of the whole sleep duration where the uptime source
+         excludes sleep (Windows GetTickCount64).
+    A real reboot resets uptime and moves the boot instant far beyond the
+    tolerance below, so it is detected and the token changes, as intended."""
+    try:
+        rec = json.loads(marker.read_text(encoding="utf-8"))
+        same_boot = (uptime_s + 2.0 >= float(rec["uptime"])       # uptime only grows within a boot
+                     and abs(computed - float(rec["boot"])) <= 300.0)  # tolerate steps and slew
+        if same_boot:
+            return str(int(float(rec["boot"])))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    # First sighting of this boot (or a detected reboot / unreadable marker):
+    # pin the freshly computed value for every later process to reuse.
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_name(marker.name + ".tmp")
+        tmp.write_text(json.dumps({"boot": computed, "uptime": uptime_s}),
+                       encoding="utf-8")
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+    return str(int(computed))
 
 
 def _win_marker() -> Path:
@@ -152,26 +226,7 @@ def _windows_boot_token() -> str:
     import ctypes
     uptime_s = ctypes.windll.kernel32.GetTickCount64() / 1000.0  # excludes sleep
     computed = time.time() - uptime_s                            # ~boot instant
-    marker = _win_marker()
-    try:
-        rec = json.loads(marker.read_text(encoding="utf-8"))
-        same_boot = (uptime_s + 2.0 >= float(rec["uptime"])       # uptime only grows within a boot
-                     and abs(computed - float(rec["boot"])) <= 300.0)  # tolerate NTP slew
-        if same_boot:
-            return str(int(float(rec["boot"])))
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    # First sighting of this boot (or a detected reboot / unreadable marker):
-    # pin the freshly computed value for every later process to reuse.
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        tmp = marker.with_name(marker.name + ".tmp")
-        tmp.write_text(json.dumps({"boot": computed, "uptime": uptime_s}),
-                       encoding="utf-8")
-        os.replace(tmp, marker)
-    except OSError:
-        pass
-    return str(int(computed))
+    return _pinned_boot_token(computed, uptime_s, _win_marker())
 
 
 # ---------------------------------------------------------------------------

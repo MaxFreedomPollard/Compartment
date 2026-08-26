@@ -58,6 +58,78 @@ def test_boot_time_stable_within_session():
     assert a == b and a.isdigit()  # same boot → identical, numeric epoch
 
 
+# ---------------------------------------------------------------------------
+# The boot token is hashed into the session credential's wrap key, and
+# session.get() deletes a credential its key will not open. The kernels
+# derive the boot instant from the wall clock, so an NTP STEP moves it -
+# which is why the token is pinned per boot and a moved reading must never
+# reach the key.
+# ---------------------------------------------------------------------------
+
+def _tmp_session_dir(monkeypatch, tmp_path):
+    d = tmp_path / "session"
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(d))
+    return d
+
+
+def test_boot_token_pins_the_first_value_seen(tmp_path, monkeypatch):
+    d = _tmp_session_dir(monkeypatch, tmp_path)
+    tok = platforms._pinned_boot_token(1000.0, 50.0, d / ".boottime")
+    assert tok == "1000"
+    assert (d / ".boottime").is_file()
+
+
+def test_a_clock_step_cannot_move_the_boot_token(tmp_path, monkeypatch):
+    """The CI-runner case, and every NTP step on a live machine: the derived
+    boot instant moves a few seconds while uptime keeps growing. The pinned
+    token must hold, or the credential sealed under the old value dies."""
+    d = _tmp_session_dir(monkeypatch, tmp_path)
+    marker = d / ".boottime"
+    first = platforms._pinned_boot_token(1000.0, 50.0, marker)
+    stepped = platforms._pinned_boot_token(1003.0, 51.0, marker)   # +3s step
+    slewed = platforms._pinned_boot_token(999.2, 52.0, marker)     # slew back
+    assert first == stepped == slewed == "1000"
+
+
+def test_a_reboot_moves_the_boot_token(tmp_path, monkeypatch):
+    """Shrunk uptime is the reboot signature; the token must change so the
+    restart genuinely relocks."""
+    d = _tmp_session_dir(monkeypatch, tmp_path)
+    marker = d / ".boottime"
+    assert platforms._pinned_boot_token(1000.0, 500.0, marker) == "1000"
+    assert platforms._pinned_boot_token(1490.0, 10.0, marker) == "1490"
+
+
+def test_boot_time_survives_a_stepped_kernel_reading(tmp_path, monkeypatch):
+    """End to end through boot_time(): the platform estimate moves 3 seconds
+    between two calls, the answer does not."""
+    _tmp_session_dir(monkeypatch, tmp_path)
+    readings = iter([(2000.0, 100.0), (2003.0, 101.0)])
+    monkeypatch.setattr(platforms, "_posix_boot_estimate",
+                        lambda: next(readings))
+    monkeypatch.setattr(platforms.platform, "system", lambda: "Linux")
+    assert platforms.boot_time() == platforms.boot_time() == "2000"
+
+
+def test_a_clock_step_does_not_kill_the_session_credential(tmp_path, monkeypatch):
+    """The whole point, at the session layer: a credential stored before a
+    3-second clock step still opens after it, and the file survives. Before
+    the pin, the moved reading re-keyed the wrap key and get() deleted the
+    credential - a vault that was unlocked stayed locked until the
+    passphrase was typed again."""
+    from compartment import session
+    _tmp_session_dir(monkeypatch, tmp_path)
+    base = [(3000.0, 100.0)]
+    monkeypatch.setattr(platforms, "_posix_boot_estimate", lambda: base[0])
+    monkeypatch.setattr(platforms.platform, "system", lambda: "Linux")
+    vault = str(tmp_path / "v.vault")
+    key = b"k" * 32
+    session.store(vault, key)
+    base[0] = (3003.0, 101.0)                                      # the step
+    assert session.get(vault) == key
+    assert session._file_for(vault).is_file()
+
+
 def test_filelock_is_exclusive(tmp_path):
     lockpath = str(tmp_path / "x.flock")
     with platforms.FileLock(lockpath, timeout=0.3):
@@ -194,20 +266,53 @@ def test_no_machine_id_file_anywhere_is_no_id_rather_than_an_error(
         assert platforms._platform_id() is None
 
 
-@pytest.mark.skipif(hasattr(os, "getuid") and os.getuid() == 0,
-                    reason="root reads unreadable files")
 def test_an_unreadable_machine_id_file_raises(tmp_path, monkeypatch):
     """It exists, so this system HAS an id; we merely could not read it. That
-    is the case that must never be answered with the hostname."""
+    is the case that must never be answered with the hostname.
+
+    The unreadable thing is a DIRECTORY named machine-id: open() refuses that
+    with an OSError on every platform and for every user. The previous shape,
+    a file chmod'd to 0o000, read back fine in the two places this test also
+    runs - as root, and on Windows, whose chmod cannot drop read permission -
+    so it proved the contract on some machines and failed it on others."""
     blocked = tmp_path / "machine-id"
-    blocked.write_text("real-id\n")
-    blocked.chmod(0o000)
-    try:
-        with _linux(monkeypatch, blocked, tmp_path / "absent"):
-            with pytest.raises(RuntimeError):
-                platforms._platform_id()
-    finally:
-        blocked.chmod(0o600)
+    blocked.mkdir()
+    with _linux(monkeypatch, blocked, tmp_path / "absent"):
+        with pytest.raises(RuntimeError):
+            platforms._platform_id()
+
+
+def test_a_failed_registry_read_raises_on_windows(monkeypatch):
+    """The Windows branch carries the same contract as the file branch: a
+    MachineGuid that cannot be READ is a failed lookup, never a hostname
+    substitution. Faked through sys.modules so the branch runs on every
+    host."""
+    import types
+    fake = types.ModuleType("winreg")
+    fake.HKEY_LOCAL_MACHINE = object()
+
+    def deny(*a, **k):
+        raise PermissionError(13, "registry access denied")
+    fake.OpenKey = deny
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.setattr(platforms.platform, "system", lambda: "Windows")
+    with pytest.raises(RuntimeError):
+        platforms._platform_id()
+
+
+def test_a_missing_machineguid_is_no_id_rather_than_an_error(monkeypatch):
+    """No key at all means this system HAS no id - the documented hostname
+    case, not a fault."""
+    import types
+    fake = types.ModuleType("winreg")
+    fake.HKEY_LOCAL_MACHINE = object()
+
+    def absent(*a, **k):
+        raise FileNotFoundError(2, "no such registry key")
+    fake.OpenKey = absent
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.setattr(platforms.platform, "system", lambda: "Windows")
+    assert platforms._platform_id() is None
 
 
 # --- helpers ----------------------------------------------------------------
