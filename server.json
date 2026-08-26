@@ -8,13 +8,13 @@
     "source": "github",
     "id": "1306651494"
   },
-  "version": "4.9.1",
+  "version": "4.9.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "compartment",
-      "version": "4.9.1",
+      "version": "4.9.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

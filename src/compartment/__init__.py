@@ -1,6 +1,6 @@
 """Compartment - high-security, fully offline, encrypted vector memory for AI agents."""
 
-__version__ = "4.9.1"
+__version__ = "4.9.2"
 
 from . import offline_guard as _og
 
