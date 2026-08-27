@@ -37,11 +37,18 @@ server without the app.
 #    explains why; setting them both to "2.1" is what published a registry
 #    entry that never became latest.
 #
-#    plugin.json is the fifth field and the easiest to forget, because
-#    nothing downstream fails when it drifts. It is what a portable host
-#    prints in its own plugin list - `hermes plugins list` shows it in the
-#    Version column - so a stale number there tells the user they are
-#    running something they are not.
+#      integrations/hermes/compartment/plugin.yaml   version: "2.1"
+#      src/compartment/data/hermes-plugin/plugin.yaml  version: "2.1"
+#
+#    plugin.json and the two plugin.yaml copies are the easiest to forget,
+#    because nothing downstream fails when they drift. They are what a
+#    portable host prints in its own plugin list - `hermes plugins list`
+#    shows it in the Version column - so a stale number there tells the user
+#    they are running something they are not. That is not hypothetical: the
+#    plugin.yaml pair sat at 1.7.0 while the package shipped 4.9.2.
+#
+#    tests/test_version_lockstep.py now fails when any of them disagree, so
+#    this list is a gate rather than a thing to remember.
 
 python -m pytest -q                          # must be green
 
