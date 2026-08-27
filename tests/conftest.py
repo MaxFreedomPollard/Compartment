@@ -32,6 +32,20 @@ def vault_path(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_real_session_store(monkeypatch, tmp_path):
+    """No test writes a credential into the machine's real session store.
+
+    Any test that unlocks or creates a vault stores a boot-bound credential,
+    and the session directory defaults to the real ~/.compartment/session -
+    so a full run quietly left hundreds of dead .session files there, on the
+    machine of whoever ran it. That is exactly what the fixture below says a
+    suite run must never do. Tests that are about the store already pick
+    their own directory, and a setenv inside a test wins over this one.
+    """
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "session-store"))
+
+
+@pytest.fixture(autouse=True)
 def no_real_supervisors(monkeypatch, tmp_path, request):
     """No test talks to the machine's own launchd, systemd or Task Scheduler,
     or writes a start-at-login entry into the real home directory.
