@@ -99,6 +99,18 @@ RRF_RESIDUE_K = 20
 W_IMPORTANCE = 0.15
 W_RECENCY = 0.10
 RECENCY_HALF_LIFE_DAYS = 180.0
+# Opinions age differently from facts. A fact learned in March is as true in
+# September; a stance held in March may have been revised twice since, and
+# what a reader wants is the CURRENT one. So an opinion's recency runs from
+# the day it was last re-affirmed (falling back to created), decays on a much
+# shorter half-life, and carries three times the weight - enough that among
+# live opinions on one subject the newest wins decisively, while staying
+# multiplicative: it reorders matches and can never manufacture one. The
+# stronger mechanism for replaced opinions is superseding, which removes the
+# old record from retrieval entirely; this prior settles the remainder, the
+# same-subject opinions nobody has explicitly reconciled yet.
+W_RECENCY_OPINION = 0.30
+OPINION_RECENCY_HALF_LIFE_DAYS = 30.0
 
 # --- retrieval ----------------------------------------------------------------
 # Query terms occurring in more than this share of the vault are dropped when
@@ -216,10 +228,22 @@ def evidence(p_vec: float, p_lex: float,
     return score
 
 
-def prior(importance: float, created: float, now: float | None = None) -> float:
-    """Multiplicative modulation: reranks a match, never manufactures one."""
+def prior(importance: float, created: float, now: float | None = None,
+          kind: str = "fact", affirmed: float | None = None) -> float:
+    """Multiplicative modulation: reranks a match, never manufactures one.
+
+    `kind` and `affirmed` are optional so every existing caller keeps its
+    behavior bit for bit: with the defaults this is the fact prior it always
+    was. An opinion's recency runs from its last re-affirmation on the
+    shorter, heavier opinion constants above."""
     now = time.time() if now is None else now
     centred = 2.0 * float(importance) - 1.0        # 0.5 default -> exactly 0
+    if kind == "opinion":
+        ref = float(affirmed or created)
+        age_days = max(0.0, (now - ref) / SECONDS_PER_DAY)
+        recency = math.exp(
+            -math.log(2.0) * age_days / OPINION_RECENCY_HALF_LIFE_DAYS)
+        return W_IMPORTANCE * centred + W_RECENCY_OPINION * recency
     age_days = max(0.0, (now - float(created)) / SECONDS_PER_DAY)
     recency = math.exp(-math.log(2.0) * age_days / RECENCY_HALF_LIFE_DAYS)
     return W_IMPORTANCE * centred + W_RECENCY * recency
@@ -227,6 +251,7 @@ def prior(importance: float, created: float, now: float | None = None) -> float:
 
 def final_score(p_vec: float, p_lex: float, importance: float, created: float,
                 vec_rank: int | None = None, lex_rank: int | None = None,
-                now: float | None = None) -> float:
+                now: float | None = None, kind: str = "fact",
+                affirmed: float | None = None) -> float:
     return evidence(p_vec, p_lex, vec_rank, lex_rank) * (
-        1.0 + prior(importance, created, now))
+        1.0 + prior(importance, created, now, kind=kind, affirmed=affirmed))

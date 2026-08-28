@@ -232,15 +232,47 @@ that real use produced are actually visible - and `compartment status` reports
 `organic_records` beside the total, so a vault that has learned nothing can
 never look busy. Same view over MCP as `memory_recent`.
 
-**One fact per memory, dated.** A memory is an atomized data point, not a
-session log. `memory_store_many` takes a whole batch in one call, so storing
-six facts separately costs the same one round trip as bundling them into a
-longer format description - which is what made agents write longer format
-descriptions. Every memory carries the moment it was saved, and separately the
-day the fact was discovered together with how it was established, appended as a
-short `[web search, 2026-08-01]` clause. Those are two different dates: a price
-you check on the Friday and write up on the Monday keeps Friday as its
-discovery and Monday as its save.
+**One claim per memory, enforced.** A memory is an atomized data point, not a
+session log, and the store refuses anything else: over 200 characters (the
+`max_memory_chars` setting), lists, headings, paragraphs, and "recorded in
+the guide"-style narration all bounce with an error that says how to split.
+Asking nicely was measured not to work - against a real vault the median
+agent-written memory was 1,938 characters of headed, bulleted session log -
+so the shape rule lives in code, where it is obeyed at the moment of the
+mistake. `memory_store_many` takes a whole batch in one call, so six facts
+cost the same round trip as one blob. Every memory carries the moment it was
+saved, and separately the day the fact was discovered together with how it
+was established, appended as a short `[web search, 2026-08-01]` clause.
+Those are two different dates: a price you check on the Friday and write up
+on the Monday keeps Friday as its discovery and Monday as its save.
+`compartment atomize` retrofits an existing vault: it lists the over-limit
+records for your agent to split and applies the plan with every piece
+keeping the blob's own dates, the blob superseded but readable by id.
+
+**Facts accumulate; opinions update.** Compartment splits memories into two
+kinds because the two kinds of claim age differently. A fact, once
+established, simply joins the pile: the office door code changed, a script
+lives at a path, a release shipped - each new fact sits beside the others
+without displacing any of them. An opinion does not work that way. When
+someone states a preference, the right first question is never "where do I
+put this?" but "**what does this replace?**" - a stance is primarily an
+UPDATE to one already held, and only when nothing similar exists is it
+genuinely a first memory. A vault that files opinions the way it files
+facts fills with contradictions, and yesterday's replaced preference keeps
+answering searches forever. So `kind="opinion"` stores update-first: the
+vault itself looks for the live opinion the new one revises, and one
+resembling it is not inserted - the old record comes back, and the caller
+resends with `supersedes=[old id]` to replace it (a merged text keeps
+parts of both) or `supersedes=[]` to deliberately hold both. Restating a
+live opinion refreshes its date instead of storing a twin.
+Superseded records tombstone rather than delete: out of search and recent,
+kept in the journal and audit chain, still readable by id with a pointer to
+their replacement - and `supersedes` works on facts too, for corrections.
+Opinion ranking weights recency far harder than fact ranking, so the current
+stance outranks a stale one even before anything is reconciled;
+`compartment opinions audit` finds overlapping live opinions stored before
+the kind existed and resolves them keep-newest, or reports them for a
+subtler merge.
 
 **Search returns what is relevant, not a fixed number.** How many memories
 answer a question is a property of the question, so Compartment returns every
@@ -418,9 +450,11 @@ genuinely good at, sized to break ties rather than decide them:
 
 ```
 final(d) = score(d) · ( 1 + w_imp · (2·importance(d) - 1)
-                          + w_rec · 2^( -age_days(d) / 180 ) )
+                          + w_rec · 2^( -age_days(d) / half_life ) )
 
-w_imp = 0.15      w_rec = 0.10
+facts:     w_imp = 0.15   w_rec = 0.10   half_life = 180 days, from `created`
+opinions:  w_imp = 0.15   w_rec = 0.30   half_life = 30 days,  from the last
+                                         re-affirmation (`affirmed`)
 ```
 
 **Multiplicative, so a prior can only reorder a memory that already matched.**
@@ -437,7 +471,10 @@ only thing that moves.
 
 The tiers the capture path writes: decisions and consent 0.90, personal facts
 and preferences 0.80, the user's machine and configuration 0.75, other
-substantive statements 0.55, pleasantries 0.20. Recency halves every 180 days.
+substantive statements 0.55, pleasantries 0.20. A fact's recency halves
+every 180 days from when it was stored; an opinion's halves every 30 days
+from when it was last re-affirmed, at three times the weight - a stance is
+only as good as its currency, and the newest one on a subject must win.
 
 ### Retrieval order, and why the pool is wide
 
@@ -714,7 +751,9 @@ which on Linux is the applications menu entry.
 | `init` | create the vault. `--passphrase`, `--creator`, `--keychain`, `--no-session`, `--no-app` |
 | `unlock` / `lock` | open or close it. `--passphrase-stdin`, `--keyfile`, `--keychain`, `--once`; `lock --sign --identity` |
 | `status` / `verify` / `selftest` | what is in it, is it intact, does it work |
-| `store` / `get` / `forget` | one memory. `--namespace`, `--tag`, `--importance`, `--quarantined`, `forget --shred` |
+| `store` / `get` / `forget` | one memory. `--namespace`, `--tag`, `--importance`, `--quarantined`, `--kind fact\|opinion`, `--supersedes ID`, `--keep-both`, `--raw`, `forget --shred` |
+| `atomize` | list over-limit blob memories as JSONL (`--out` + `--plaintext`), apply an agent-written split plan (`--apply`); pieces keep the blob's dates, the blob is superseded |
+| `opinions audit` | backfill `kind` on opinion-shaped records, cluster overlapping live opinions, resolve with `--keep-newest`. `--threshold`, `--no-backfill`, `--json` |
 | `search` / `recent` | find things. `--namespace`, `--tag`, `--top-k`, `--limit`, `--all`, `--json` |
 | `link` / `relations` / `unlink` | the relation graph, with validity windows (`--from`, `--to`, `--as-of`) |
 | `panel` (`menubar`, `tray`) | the app. `--show`, `--self-check`, `--render`, `--login` |
@@ -765,6 +804,9 @@ sweep the conversation and write to the vault, so expect a burst of
 | `search_starter_facts` | `true` | whether the seeded facts join search results |
 | `include_packs_in_search` | `true` | the same, for installed packs |
 | `duplicate_threshold` | `0.97` | cosine similarity at which a store is a duplicate |
+| `max_memory_chars` | `200` | the store gate's one-claim length limit for authored memories. `0` disables the length and layout checks |
+| `opinion_update_threshold` | `0.80` | similarity at which a new opinion is an update of a live one and needs a supersedes decision |
+| `opinion_reaffirm_threshold` | `0.97` | similarity at which a restated opinion re-affirms the live record instead of storing |
 | `index_precision` | `"f32"` | `"int8"` uses a quarter of the RAM |
 | `retag_interval_hours` | `6` | how often the background pass re-derives tags. `0` turns it off |
 | `retag_prune` | `false` | whether that pass may also REMOVE tags the vault no longer supports |

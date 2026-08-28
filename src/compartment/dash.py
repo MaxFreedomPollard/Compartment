@@ -190,8 +190,13 @@ def snapshot_recent(v: Vault, caller: str = "dash", limit: int = 20) -> dict:
         v._require_open()
         allowed = set(v._readable_namespaces(caller))
         ns, nsp = _ns_clause(allowed)
+        # Tombstones stay out of the dashboard's feed for the same reason
+        # they stay out of Vault.recent: a superseded record has a live
+        # replacement, and showing the replaced version presents a stance
+        # its holder revised as current.
         for row in v.db.conn.execute(
-                f"SELECT * FROM records WHERE {ns} "
+                f"SELECT * FROM records WHERE superseded_by IS NULL "
+                f"AND {ns} "
                 f"ORDER BY created DESC LIMIT ?", nsp + [limit]):
             text = v.db.decrypt_text(row, v._master)
             out.append({
@@ -227,6 +232,8 @@ def snapshot_search(v: Vault, query: str, caller: str = "dash",
         for rid in sorted(boosted, key=boosted.get, reverse=True):
             row = v.db.get_row(rid)
             if row is None or row["ns"] not in allowed:
+                continue
+            if row["superseded_by"]:      # same guard as Vault.search
                 continue
             text = v.db.decrypt_text(row, v._master)
             results.append({

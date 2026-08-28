@@ -205,7 +205,12 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
                       tags=rec["tags"], importance=rec["importance"],
                       # Captured from the conversation as it happened, which is
                       # the truthful method for anything the user said.
-                      source="from chat")
+                      source="from chat",
+                      # Verbatim capture: a hook cannot rephrase the user's
+                      # turn to satisfy the shape gate, and dropping a consent
+                      # decision because it ran long would be worse than a
+                      # long record.
+                      _gate=False)
         v.save()
     except Exception as exc:                            # noqa: BLE001
         return {"stored": False, "reason": f"store failed: {exc}"}

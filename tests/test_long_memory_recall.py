@@ -79,9 +79,9 @@ def _long_memory_with_needle_at_the_end() -> str:
 def test_a_fact_past_the_encoder_window_is_retrievable(vault, emb):
     text = _long_memory_with_needle_at_the_end()
     assert len(emb.chunk(text)) > 1, "fixture must actually exceed one window"
-    vault.store(text, caller="test", namespace="main")
+    vault.store(text, caller="test", namespace="main", _gate=False)
     vault.store("An unrelated memory about printers and network ports.",
-                caller="test", namespace="main")
+                caller="test", namespace="main", _gate=False)
     hits = vault.search("uppercase word boundary Summer Hammer pairing codes",
                         caller="test", top_k=3)["results"]
     assert hits and strip_provenance(hits[0]["text"]) == text
@@ -91,7 +91,7 @@ def test_the_same_fact_is_missed_when_only_the_opening_is_embedded(vault, emb):
     """Pins the failure mode, so a regression to single-vector records is loud."""
     text = _long_memory_with_needle_at_the_end()
     head_only = emb.embed_passages([text])[0]        # what the old code stored
-    vault.store(text, caller="test", namespace="main", vec=head_only)
+    vault.store(text, caller="test", namespace="main", vec=head_only, _gate=False)
     q = emb.embed_query("uppercase word boundary Summer Hammer pairing codes")
     windows = emb.embed_record(text)
     best_window = float(np.max(windows @ q))
@@ -102,7 +102,7 @@ def test_the_same_fact_is_missed_when_only_the_opening_is_embedded(vault, emb):
 
 def test_every_window_is_removed_when_the_record_is_forgotten(vault):
     text = _long_memory_with_needle_at_the_end()
-    r = vault.store(text, caller="test", namespace="main")
+    r = vault.store(text, caller="test", namespace="main", _gate=False)
     assert len(vault.db.vector_keys(r["id"])) > 1
     vault.forget(r["id"], caller="test")
     assert vault.db.vector_keys(r["id"]) == []
@@ -111,8 +111,8 @@ def test_every_window_is_removed_when_the_record_is_forgotten(vault):
 
 
 def test_index_keys_are_never_reused_between_records(vault):
-    a = vault.store("first memory " * 200, caller="test", namespace="main")
-    b = vault.store("second memory " * 200, caller="test", namespace="main")
+    a = vault.store("first memory " * 200, caller="test", namespace="main", _gate=False)
+    b = vault.store("second memory " * 200, caller="test", namespace="main", _gate=False)
     ka = set(vault.db.vector_keys(a["id"]))
     kb = set(vault.db.vector_keys(b["id"]))
     assert ka and kb and not (ka & kb)
@@ -121,7 +121,7 @@ def test_index_keys_are_never_reused_between_records(vault):
 def test_a_vault_written_before_windows_still_searches(vault):
     """all_vectors falls back to records.vec when the window table is empty."""
     vault.store("A memory about audit chains and journal replay.",
-                caller="test", namespace="main")
+                caller="test", namespace="main", _gate=False)
     vault.db.conn.execute("DELETE FROM vecs")
     vault._rebuild_index()
     hits = vault.search("audit chain journal", caller="test", top_k=3)["results"]
@@ -130,7 +130,7 @@ def test_a_vault_written_before_windows_still_searches(vault):
 
 def test_rebuild_windows_backfills_an_older_vault(vault, emb):
     text = _long_memory_with_needle_at_the_end()
-    r = vault.store(text, caller="test", namespace="main")
+    r = vault.store(text, caller="test", namespace="main", _gate=False)
     vault.db.conn.execute("DELETE FROM vecs")          # simulate an old vault
     vault._rebuild_index()
     report = vault.rebuild_windows(caller="test")
@@ -144,7 +144,7 @@ def test_rebuild_windows_backfills_an_older_vault(vault, emb):
 
 def test_rebuild_windows_is_idempotent(vault):
     vault.store(_long_memory_with_needle_at_the_end(), caller="test",
-                namespace="main")
+                namespace="main", _gate=False)
     vault.rebuild_windows(caller="test")
     again = vault.rebuild_windows(caller="test")
     assert again["rebuilt"] == 0
@@ -153,7 +153,7 @@ def test_rebuild_windows_is_idempotent(vault):
 def test_rebuild_windows_skips_short_records_without_tokenizing_them(vault):
     for i in range(5):
         vault.store(f"A short memory number {i}.", caller="test",
-                    namespace="main")
+                    namespace="main", _gate=False)
     assert vault.rebuild_windows(caller="test")["examined"] == 0
 
 
@@ -187,7 +187,8 @@ def test_a_partly_upgraded_vault_indexes_every_record(vault):
 
 
 def test_a_record_with_windows_is_not_also_indexed_by_its_head_vector(vault):
-    r = vault.store("long memory " * 400, caller="test", namespace="main")["id"]
+    r = vault.store("long memory " * 400, caller="test", namespace="main",
+                    _gate=False)["id"]
     ids, ikeys, _ = vault.db.all_vectors()
     windows = vault.db.vector_keys(r)
     assert len(windows) > 1

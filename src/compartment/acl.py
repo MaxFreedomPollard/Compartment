@@ -33,6 +33,16 @@ DEFAULT_CONFIG = {
         # set should do something.
         "expire_memories": True,
         "duplicate_threshold": 0.97,
+        # The store gate's length limit for authored memories: one claim of
+        # at most this many characters. 0 disables the length and layout
+        # checks. Present here so the knob is discoverable in the config
+        # file rather than only in the source.
+        "max_memory_chars": 200,
+        # The opinion bands. At or above reaffirm, a restated opinion
+        # refreshes the live record; between update and reaffirm, the store
+        # returns the live record for an explicit supersedes decision.
+        "opinion_update_threshold": 0.80,
+        "opinion_reaffirm_threshold": 0.97,
         "index_precision": "f32",
     },
 }

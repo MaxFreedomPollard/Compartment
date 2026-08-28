@@ -24,22 +24,29 @@ release locations.
 any thought that is not publicly available. Anything that would be expensive or
 impossible to work out again from scratch.
 
-**Also store the session itself, as its own memory:** what was asked, what it
-actually turned into, roughly how long it ran, what changed by the end, and
-what is still open. That the work happened and what it did is information in
-its own right, sometimes more useful than any single detail inside it.
+**Also store the session itself - as several one-claim memories, never one
+narrative:** one for what was asked, one for what it turned into, one for
+what changed by the end, one for what is still open. That the work happened
+and what it did is information in its own right, sometimes more useful than
+any single detail inside it, and each of those claims is recalled on its
+own.
 
 **Skip:** common public knowledge, anything already stored unless it is an
 update with additional or changed information, and the Compartment vault
 passphrase itself.
 
-Write each memory to stand alone: one fact or one narrative, dated where a date
-matters, no pronouns pointing back at this conversation and no "as discussed
-above". Never leave out information that is necessary to understand the memory
-on its own. Do include any and all relevant metadata or succinct associative
-information. Set namespace, tags and importance. Put the time of the events
-themselves in the text, as absolute dates; the record's own timestamp is
-written automatically and only records when the memory was saved.
+Write each memory to stand alone: ONE claim of at most 200 characters by
+default - the vault enforces this and refuses lists, headings and
+paragraphs - with no pronouns pointing back at this conversation and no "as
+discussed above". Never leave out information that is necessary to
+understand the memory on its own. Several facts go through
+memory_store_many, one record each, in one call. Store preferences,
+stances and judgement calls with kind='opinion': opinions update instead
+of accumulate, and one resembling a live opinion comes back for an
+explicit supersedes=[old id] resend. Set namespace, tags and importance.
+When a fact was established before today, pass discovered=YYYY-MM-DD; the
+vault stamps every memory's dates itself, so never type dates into the
+text.
 
 Do not stop early. Finish the sweep, then report how many were stored and how
 many updated.

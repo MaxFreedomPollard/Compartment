@@ -103,7 +103,10 @@ def run(vault, synthetic_n: int = 20_000, queries: int = 50) -> dict:
             text = f"benchmark memory {i}: " + " ".join(rng.choices(WORDS, k=10))
             t0 = time.perf_counter()
             res = vault.store(text, caller="bench", namespace="bench",
-                              tags=["bench"])
+                              # Generated filler, not authored claims: the
+                              # bench must keep timing stores even if the
+                              # vocabulary or the gate patterns change.
+                              tags=["bench"], _gate=False)
             t_store.append((time.perf_counter() - t0) * 1000)
             # a deduplicated store returns somebody else's record id; only the
             # ids this run actually created are ours to delete afterwards

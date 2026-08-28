@@ -245,7 +245,9 @@ def seed_records(vault, blob: bytes, caller: str = "user",
                     quarantined=False, vec=np.asarray(vec),
                     prov={"host": "seed", "agent": header["creator"],
                           "session": f"{header['name']}@{header['version']}"},
-                    _journal=False, _dedup=False)
+                    # Curated content installs verbatim; the shape gate is
+                    # for text being authored, same as _dedup here.
+                    _journal=False, _dedup=False, _gate=False)
     vault._audit_and_capture(
         caller, "seed",
         f"{header['name']}@{header['version']}: {len(records)} starting "

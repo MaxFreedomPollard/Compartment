@@ -98,9 +98,23 @@ append (acknowledged). Ops:
 
 ```json
 {"op":"store","audit":AuditRow,"record":{"id","ns","text","vec":base64_f32,
-  "tags",[...],"importance",n,"quarantined",b,"pack",s|null,"prov",{...},"created",t}}
+  "tags",[...],"importance",n,"quarantined",b,"pack",s|null,"prov",{...},"created",t,
+  "source",s|null,"discovered",s|null,"expires",s|null,"kind","fact"|"opinion",
+  "affirmed",t|null}}
 {"op":"forget","id":"...","shred":true|false,"audit":AuditRow}
+{"op":"expire","ids":["..."],"audit":AuditRow}
+{"op":"reaffirm","id":"...","affirmed":t,"audit":AuditRow}
+{"op":"supersede","ids":["..."],"by":"...","audit":AuditRow}
+{"op":"link","audit":AuditRow,"relation":{"id","subject","predicate","object",
+  "ns","src_id",s|null,"valid_from",t|null,"valid_to",t|null,"prov",{...},"created",t}}
+{"op":"unlink","id":"...","audit":AuditRow}
 ```
+
+A reader encountering an op it does not know refuses the vault (tamper),
+so a journal holding `reaffirm`/`supersede` entries opens only on builds
+that know those ops, until its next compaction folds them into the payload.
+Fields added to the `store` record after 1.0 (`source` through `affirmed`)
+are read with defaults, so older entries replay unchanged.
 
 Each entry is framed `u32 len | u32 crc32(len) | ciphertext`, where the
 checksum covers the four length bytes only. It exists to separate two

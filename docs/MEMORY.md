@@ -8,17 +8,27 @@ in this document is enforced by code and covered by the test suite.
 
 ## 1. How a memory is stored
 
-When an agent finishes a turn (or calls `compartment_store` / `memory_store`),
-the following happens **locally, in about 40 milliseconds, with zero
-network involvement**:
+When a memory is stored - by an agent calling `compartment_store` /
+`memory_store`, or by the auto-capture hook banking a turn - the following
+happens **locally, in about 40 milliseconds, with zero network
+involvement**. Step 0 applies only to AUTHORED stores: capture and restore
+paths (the hook, imports, pack installs) carry verbatim text they have no
+license to rewrite, and skip it.
 
 ```
 text
+ │  0. GATE          authored stores only: one claim, ≤ 200 characters by
+ ▼                   default (max_memory_chars); lists, headings, paragraphs
+ │                   and stored-elsewhere narration are refused with an
+ │                   error naming the fix
  │  1. EMBED         bundled bge-small int8 ONNX model, on your CPU
  ▼                   → one 384-dimensional unit vector (~25 ms)
 vector + text
- │  2. DEDUPLICATE   nearest-neighbor cosine ≥ 0.97 in the same namespace
- ▼                   → return the existing record instead of double-storing
+ │  2. DEDUPLICATE   facts: nearest-neighbor cosine ≥ 0.97 in the same
+ ▼                   namespace → return the existing record instead of
+ │                   double-storing. Opinions (kind="opinion") band instead:
+ │                   ≥ 0.97 to a live opinion re-affirms it, 0.80-0.97
+ │                   returns it for an explicit supersedes decision
 record
  │  3. ENCRYPT       fresh per-record key wraps the text (XChaCha20-Poly1305);
  ▼                   the per-record key itself is wrapped by the vault master
@@ -34,7 +44,12 @@ record
 
 Every stored record carries: the text (encrypted under its own key), its
 384-dim float32 vector, namespace, tags, importance, quarantine flag,
-provenance (host / agent / session), and timestamps. **The vector is
+provenance (host / agent / session), timestamps, how it was established
+(`source`) and the day it became known (`discovered`), an optional last
+day it is true (`expires`), its `kind` (fact or opinion), the moment an
+opinion was last re-affirmed (`affirmed`), and - once replaced - the id
+of its replacement (`superseded_by`), which retires it from every
+retrieval surface while keeping it readable by id. **The vector is
 encrypted at rest too** - embeddings can be partially inverted back toward
 their text, so treating vectors as non-sensitive (as most systems do) is a
 hole; Compartment doesn't have it.
@@ -102,22 +117,32 @@ vocabulary (*registry, path, password, port, install, version, sudo,
 service*) marks tier-0.75 machine facts. Nothing is discarded for being
 low-value - pleasantries are simply ranked last.
 
-**Deduplication is exact-match only.** Vault.store drops a write whose
-nearest neighbor is ≥ 0.97 cosine (a literal repeat) and returns the
-existing id. There is deliberately **no aggressive novelty gate**: a second
-"yes" to a *different* question is new information, and because its stored
-text embeds the question it is not a near-duplicate anyway. Compartment favors
-completeness over compactness - at a few KB per memory, thousands of turns
-cost only a few MB, and importance-weighted ranking keeps recall sharp.
+**Facts deduplicate exact-match; opinions update.** For a fact, Vault.store
+drops a write whose nearest neighbor is ≥ 0.97 cosine (a literal repeat)
+and returns the existing id - a second "yes" to a *different* question is
+new information, and because its stored text embeds the question it is not
+a near-duplicate. An opinion (kind="opinion") gets more than that, on
+purpose: at ≥ 0.97 to a live opinion the store re-affirms the existing
+record instead of twinning it, and between 0.80 and 0.97 it refuses to
+insert and returns the live record for an explicit decision - resend with
+`supersedes=[its id]` to replace it, or `supersedes=[]` to deliberately
+hold both. A store that names `supersedes` skips the duplicate guard,
+because a correction is often a near-duplicate of what it corrects.
+Compartment still favors completeness for facts; what it refuses to
+accumulate is contradictory stances.
 
-**Recall reflects the priority.** The fused search score is
-`RRF(vector) + RRF(keyword) + 0.02·cosine + 0.006·importance`. The cosine
-term preserves the *magnitude* of a strong match (so the best answer wins
-outright); the importance term is a gentle nudge that lets a
-personal/decision memory win a genuine near-tie without overriding a
-clearly better match. In practice: ask "what theme does the user like?"
-and the dark-mode preference wins on relevance; ask "did the user say to
-email the client?" and the consent decision wins.
+**Recall reflects the priority.** The two search channels combine as a
+soft OR over independent evidence, in log space:
+`score = -0.75·log(1 - p_vec) - 0.25·log(1 - p_lex)` plus a small
+rank-agreement residue, so either channel alone can establish relevance
+and neither can veto the other. Importance and recency then MULTIPLY:
+`final = score · (1 + 0.15·(2·importance - 1) + recency)`, where recency
+is `0.10·2^(-age/180d)` for a fact and `0.30·2^(-age/30d)` for an opinion,
+measured from its last re-affirmation - so the current stance outranks a
+stale one, and a prior can only reorder memories that already matched. In
+practice: ask "what theme does the user like?" and the dark-mode
+preference wins on relevance; ask "did the user say to email the client?"
+and the consent decision wins.
 
 **The agent-directed path.** The host model (Hermes, Claude, anything)
 also holds `compartment_store` / `compartment_forget` tools, so the intelligence
@@ -156,8 +181,9 @@ Systems that let the embedding model drift silently corrupt every
 similarity they compute afterward - the errors are invisible until
 retrieval quietly degrades.
 
-**Completeness with clean recall.** Compartment stores nearly every turn (only
-exact-duplicate writes are dropped), so nothing the user says is lost -
+**Completeness with clean recall.** Compartment stores nearly every captured
+turn (exact-duplicate writes are dropped, and contradictory opinions are
+reconciled rather than accumulated), so nothing the user says is lost -
 but importance tiers and cosine-weighted fusion keep retrieval sharp, so a
 complete store does not mean a noisy recall. Turn-logging systems also grow
 O(turns) but rank purely by recency or raw keyword match, so their

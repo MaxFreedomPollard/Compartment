@@ -143,7 +143,10 @@ def import_files(vault, files: list[Path], caller: str = "import-claude",
                               tags=rec["tags"], importance=rec["importance"],
                               # Read off disk, not learned in conversation: the
                               # method has to say which of the two it was.
-                              source=f"read from {f.name}")
+                              source=f"read from {f.name}",
+                              # An import restores existing notes verbatim;
+                              # the shape gate is for text being authored.
+                              _gate=False)
         except Exception as exc:                       # noqa: BLE001
             failed += 1
             errors.append(f"{f.name}: {exc}")

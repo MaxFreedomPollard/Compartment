@@ -155,7 +155,27 @@ class Store:
     # row stay valid without being rewritten: a memory stored before this
     # version simply has no recorded source, and reads as such.
     _ADDED_COLUMNS = (("source", "TEXT"), ("tags_origin", "TEXT"),
-                      ("discovered", "TEXT"), ("expires", "TEXT"))
+                      ("discovered", "TEXT"), ("expires", "TEXT"),
+                      # What KIND of claim this is: NULL and "fact" both read
+                      # as fact, so every record written before the column
+                      # existed keeps its meaning without being rewritten.
+                      # "opinion" marks preferences, stances and judgement
+                      # calls - claims that UPDATE rather than accumulate,
+                      # with their own store path (vault.store) and a
+                      # recency-heavy ranking prior (ranking.prior).
+                      ("kind", "TEXT"),
+                      # When an opinion was last re-affirmed (unix time). A
+                      # restated opinion refreshes this instead of inserting a
+                      # twin, so "how current is this stance" is answerable
+                      # without giving up `created`, which keeps the moment it
+                      # was first held.
+                      ("affirmed", "REAL"),
+                      # The record that replaced this one. Set = tombstoned:
+                      # excluded from search, recent and the vector index,
+                      # kept for history and still readable by id. Never a
+                      # deletion - the journal and audit chain retain the
+                      # full story of what was believed when.
+                      ("superseded_by", "TEXT"))
 
     #: Indexes on columns that arrive by migration. They cannot live in SCHEMA:
     #: that runs BEFORE the ALTER TABLE above, so on a vault sealed by an older
@@ -217,7 +237,9 @@ class Store:
                tags: list[str], importance: float, quarantined: bool, pack: str | None,
                prov: dict, master_key: bytes, created: float | None = None,
                source: str | None = None, discovered: str | None = None,
-               expires: str | None = None) -> str:
+               expires: str | None = None, kind: str | None = None,
+               affirmed: float | None = None,
+               superseded_by: str | None = None) -> str:
         rid = record_id or uuid.uuid4().hex
         rk, wrapped = crypto.new_record_key(master_key, rid)
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
@@ -231,18 +253,95 @@ class Store:
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
             " quarantined, pack, prov, created, accessed, source, tags_origin,"
-            " discovered, expires)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " discovered, expires, kind, affirmed, superseded_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, self.next_ikey(), ns, ct, wrapped,
              head.tobytes(), int(head.shape[0]),
              json.dumps(tags), float(importance), int(quarantined), pack,
              json.dumps(prov), created or now, now,
-             source, json.dumps(tags), discovered, expires),
+             source, json.dumps(tags), discovered, expires,
+             kind, affirmed, superseded_by),
         )
         self.set_vectors(rid, allv)
-        self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)", (rid, text))
+        # A record born superseded (a restore of history) never joins the
+        # searchable surface: no FTS row, exactly as tombstone() leaves one.
+        if superseded_by is None:
+            self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
+                              (rid, text))
         self._invalidate_df()
         return rid
+
+    def tombstone(self, record_id: str, by: str) -> bool:
+        """Mark a record superseded by another. The row, its ciphertext and
+        its vectors stay - history is kept, and export still carries it - but
+        its FTS row goes, so the keyword channel can never surface it. The
+        caller removes its windows from the RAM index; all_vectors() keeps
+        them out of every future rebuild."""
+        cur = self.conn.execute(
+            "UPDATE records SET superseded_by = ? WHERE id = ?",
+            (by, record_id))
+        self.conn.execute("DELETE FROM fts WHERE id = ?", (record_id,))
+        self._invalidate_df()
+        return cur.rowcount > 0
+
+    def reaffirm(self, record_id: str, ts: float) -> bool:
+        """Refresh an opinion's affirmed time: it was just re-stated."""
+        cur = self.conn.execute(
+            "UPDATE records SET affirmed = ? WHERE id = ?", (ts, record_id))
+        return cur.rowcount > 0
+
+    def restore_children(self, record_id: str, master_key: bytes) -> list[str]:
+        """Bring back to life every record superseded by `record_id`.
+
+        Called before that record is deleted. Without this, deleting (or
+        expiring) a replacement leaves its predecessors tombstoned forever:
+        invisible to every retrieval surface, pointing at an id that no
+        longer exists, and refused by _supersede_check if anyone tries to
+        replace them properly. Deleting the correction means the original
+        stands again. The FTS rows are re-added here; the caller restores
+        the RAM index entries, and all_vectors() includes the records again
+        on any later rebuild."""
+        rows = self.conn.execute(
+            "SELECT id FROM records WHERE superseded_by = ?",
+            (record_id,)).fetchall()
+        restored = []
+        for r in rows:
+            rid = r["id"]
+            self.conn.execute(
+                "UPDATE records SET superseded_by = NULL WHERE id = ?", (rid,))
+            row = self.get_row(rid)
+            self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
+                              (rid, self.decrypt_text(row, master_key)))
+            restored.append(rid)
+        if restored:
+            self._invalidate_df()
+        return restored
+
+    def vectors_of(self, record_id: str) -> list[tuple[int, np.ndarray]]:
+        """(ikey, vector) for every embedding window of one record, falling
+        back to the record's own head vector for pre-window rows - the same
+        union rule as all_vectors(), for one record."""
+        rows = self.conn.execute(
+            "SELECT ikey, vec FROM vecs WHERE id = ? ORDER BY seq",
+            (record_id,)).fetchall()
+        if not rows:
+            rows = self.conn.execute(
+                "SELECT ikey, vec FROM records WHERE id = ?",
+                (record_id,)).fetchall()
+        return [(int(r["ikey"]), np.frombuffer(r["vec"], dtype=np.float32))
+                for r in rows]
+
+    def set_kind(self, record_id: str, kind: str | None) -> bool:
+        """Reclassify a record as fact or opinion (the opinions audit's
+        backfill). Text, vectors, dates and importance are untouched."""
+        cur = self.conn.execute(
+            "UPDATE records SET kind = ? WHERE id = ?", (kind, record_id))
+        return cur.rowcount > 0
+
+    def superseded_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM records WHERE superseded_by IS NOT NULL"
+        ).fetchone()["c"]
 
     def _invalidate_df(self) -> None:
         """Drop cached document frequencies. Called wherever FTS content
@@ -357,11 +456,17 @@ class Store:
         single vector if it does not, and the two tables share one key space,
         so nothing can collide.
         """
+        # Superseded records keep their vectors in the tables (history, and
+        # export fidelity) but contribute nothing to the index: a replaced
+        # opinion answering searches is exactly what superseding exists to end.
         rows = list(self.conn.execute(
-            "SELECT id, ikey, vec FROM vecs ORDER BY ikey").fetchall())
+            "SELECT v.id, v.ikey, v.vec FROM vecs v JOIN records r"
+            " ON r.id = v.id WHERE r.superseded_by IS NULL"
+            " ORDER BY v.ikey").fetchall())
         windowed = {r["id"] for r in rows}
         rows += [r for r in self.conn.execute(
-            "SELECT id, ikey, vec FROM records ORDER BY ikey").fetchall()
+            "SELECT id, ikey, vec FROM records WHERE superseded_by IS NULL"
+            " ORDER BY ikey").fetchall()
             if r["id"] not in windowed]
         ids = [r["id"] for r in rows]
         ikeys = [r["ikey"] for r in rows]
@@ -398,6 +503,7 @@ class Store:
         """
         rows = self.conn.execute(
             "SELECT id, tags FROM records WHERE pack IS NULL"
+            " AND superseded_by IS NULL"
             " AND expires IS NOT NULL AND expires != '' AND expires < ?"
             " ORDER BY expires, id", (today,)).fetchall()
         return [(r["id"], r["tags"]) for r in rows]
@@ -416,8 +522,13 @@ class Store:
         can ask, what has already expired is generally gone. What they
         actually want to know is what is going to go, and when.
         """
+        # Tombstones are excluded from both listings: a superseded record is
+        # already out of every retrieval surface, so sweeping it would only
+        # destroy the history the tombstone exists to keep, and showing it
+        # as "going next" would name a record the reader cannot find.
         rows = self.conn.execute(
             "SELECT id, expires, tags FROM records WHERE pack IS NULL"
+            " AND superseded_by IS NULL"
             " AND expires IS NOT NULL AND expires != ''"
             " ORDER BY expires, id").fetchall()
         return [(r["expires"], r["id"], r["tags"]) for r in rows]

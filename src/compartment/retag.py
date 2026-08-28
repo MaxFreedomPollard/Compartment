@@ -263,7 +263,11 @@ def targets(vault, *, include_seeded: bool = False) -> list[str]:
     something a user can feel."""
     from .vault import is_seeded
     out = []
-    for row in vault.db.conn.execute("SELECT id, tags FROM records ORDER BY id"):
+    # Tombstones are excluded: retagging a record no search can return is
+    # lock time spent on nothing.
+    for row in vault.db.conn.execute(
+            "SELECT id, tags FROM records WHERE superseded_by IS NULL"
+            " ORDER BY id"):
         if include_seeded or not is_seeded(row["tags"]):
             out.append(row["id"])
     return out
