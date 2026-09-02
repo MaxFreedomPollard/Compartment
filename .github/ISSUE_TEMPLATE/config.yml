@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/MaxFreedomPollard/Compartment/blob/main/SECURITY.md
+    about: Please do not file vulnerabilities in the public tracker. SECURITY.md says how to report one privately.
+  - name: Question or idea
+    url: https://github.com/MaxFreedomPollard/Compartment/discussions
+    about: Ask how something works, or float a design before writing code.

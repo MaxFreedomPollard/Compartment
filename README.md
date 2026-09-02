@@ -1,165 +1,130 @@
 # Compartment
 
-[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
-[![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
+**Encrypted, fully offline memory for AI agents.** One vault on your own
+machine, shared by Claude Code, Claude Desktop, Cursor, Codex, Hermes,
+OpenClaw and any other MCP client. Nothing leaves the computer: no API key,
+no account, no network, no telemetry.
+
 [![PyPI](https://img.shields.io/pypi/v/compartment)](https://pypi.org/project/compartment/)
 [![Downloads](https://static.pepy.tech/badge/compartment)](https://pepy.tech/project/compartment)
+[![CI](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![MCP registry](https://img.shields.io/badge/MCP%20registry-listed-blue)](https://registry.modelcontextprotocol.io/v0/servers?search=compartment)
 
-<a href="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment"><img width="380" height="200" src="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment/badge" alt="Compartment MCP server" /></a>
+<p align="center">
+  <img src="docs/images/dashboard.png" width="820" alt="compartment dash: the vault at a glance - memories by kind, growth over time, the relation graph">
+</p>
 
-**Listed on:** [PyPI](https://pypi.org/project/compartment/) · [Glama](https://glama.ai/mcp/servers/@MaxFreedomPollard/Compartment) · [LobeHub](https://lobehub.com/mcp/maxfreedompollard-compartment) · [MCP Toplist](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment) · [mcpservers.org](https://mcpservers.org/servers/maxfreedompollard/compartment) · [TensorBlock](https://www.tensorblock.co/mcp/servers/github-maxfreedompollard-compartment-4ab11161) · [Libraries.io](https://libraries.io/pypi/compartment) · [Snyk Advisor](https://snyk.io/advisor/python/compartment) · [deps.dev](https://deps.dev/pypi/compartment)
-
-### Durable agentic memory, encrypted at rest.
-
-With Compartment, your AI agent gets better with experience: it notices 
-and permanently stores every decision, preference and detail offline, encrypted,
-to your own computer. Hermes, Claude, OpenClaw and other AI Agents are all
-hooked up to Compartment in one single command. One fully-transferable memory store 
-is shared by all agents on the computer. 100% offline: no network, no
-API key, no cloud account, no telemetry. The embedding model ships inside
-the package, and a full search returns in about 12 ms, beating the round-trip
-a hosted memory charges you for. Every byte at rest is AEAD-encrypted, the
-embedding vectors included, and only your passphrase opens it.
-
-Unlike other agentic memory, we offer an option to start off with memory -
-6,718 curated facts seeded at install: the physical constants and unit
-conversions, 800+ hardware facts with real specs (Apple silicon, PCs, CPUs
-and GPUs, phones, game consoles, Raspberry Pi, storage, displays,
-connectors) to provide a map of computer geography, operating system
-versions and release names, network ports and HTTP, file signatures,
-character encodings, shell and Unix internals, git, regex, SQL and hashing,
-ISO country, currency and time codes, and more. This allows an offline agent to
-operate better without internet, and an online agent to operate faster and
-more accurately with an accurate map of the computer-verse. 
-
-**More secure, by construction.** Every byte at rest is
-authenticated-encrypted, the embedding vectors included (most tools leave
-those in the clear, and vectors can be inverted back toward text). Deletion
-is cryptographic: destroy the record's key and it is gone, unrecoverable.
-Tampering is detected, history is hash-chained, and the vault locks itself
-on restart or power loss. It runs fully offline: a runtime guard aborts on
-any network attempt, and CI proves it on three operating systems. This bad boy runs 
-in RAM but doesn't use much either. I use it on my 8GB RAM daily driver and it
-raises free RAM somehow. I think because my preference memories prevent Claude
-from sacrificing all my RAM to the Phoenician God Bal, or whatever it normally
-does to my RAM. 
-
-**Not one step harder.** One command installs it, creates the vault, and
-wires your agent. No API key, no cloud account, no daemon. Unlock when you
-want to use it; lock when you want it closed. By default an unlock stays
-open for weeks (until restart or you lock it), like any app you leave
-running. The security is free at the point of use because it falls out of
-the architecture, not out of your patience: keeping plaintext off disk
-forces the index into RAM, and a RAM-resident index is also the fastest one
-there is. Secure and fast are the same choice here, and neither costs you a
-configuration step.
+Your agent forgets you the moment the session ends. Compartment gives it a
+memory that survives: every decision, preference and detail it learns is
+stored on your own computer, and every agent on the machine reads and writes
+the same vault, so what Claude learned this morning Hermes knows tonight.
+Search is hybrid (meaning and keywords, fused as evidence) and answers in
+about 12 ms from an index held in RAM. The embedding model ships inside the
+package. At rest, every byte is authenticated-encrypted, the vectors
+included, under a passphrase only you hold.
 
 ## Install
 
-**One line install, works on all operating systems.**
+| | |
+|---|---|
+| **pip** (macOS, Linux, Windows) | `pip install compartment && compartment init` |
+| **pipx / uv** | `pipx install compartment` or `uv tool install compartment`, then `compartment init` |
+| **Homebrew** (macOS) | `brew install --cask maxfreedompollard/tap/compartment && compartment init` |
+| **One click** (macOS) | open **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest). Python, the model and every dependency are inside it |
+| **Docker** | `docker build -t compartment .` from a checkout. stdio only, no port; mount the vault at `/data` |
+
+Then connect the agent you use:
 
 ```bash
-pip install compartment && compartment init
+compartment integrate claude      # Claude Code + Claude Desktop
+compartment integrate hermes      # Hermes Agent: appears in `hermes memory setup` as "no setup needed"
+compartment integrate openclaw    # OpenClaw
+compartment integrate --list      # 28 MCP clients it can wire: Cursor, VS Code, Cline, Zed, Codex CLI, Gemini CLI, ...
 ```
 
-Then connect it to the agent you use:
+`init` asks you for a passphrase (nothing is generated for you), creates the
+vault, and starts the app: a menu bar item on macOS, a tray icon on Windows,
+a window on Linux. Restart your agent, and it has a memory.
 
-```bash
-compartment integrate claude
+<p align="center">
+  <img src="docs/images/menubar-panel.png" width="340" alt="The macOS menu bar panel: vault state, settings, the last five memories">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/images/windows-tray-panel.png" width="340" alt="The same panel on Windows">
+</p>
+
+Any other MCP client takes this block, stdio transport, no environment
+variables. Client-by-client walkthroughs are in
+[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+
+```json
+{ "mcpServers": { "compartment": { "command": "compartment", "args": ["serve"] } } }
 ```
 
-`claude`, `hermes` and `openclaw` are the three auto-connect targets. Each one
-also gets the **`/compartmentalize`** skill installed into its own skills
-directory.
+## What you get
 
-**`/compartmentalize` saves the conversation and relevant facts about it completely, 
-when you have more important conversations that you feel deserve greater analysis and retention.** 
-This is an additional option to, and not a replacement for, the constant background 
-memory creation. 
+- **One memory for every agent.** Claude, Hermes, OpenClaw, Cursor and the
+  CLI share one vault at the same time, each under its own caller identity
+  and namespace ACLs. Lock it, copy the file to another machine, unlock it
+  there.
+- **Encrypted at rest, vectors included.** XChaCha20-Poly1305 on everything;
+  Argon2id keyslots opened only by your passphrase; an optional keyfile as a
+  second factor. Embedding vectors can be inverted back toward their text,
+  so they are ciphertext too. `forget --shred` destroys a record's key:
+  gone, unrecoverable.
+- **Offline by construction.** A runtime guard aborts the process on any
+  network attempt, and CI runs the whole suite with it active on Linux,
+  macOS and Windows. Zero open ports. No telemetry, ever.
+- **Fast because it is secure.** Keeping plaintext off the disk forces the
+  index into RAM, and a RAM-resident index is the fastest one there is:
+  exact vector search below 20k records, about 12 ms for the full hybrid
+  pipeline, about 300 MB resident with the model loaded.
+- **Remembers the right things.** Decisions outrank preferences, preferences
+  outrank machine details, machine details outrank chatter, by a fixed rule
+  rather than a model's mood. A memory is one claim (the store refuses
+  session logs), facts accumulate, opinions update, and a capture hook banks
+  what Claude Code writes whether or not the model calls the tool.
+- **You can see it.** The panel shows the last five things it learned, and
+  `compartment dash` opens the whole vault on a loopback page: memories by
+  kind, growth over time, the relation graph, tags, per-agent counts, live
+  search. Read-only, random token, zero outbound requests.
+- **Arrives full.** 6,700+ curated starting facts (hardware specs, OS
+  versions, ports, encodings, shell and git internals, ISO codes and more)
+  are seeded at `init`, so an offline agent has a map of the computer-verse
+  from its first session. They are ordinary memories, editable and
+  forgettable, and one switch keeps them out of search.
 
-**One click install (for people not good with command line).** Download
-**Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
-and open it. Python, the embedding model and every dependency are inside it.
-macOS only.
+## How it compares
 
-After install, everything is managed from the minimal app: the **menu bar** on macOS,
-the **notification area** on Windows, and a **window** from your applications
-menu on Linux. We design to be one of the many hundreds of software applications
-you have on your computer, we don't make the design mistake of assuming the user
-cares about Compartment and is going to study how to use it. All functions are there
-in simple button and selection format, and you dont need to fiddle with ratios or 
-specifics, we have the best high level mathematical and logical functions by default. 
+Where the memory lives and what protects it, as each project documents it
+(checked 2 September 2026; sources and the full table in
+[docs/COMPARISON.md](docs/COMPARISON.md)).
 
-Compartment is an MCP server, so it works with all MCP capable agentic AI out
-of the box. Every option is in [Configuration](#configuration).
+| | Memory at rest | Encrypted | Account / API key | Network at runtime |
+|---|---|---|---|---|
+| **Compartment** | one sealed vault file, index in RAM | **yes, vectors too** | none | none, CI-enforced |
+| Claude Code built-in | Markdown files | not documented | none | none |
+| Hermes / OpenClaw built-in | `MEMORY.md` + logs | not documented | none / embeddings key | none / embedding calls |
+| `@modelcontextprotocol/server-memory` | plaintext `memory.jsonl`, substring search | no | none | none |
+| mem0 (open source) | vector store + LLM-extracted facts | not documented | LLM key | LLM calls; telemetry on by default |
+| Graphiti (Zep) / Letta | Neo4j / server + database | not documented | LLM key | LLM calls |
+| claude-mem | local SQLite + Chroma | not documented | sign-in required | account + provider calls |
+| basic-memory (AGPL) | Markdown + SQLite | not documented | none | none |
 
-#### What sets it apart
+If a Markdown file is doing the job for you, keep it. Compartment is for the
+point where the file is too long to inject every turn, has started to
+contradict itself, and has a credential in it.
 
-**Install it in one step**
+## Why encrypt a memory at all
 
-- One command installs it, creates the vault, and wires your agent. No API
-  key, no cloud account, no daemon.
-- On the Mac, open one `.pkg` and you are done. Python, the embedding model
-  and every dependency are inside it.
-- An app runs the whole thing without a terminal on all three systems: vault
-  state, unlock, lock, and the last five memories it saved. The macOS menu
-  bar, the Windows notification area, a window on Linux.
-- Every feature toggles in that panel instead of a config file:
-  model-independent capture, starter facts in search, auto-lock.
-- `/compartmentalize` is installed into every agent it connects, so one command
-  banks a whole conversation before compaction throws it away.
-- Your vault ships full. The 6,718 seeded facts are ordinary memories,
-  editable and forgettable, and one switch keeps them out of search.
-- Runs under what you already use: Hermes ("no setup needed"), Claude Code
-  and Desktop over MCP, OpenClaw, every MCP client, plus a CLI for scripts
-  and cron.
-
-**Remembers the right things**
-
-- "OK" is a decision, and Compartment files it as one, with the question it
-  answered. That is the record you need later.
-- Decisions beat preferences, preferences beat machine details, machine
-  details beat chatter. A fixed ranking, not a model's mood.
-- It forgets nothing. Small talk is kept and ranked last.
-- It replaces your host's built-in memory instead of fighting it: imports
-  what Claude Code already wrote, then supersedes it.
-- It captures even when the model does not cooperate. A hook writes the fact
-  whether or not the model calls the tool.
-- A graph, not a pile. Explicit relations with validity windows answer who
-  worked where, and when.
-
-**Search that beats a network call**
-
-- 0.68 ms vector search. About 12 ms for the full hybrid pipeline. A cloud memory
-  spends longer than that saying hello.
-- Exact below 20k records: recall = 1.0 by construction, not an
-  approximation.
-- Hybrid always: meaning and keywords, fused.
-- One pinned embedding space, enforced every time the vault opens, so your
-  comparisons stay valid forever.
-
-**Encrypted, offline, and yours**
-
-- Every byte at rest is AEAD-encrypted, embedding vectors included. Most
-  tools leave vectors in the clear, and vectors invert back toward text.
-- Only your passphrase opens it. Compartment generates no password, no seed,
-  no recovery phrase, and holds no credential you do not.
-- Add a keyfile and unlock takes two factors. Both feed Argon2id together,
-  so it is arithmetic, not a policy check.
-- `forget --shred` destroys the record's key. The content is mathematically
-  unrecoverable, not marked deleted.
-- Restart or power loss locks it, and the agent has a panic lock that clears
-  every credential instantly.
-- 100% offline. A runtime guard aborts on any network attempt, and CI proves
-  it on Linux, macOS and Windows. Zero open ports. No telemetry, ever.
-- No LLM inside. Embeddings run locally in under 300 MB, and judgment stays
-  with the model you already pay for.
-- Tamper-evident: hash-chained audit log, sealed journal, verified kill-9
-  crash recovery.
-- One portable file. Move a locked vault anywhere, and `lock --sign` seals
-  it with an Ed25519 manifest anyone can verify without a credential.
-- `compartment dash` puts the entire vault on a local page: 127.0.0.1 only,
-  random token, read-only.
+A memory vault is the highest-value file on the machine: every chat, every
+decision, and every credential the agent was ever shown, in one place. Most
+memory tools keep it as plaintext JSON, Markdown or SQLite beside a plaintext
+vector index, readable by anything running as you and by anyone who copies
+the disk. Compartment treats it the way a password manager treats passwords:
+the vault opens with your passphrase, locks on restart or power loss, and
+gives up nothing to whoever copies the file. The full threat model, including
+what it cannot protect against, is in [SECURITY.md](SECURITY.md).
 
 ## The memory logic
 
@@ -848,5 +813,15 @@ network access, third-party sharing, retention, and contact, is at
 <https://maxfreedompollard.github.io/Compartment/privacy>.
 
 ---
+
+## Where to find it
+
+Compartment is listed on [PyPI](https://pypi.org/project/compartment/) · [Glama](https://glama.ai/mcp/servers/@MaxFreedomPollard/Compartment) · [LobeHub](https://lobehub.com/mcp/maxfreedompollard-compartment) · [MCP Toplist](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment) · [mcpservers.org](https://mcpservers.org/servers/maxfreedompollard/compartment) · [TensorBlock](https://www.tensorblock.co/mcp/servers/github-maxfreedompollard-compartment-4ab11161) · [Libraries.io](https://libraries.io/pypi/compartment) · [Snyk Advisor](https://snyk.io/advisor/python/compartment) · [deps.dev](https://deps.dev/pypi/compartment)
+
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment) [![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
+
+<a href="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment"><img width="380" height="200" src="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment/badge" alt="Compartment MCP server" /></a>
+
+Bugs and feature requests: [Issues](https://github.com/MaxFreedomPollard/Compartment/issues). Questions and ideas: [Discussions](https://github.com/MaxFreedomPollard/Compartment/discussions). How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 mcp-name: io.github.MaxFreedomPollard/compartment

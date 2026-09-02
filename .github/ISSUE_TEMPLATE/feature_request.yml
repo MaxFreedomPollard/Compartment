@@ -1,0 +1,31 @@
+name: Feature request
+description: Something Compartment should do, or do differently.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: situation
+    attributes:
+      label: The situation
+      description: What were you trying to do, and where did Compartment get in the way? Describe the moment, not the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today instead
+      description: A command, a config edit, another tool, or nothing.
+  - type: checkboxes
+    id: guarantees
+    attributes:
+      label: Guarantees
+      description: Compartment's guarantees are not negotiable in a feature. Confirm the request keeps them.
+      options:
+        - label: Works fully offline (no network at runtime)
+        - label: Nothing plaintext touches the disk
+        - label: No open ports (stdio only)

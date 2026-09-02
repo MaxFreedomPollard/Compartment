@@ -1,0 +1,74 @@
+name: Bug report
+description: Something did not do what the README says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Never paste a passphrase, a keyfile, or a vault file here.
+        `compartment status` and `compartment --version` output is safe to paste.
+  - type: input
+    id: version
+    attributes:
+      label: Compartment version
+      description: Output of `compartment --version`
+      placeholder: "4.9.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How was it installed?
+      options:
+        - pip / pipx / uv (PyPI)
+        - Compartment.pkg (macOS one-click)
+        - Compartment.dmg
+        - Homebrew
+        - Docker
+        - From source
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and Python
+      placeholder: "macOS 26.2 / Python 3.12.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Agent or MCP client involved
+      options:
+        - Claude Code
+        - Claude Desktop
+        - Hermes Agent
+        - OpenClaw
+        - Cursor
+        - Cline / Roo Code
+        - Codex CLI
+        - Gemini CLI
+        - Other MCP client
+        - CLI only
+        - The menu bar / tray app
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command or action, what you expected, and what happened instead. Paste the exact error text.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Ideally against a scratch vault (`compartment --vault /tmp/x.vault init --passphrase x --no-app`).
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `compartment status`
+      render: json
