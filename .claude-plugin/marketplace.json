@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "maxfreedompollard",
+  "description": "Plugins by Max Freedom Pollard: Compartment, encrypted offline memory for Claude Code.",
+  "owner": {
+    "name": "Max Freedom Pollard",
+    "url": "https://github.com/MaxFreedomPollard"
+  },
+  "plugins": [
+    {
+      "name": "compartment",
+      "description": "Encrypted, fully offline memory for Claude Code. One vault on your machine, shared with Claude Desktop, Cursor, Hermes and any other MCP client; 14 memory tools plus the /compartmentalize skill. Requires `pip install compartment && compartment init` first.",
+      "author": { "name": "Max Freedom Pollard" },
+      "category": "productivity",
+      "source": "./",
+      "homepage": "https://github.com/MaxFreedomPollard/Compartment"
+    }
+  ]
+}

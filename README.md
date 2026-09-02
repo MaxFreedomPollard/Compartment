@@ -32,6 +32,7 @@ included, under a passphrase only you hold.
 | **pipx / uv** | `pipx install compartment` or `uv tool install compartment`, then `compartment init` |
 | **Homebrew** (macOS) | `brew install --cask maxfreedompollard/tap/compartment && compartment init` |
 | **One click** (macOS) | open **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest). Python, the model and every dependency are inside it |
+| **Claude Code plugin** | after `pip install compartment && compartment init`: `/plugin marketplace add MaxFreedomPollard/Compartment` then `/plugin install compartment@maxfreedompollard` |
 | **Docker** | `docker build -t compartment .` from a checkout. stdio only, no port; mount the vault at `/data` |
 
 Then connect the agent you use:

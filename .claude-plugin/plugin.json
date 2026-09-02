@@ -1,0 +1,20 @@
+{
+  "name": "compartment",
+  "displayName": "Compartment",
+  "version": "4.9.3",
+  "description": "Encrypted, fully offline memory for Claude Code: one vault on your machine, shared with Claude Desktop, Cursor, Hermes and any other MCP client. Adds 14 memory tools and the /compartmentalize skill. Requires `pip install compartment && compartment init` first (the vault passphrase is yours to choose).",
+  "author": {
+    "name": "Max Freedom Pollard",
+    "url": "https://github.com/MaxFreedomPollard"
+  },
+  "homepage": "https://github.com/MaxFreedomPollard/Compartment",
+  "repository": "https://github.com/MaxFreedomPollard/Compartment",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "agent-memory", "encryption", "offline", "local-first", "privacy", "mcp", "vector-search"],
+  "mcpServers": {
+    "compartment": {
+      "command": "compartment",
+      "args": ["--caller", "claude-code", "serve"]
+    }
+  }
+}
