@@ -323,7 +323,7 @@ works at `w_lex = 0.37` does not work.
 ## The app and the dashboard
 
 <p align="center">
-  <img src="docs/images/menubar-panel.png" width="340" alt="The macOS menu bar panel: vault state, settings, the last five memories">
+  <img src="docs/images/menubar-panel.png" width="340" alt="The macOS panel: vault state, settings, connected agents, the last five memories">
   &nbsp;&nbsp;&nbsp;
   <img src="docs/images/windows-tray-panel.png" width="340" alt="The same panel on Windows">
 </p>
