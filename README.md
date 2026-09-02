@@ -19,20 +19,19 @@ decision made in one session is recalled in the next, in a different
 project, from a different agent, and nothing leaves the machine to make that
 happen.
 
-It works with the memory your agents already have rather than against it.
-Standing instructions stay in `CLAUDE.md`. The memory files Claude Code
-writes are imported and kept. Hermes Agent and OpenClaw keep their own
-notes. What Compartment adds is a memory that is shared across agents and
-projects, searched instead of loaded whole, held to one claim per record,
-allowed to expire, updated rather than piled up when a preference changes,
-and encrypted at rest with the embedding vectors included.
+Every memory is one claim, stamped with how it was established and the day
+it became known. A memory can be given a last day and clears itself when
+that day has passed. A changed preference replaces the old one instead of
+accumulating beside it. Recall is a hybrid vector and keyword search over an
+index held in RAM, answering in about 12 ms with what is relevant rather
+than a fixed number of results.
 
-The embedding model ships inside the package. The index lives in RAM, which
-is both why nothing plaintext ever touches the disk and why a full hybrid
-search answers in about 12 ms. The vault arrives with about 6,700 curated
-starting facts about hardware, operating systems, ports, encodings and shell
-internals, so an agent has a map of the computer-verse from its first
-session; they are ordinary memories, and one switch keeps them out of search.
+The embedding model ships inside the package, and every byte at rest is
+authenticated-encrypted, the embedding vectors included, under a passphrase
+only you hold. The vault arrives with about 6,700 curated starting facts
+about hardware, operating systems, ports, encodings and shell internals, so
+an agent has a map of the computer-verse from its first session; they are
+ordinary memories, and one switch keeps them out of search.
 
 ## Install
 
@@ -71,24 +70,6 @@ block, stdio transport, no environment variables:
 ```json
 { "mcpServers": { "compartment": { "command": "compartment", "args": ["serve"] } } }
 ```
-
-## What it adds to the memory you already have
-
-Compartment does not replace the files you write for your agent. It is the
-memory underneath them.
-
-| You already have | What Compartment does with it |
-|---|---|
-| `CLAUDE.md`, your standing instructions | Stays yours. `integrate claude` adds one managed, sentinel-fenced block that tells Claude to recall from Compartment before answering and to store durable facts there. Delete the block and nothing else changes. |
-| Claude Code's own memory files (`~/.claude/projects/*/memory/`) | Imported on install, copy-only: the files are never modified, and re-running imports nothing twice. From then on a `PostToolUse` hook stores whatever Claude Code writes there into the vault as well. Compartment becomes the memory that is searched, across every project. |
-| Hermes Agent's `MEMORY.md` and `USER.md` | Left alone. Compartment appears in `hermes memory setup` as an external provider, the only one marked "no setup needed", and recall runs on every turn. |
-| OpenClaw's `MEMORY.md` and daily logs | Left alone. Compartment is added to OpenClaw's configuration as an MCP server. |
-| A second agent with a memory of its own | It is the same vault. Every host gets its own caller identity and namespace, and all of them can read the whole thing. |
-
-A Markdown file is the right place for instructions. It is the wrong place
-for ten thousand facts: it is loaded whole on every turn, it accumulates
-contradictions that nobody prunes, and it is readable by anything running as
-you. That is the job Compartment takes.
 
 ## How it compares with other memory servers
 
@@ -472,8 +453,10 @@ pip install compartment && compartment init && compartment integrate claude
 ```
 
 Registers the MCP server with the Claude Code CLI (user scope, all
-projects), does everything in the table above (`--no-import` and
-`--no-hooks` opt out of the import and the hook), and prints the Claude
+projects), imports the memories Claude Code has already written to its own
+memory files (copy-only and idempotent; `--no-import` skips it), installs
+the capture hook (`--no-hooks` skips it), installs the `/compartmentalize`
+skill, writes a managed block into `CLAUDE.md`, and prints the Claude
 Desktop config block. The server describes itself over the MCP handshake,
 telling the model to recall before answering and to store durable facts,
 credentials, names and decisions, so Claude treats Compartment as its memory
