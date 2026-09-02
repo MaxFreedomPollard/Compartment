@@ -106,10 +106,10 @@ Where the memory lives and what protects it, as each project documents it
 | Claude Code built-in | Markdown files | not documented | none | none |
 | Hermes / OpenClaw built-in | `MEMORY.md` + logs | not documented | none / embeddings key | none / embedding calls |
 | `@modelcontextprotocol/server-memory` | plaintext `memory.jsonl`, substring search | no | none | none |
-| mem0 (open source) | vector store + LLM-extracted facts | not documented | LLM key | LLM calls; telemetry on by default |
-| Graphiti (Zep) / Letta | Neo4j / server + database | not documented | LLM key | LLM calls |
-| claude-mem | local SQLite + Chroma | not documented | sign-in required | account + provider calls |
-| basic-memory (AGPL) | Markdown + SQLite | not documented | none | none |
+| mem0 (open source) | vector store + LLM-extracted facts; its MCP server is hosted only | not documented | LLM key | LLM calls; telemetry on by default |
+| Graphiti (Zep) / Letta | Neo4j / server + database | not documented | LLM key | LLM calls; telemetry on by default |
+| claude-mem | local SQLite + Chroma | not documented | sign-in required | account + provider calls; telemetry on by default |
+| basic-memory (AGPL) | Markdown + SQLite | not documented | none | telemetry on by default |
 
 If a Markdown file is doing the job for you, keep it. Compartment is for the
 point where the file is too long to inject every turn, has started to

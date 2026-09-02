@@ -53,14 +53,21 @@ It also ships usage telemetry that is on unless you turn it off:
 PostHog with a project key that is in the source file
 ([telemetry.py](https://github.com/mem0ai/mem0/blob/main/mem0/memory/telemetry.py)).
 A request to make it opt-in was
-[closed as not planned](https://github.com/mem0ai/mem0/issues/2683).
+[closed as not planned](https://github.com/mem0ai/mem0/issues/2683). Its
+MCP server, the thing an agent would actually talk to, is now hosted only:
+"Nothing runs on your machine: the server is hosted by Mem0 ... Memories
+you store this way live in your Mem0 account, not on your computer"
+([docs](https://docs.mem0.ai/platform/mem0-mcp)).
 
 **claude-mem**, the most-starred Claude Code memory plugin, keeps its store
 locally but its installer "asks you to sign in to claude-mem in your browser
 (email magic link)" and the hosted memory provider is a subscription after a
 30-day trial ([README](https://github.com/thedotmack/claude-mem)).
 
-None of the projects above document encryption at rest. Most are excellent at
+None of the projects above document encryption at rest, and a source-level
+look at about twenty-five open-source memory stores found the same: where
+encryption exists at all, it protects a database password or an OAuth
+token, never the memories. Most are excellent at
 what they set out to do. But every one of them treats the memory the way we
 treated browser cookies in 2005: a file, in the clear, wherever it landed.
 
