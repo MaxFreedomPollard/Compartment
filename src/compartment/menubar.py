@@ -25,7 +25,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from pathlib import Path
 
 from . import __version__
@@ -396,6 +398,78 @@ def fetch_state(vault: str) -> dict:
         # newest first reads better in a list you glance at
         state["recent"] = list(reversed(recent.get("results") or []))
     return state
+
+
+#: The `compartment dash` started from the panel, if any. One per panel
+#: process: a second click reopens the same page instead of starting a second
+#: server with a second random token for the same vault.
+_DASH: dict = {"proc": None, "url": None}
+_DASH_PREFIX = "Compartment dashboard: "
+
+
+def dashboard_url(line: str) -> str | None:
+    """The URL `compartment dash` announces on its first line, or None."""
+    line = line.strip()
+    if line.startswith(_DASH_PREFIX):
+        return line[len(_DASH_PREFIX):].strip() or None
+    return None
+
+
+def _drain(proc) -> None:
+    # `dash` says a few more lines over its life; read them so it can never
+    # block on a full pipe.
+    try:
+        for _ in proc.stdout:
+            pass
+    except (OSError, ValueError):
+        pass
+
+
+def open_dashboard(vault: str) -> str | None:
+    """Open the vault's dashboard in the browser.
+
+    Starts `compartment dash` if this panel has not already started one.
+    `dash` opens the browser itself the moment it is serving, so a first
+    click needs only a started process; a later click reopens the URL it
+    announced. Returns that URL, or None when the server did not start (a
+    locked vault, for instance, which `dash` refuses).
+    """
+    proc, url = _DASH["proc"], _DASH["url"]
+    if proc is not None and proc.poll() is None and url:
+        webbrowser.open(url)
+        return url
+    try:
+        proc = subprocess.Popen(
+            [*_cli_argv(), "--vault", vault, "dash"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PATH": user_path()})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    _DASH["proc"], _DASH["url"] = proc, None
+    url = None
+    for line in proc.stdout:                # the announcement is line one
+        url = dashboard_url(line)
+        if url:
+            break
+    if not url:
+        stop_dashboard()
+        return None
+    _DASH["url"] = url
+    threading.Thread(target=_drain, args=(proc,), daemon=True).start()
+    return url
+
+
+def stop_dashboard() -> None:
+    """End the dashboard this panel started, if it is still running."""
+    proc = _DASH["proc"]
+    _DASH["proc"], _DASH["url"] = None, None
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def lock_vault(vault: str) -> bool:
@@ -1638,8 +1712,17 @@ def run(vault: str | None = None, show: bool = False,
                                    wrap=True))
             views.append(divider())
 
-            views.append(label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,
-                               secondary=True))
+            head = label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,
+                         secondary=True)
+            if st["exists"] and not st["locked"]:
+                # The five here are a glance; the whole vault is a page.
+                dash_b = NSButton.buttonWithTitle_target_action_(
+                    "Dashboard", self, "openDashboard:")
+                dash_b.setToolTip_("Open the whole vault in your browser: "
+                                   "growth, the relation graph, tags, search")
+                views.append(row(head, _spacer(), dash_b))
+            else:
+                views.append(head)
             if not st["exists"]:
                 views.append(label("nothing yet - create the vault above", 11,
                                    secondary=True))
@@ -1881,6 +1964,10 @@ def run(vault: str | None = None, show: bool = False,
             self.unlock_note = None
             self.rebuild()
 
+        def openDashboard_(self, sender):
+            if open_dashboard(vault_path) is None:
+                _d("the dashboard did not start")
+
         def unlockNow_(self, sender):
             if self.pw_field is None:
                 return
@@ -1915,6 +2002,7 @@ def run(vault: str | None = None, show: bool = False,
             self.rebuild()
 
         def quitApp_(self, sender):
+            stop_dashboard()
             NSApp.terminate_(self)
 
         def togglePopover_(self, sender):

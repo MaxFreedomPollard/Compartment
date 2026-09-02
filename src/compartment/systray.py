@@ -35,6 +35,7 @@ from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, create_vault,
                       default_vault, fetch_state, integrate, lock_vault,
+                      open_dashboard, stop_dashboard,
                       release_instance_lock, self_check,
                       set_setting, starter_note, summarise, unlock_vault)
 
@@ -1106,6 +1107,9 @@ def run(vault: str | None = None, show: bool = False,
                            command=lambda: (panel.update(changing=True,
                                                          change_note=None),
                                             refresh())).pack(side="left", padx=6)
+            ttk.Button(buttons, text="Dashboard",
+                       command=lambda: open_dashboard(vault_path)
+                       ).pack(side="left", padx=6)
         ttk.Button(buttons, text="Quit", command=quit_app).pack(side="right")
 
     def build(win) -> None:
@@ -1201,6 +1205,7 @@ def run(vault: str | None = None, show: bool = False,
             place(win)
 
     def quit_app() -> None:
+        stop_dashboard()
         icon = panel.get("icon")
         if icon is not None:
             try:
@@ -1225,6 +1230,8 @@ def run(vault: str | None = None, show: bool = False,
                                  from_tray(lambda: (lock_vault(vault_path),
                                                     panel.update(note=None),
                                                     refresh()))),
+                pystray.MenuItem("Open dashboard",
+                                 from_tray(lambda: open_dashboard(vault_path))),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", from_tray(quit_app)),
             ))

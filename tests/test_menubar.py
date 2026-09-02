@@ -516,3 +516,48 @@ def test_cli_argv_points_at_a_real_interpreter_not_the_app_launcher():
     probe = subprocess.run([str(exe), "-c", "import sys; print(sys.executable)"],
                            capture_output=True, text=True, timeout=60)
     assert probe.returncode == 0, probe.stderr
+
+
+def test_dashboard_url_parses_only_the_announcement_line():
+    from compartment.menubar import dashboard_url
+    assert dashboard_url("Compartment dashboard: http://127.0.0.1:5/t/\n") == \
+        "http://127.0.0.1:5/t/"
+    assert dashboard_url("  serving from RAM, 127.0.0.1 only") is None
+
+
+def test_the_dashboard_button_starts_dash_once_and_reuses_it(monkeypatch,
+                                                              tmp_path):
+    """First click: start `compartment dash`, which opens the browser itself.
+    Second click: reopen the URL it announced, never a second server."""
+    import sys
+    from compartment import menubar
+    script = ("import time\n"
+              "print('Compartment dashboard: http://127.0.0.1:1/abc/', flush=True)\n"
+              "print('  serving from RAM', flush=True)\n"
+              "time.sleep(30)\n")
+    monkeypatch.setattr(menubar, "_cli_argv",
+                        lambda: [sys.executable, "-c", script])
+    opened = []
+    monkeypatch.setattr(menubar.webbrowser, "open",
+                        lambda u: opened.append(u) or True)
+    menubar._DASH.update(proc=None, url=None)
+    vault = str(tmp_path / "x.vault")
+    url = menubar.open_dashboard(vault)
+    assert url == "http://127.0.0.1:1/abc/"
+    proc = menubar._DASH["proc"]
+    assert proc is not None and proc.poll() is None
+    assert opened == []                      # dash opened the browser itself
+    assert menubar.open_dashboard(vault) == url
+    assert menubar._DASH["proc"] is proc and opened == [url]
+    menubar.stop_dashboard()
+    assert proc.poll() is not None and menubar._DASH["proc"] is None
+
+
+def test_a_dash_that_does_not_start_gives_no_url(monkeypatch, tmp_path):
+    import sys
+    from compartment import menubar
+    monkeypatch.setattr(menubar, "_cli_argv", lambda: [
+        sys.executable, "-c", "import sys; print('error: locked'); sys.exit(2)"])
+    menubar._DASH.update(proc=None, url=None)
+    assert menubar.open_dashboard(str(tmp_path / "x.vault")) is None
+    assert menubar._DASH["proc"] is None
