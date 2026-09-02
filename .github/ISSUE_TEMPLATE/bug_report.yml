@@ -23,7 +23,6 @@ body:
         - pip / pipx / uv (PyPI)
         - Compartment.pkg (macOS one-click)
         - Compartment.dmg
-        - Homebrew
         - Docker
         - From source
     validations:
