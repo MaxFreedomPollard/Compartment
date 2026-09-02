@@ -45,10 +45,12 @@ against that file.
 | Graphiti (Zep) / Letta | Neo4j / server + database | not documented | LLM key | LLM calls; telemetry on by default |
 | claude-mem | local SQLite + Chroma | not documented | sign-in required | account + provider calls; telemetry on by default |
 | basic-memory (AGPL) | Markdown + SQLite | not documented | none | telemetry on by default |
+| Hindsight (Vectorize) | one container with embedded PostgreSQL | not documented | LLM key (local models configurable) | LLM calls; vendor states no telemetry |
+| Supermemory | cloud service, or a self-hosted prebuilt binary | not documented | account (cloud) or LLM key (self-host) | cloud calls; self-host: vendor states no telemetry |
+| Cognee | SQLite + LanceDB + Kuzu locally, or cloud | not documented | LLM key | LLM calls; telemetry on by default |
+| MemOS | Neo4j + Qdrant self-hosted, or cloud | not documented | LLM key | LLM calls; telemetry on by default |
 
 ## The memory logic
-
-The full write path is in [docs/MEMORY.md](docs/MEMORY.md). The main ideas:
 
 **Almost everything is stored.** Only empty turns are dropped. A bare "OK" is
 a decision, not noise: when the agent asks *"Want me to send this reply to
@@ -300,32 +302,10 @@ and widens up to three times when filtering leaves too few. Below 20,000
 records the vector search is exact (SIMD matrix math, recall 1.0); above
 that, HNSW at about 99% recall.
 
-### Measured
-
-Against the previous scorer, end to end through `Vault.search`, on a real
-6,705-memory vault with 44 queries in four families:
-
-| | before | after |
-|---|---|---|
-| Recall@1 | 0.523 | **0.773** |
-| Recall@5 | 0.705 | **0.977** |
-| MRR@10 | 0.601 | **0.845** |
-| nDCG@10 | 0.627 | **0.878** |
-| exact identifiers found in top 5 | 4/10 | **10/10** |
-| facts past the encoder window | 0/6 | **5/6** |
-| paraphrases | 16/16 | 16/16 |
-| median search latency | 4.4 ms | 11.6 ms |
-
-Nothing regressed. The weights come from a sensitivity sweep and are
-deliberately round: results are flat around them, because a ranker that only
-works at `w_lex = 0.37` does not work.
-
 ## The app and the dashboard
 
 <p align="center">
-  <img src="docs/images/menubar-panel.png" width="340" alt="The macOS panel: vault state, settings, connected agents, the last five memories">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/images/windows-tray-panel.png" width="340" alt="The same panel on Windows">
+  <img src="docs/images/menubar-panel.png" width="360" alt="The macOS panel: vault state, settings, connected agents, the last five memories">
 </p>
 
 The same panel on each system: the **menu bar** on macOS, the
@@ -342,16 +322,12 @@ memories. You can unlock, lock and change your passphrase there without a
 terminal. The app keeps no vault in memory; it reads state from the CLI, so
 it costs nothing when idle. It is meant to be one of the many apps on your
 computer, not something you have to learn: every function is a button or a
-switch, and the defaults come from the measurements above.
+switch, and the defaults were chosen by measurement.
 
-`compartment panel --login on | off | status` controls starting at login (on
-Linux, the applications menu entry). `init --no-app` skips the app on
-headless machines and in CI.
-
-**`compartment dash`** opens the whole vault in your browser: growth over
-time, the relation graph with every entity named, tags, per-agent counts,
-live search. It serves from RAM on 127.0.0.1 only, behind a random URL token,
-read-only, with no outbound requests and no configuration. Ctrl-C closes it.
+The **Dashboard** button opens the whole vault in your browser: growth over
+time, the relation graph with every entity named, tags, per-agent counts and
+live search. It is served from RAM on 127.0.0.1 only, read-only, with no
+outbound requests.
 
 <p align="center">
   <img src="docs/images/dashboard-tables.png" width="820" alt="compartment dash: namespaces, memories per agent, relation types, top tags and search">
@@ -371,42 +347,61 @@ whole suite under it on Linux, macOS and Windows. The full threat model,
 including what Compartment cannot protect against, is in
 [SECURITY.md](SECURITY.md).
 
-You lock and unlock the vault yourself.
+### From the app
 
-- **`compartment unlock`** opens the vault with your passphrase. Compartment
-  never generates a password, seed or recovery phrase, and holds no
-  credential you do not. (Vaults from older versions that were issued a
-  recovery phrase still accept it.)
-- **`compartment lock`** closes it and clears every stored credential.
-  Agents can do the same with the `memory_lock` tool.
+Everything you do day to day is a button. **Unlock** asks for your
+passphrase; **Lock** closes the vault and clears every stored credential;
+**Change password** rekeys it; **Auto-lock** chooses 15, 30 or 60 idle
+minutes, or never. Compartment never generates a password, seed or recovery
+phrase, and holds no credential you do not.
+
+After an unlock the vault stays open across processes, logouts and logins
+for as long as you leave it, until a restart or power loss, until the
+auto-lock timer fires, or until you lock it. A restart or power loss always
+locks it: the unlock credential is the master key wrapped with a random
+per-boot secret that lives only in kernel memory and is never written to
+disk, so a new boot cannot open it. A copy of the credential file on its own
+is useless.
+
+### From the command line
+
+The same controls, plus two that only exist here:
+
+- **`compartment unlock`** and **`compartment lock`** do what the buttons do.
+  Agents can lock with the `memory_lock` tool. (Vaults from older versions
+  that were issued a recovery phrase still accept it.)
 - **`compartment 2fa enable`** adds a second factor: your passphrase plus a
   keyfile, for example on a USB stick. Both feed Argon2id together, so the
   requirement is enforced by the cryptography, not by a setting; a stolen
   vault file plus your passphrase opens nothing without the keyfile. The
   keyfile's location is remembered, so unlocking feels the same while it is
   present.
+- **`compartment unlock --keychain`** on macOS is an explicit opt-in that
+  survives reboots.
 
-After a normal unlock the vault stays open across processes, logouts and
-logins for as long as you leave it, until a restart or power loss, until the
-auto-lock timer fires (15, 30 or 60 idle minutes in the panel; `0` never),
-or until you lock it. A restart or power loss always locks it: the unlock
-credential is the master key wrapped with a random per-boot secret that
-lives only in kernel memory and is never written to disk, so a new boot
-cannot open it. A copy of the credential file on its own is useless.
-
-On macOS, `compartment unlock --keychain` is an explicit opt-in that survives
-reboots. The `memory_unlock` MCP tool exists but is off by default, because
-enabling it puts the passphrase in the model's context.
+The `memory_unlock` MCP tool exists but is off by default, because enabling
+it puts the passphrase in the model's context.
 
 ## One vault, many agents, any machine
 
-Claude, Hermes Agent, Cursor and the CLI can use one vault at the same
-time. Writes are serialised by an advisory file lock, every process detects
-writes by others and reloads, and each caller has its own identity and
-namespace with rw / ro / none grants, so a scratch agent can read without
-writing.
+### Without the command line
 
-A locked vault is one portable file:
+Every agent on the machine uses the same vault, and none of that needs
+setting up: the app's **Connect an agent** buttons wire Claude, Hermes Agent
+and OpenClaw, and what one agent stores the others recall. Claude, Hermes
+Agent, Cursor and the CLI can use the vault at the same time: writes are
+serialised by a file lock, every process notices writes by others and
+reloads, and each agent has its own identity and namespace.
+
+A locked vault is one file, `memory.vault` in the `.compartment` folder of
+your home directory. To move to another machine, lock the vault, copy the
+file there, install Compartment and unlock it in the app with your
+passphrase.
+
+### From the command line
+
+The same move, signed so the recipient can check it, plus the escape
+hatches:
 
 ```bash
 compartment lock --sign
@@ -418,7 +413,8 @@ compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 `compartment verify` and no credential. `export --plaintext` writes the vault
 as JSONL and `import` reads it back, so you are never locked in.
 [FORMAT.md](FORMAT.md) specifies the `.vault` and `.mpack` files byte by
-byte.
+byte. Per-agent namespaces take `rw`, `ro` or `none` grants in the settings
+file, so a scratch agent can read without writing.
 
 **Memory packs** are signed, read-only bundles of curated memories
 (`compartment pack build | install | remove | list | export`). They install
@@ -450,11 +446,18 @@ benchmark).
 
 ## Install
 
+**No command line needed.** On a Mac, download **Compartment.pkg** from the
+[latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
+and open it. Python, the embedding model and every dependency are inside it.
+It asks you to choose a passphrase, creates the vault, and puts Compartment
+in your menu bar, where the **Connect an agent** buttons do the rest.
+
+From the command line, on any system:
+
 | | |
 |---|---|
 | **pip** (macOS, Linux, Windows) | `pip install compartment && compartment init` |
 | **pipx / uv** | `pipx install compartment` or `uv tool install compartment`, then `compartment init` |
-| **One click** (macOS) | open **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest). Python, the embedding model and every dependency are inside it |
 | **Claude Code plugin** | after `pip install compartment && compartment init`: `/plugin marketplace add MaxFreedomPollard/Compartment`, then `/plugin install compartment@maxfreedompollard`. Codex reads the same marketplace file |
 | **Docker** | `docker build -t compartment .` from a checkout; see [Wiring each agent](#wiring-each-agent) |
 
@@ -487,9 +490,11 @@ installed in their skills directories. Any other MCP client uses this block
 
 ## Wiring each agent
 
-Each of these is also a button in the app under **CONNECT AN AGENT**. On
-Windows, run the same commands in PowerShell with
-`py -m pip install compartment` in place of `pip install compartment`.
+None of this needs a terminal: the **Connect an agent** buttons in the app
+run the same steps for Claude, Hermes Agent and OpenClaw. The commands below
+are for people who prefer them, and for wiring a client the app does not
+list. On Windows, run them in PowerShell with `py -m pip install compartment`
+in place of `pip install compartment`.
 
 **Claude (Code + Desktop)**
 
@@ -607,6 +612,16 @@ Global flags, before the command: `--vault PATH`, `--caller NAME`,
 | `setup` | `download-model`, `download-longmemeval`, `airgap-bundle` |
 | `update` | upgrade in place. `--source` takes GitHub main, `--no-app` skips the restart |
 | `uninstall` | remove it. The vault is kept unless you pass `--purge` |
+
+`compartment panel --login on | off | status` controls starting at login (on
+Linux, the applications menu entry). `init --no-app` skips the app on
+headless machines and in CI.
+
+`compartment dash` is the Dashboard button from the terminal: the whole vault
+in your browser, growth over time, the relation graph with every entity
+named, tags, per-agent counts, live search. It serves from RAM on 127.0.0.1
+only, behind a random URL token, read-only, with no outbound requests and no
+configuration. Ctrl-C closes it.
 
 ### The /compartmentalize skill
 
