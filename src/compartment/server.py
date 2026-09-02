@@ -23,7 +23,14 @@ import time
 from typing import Literal
 
 import anyio.to_thread
-from mcp.server.fastmcp import FastMCP
+try:
+    # mcp 2.0 (2026-07-28) renamed the high-level server; the old module is
+    # gone from 2.x, and the new one is absent from 1.x releases before the
+    # rename. Import whichever this environment has, so a single wheel runs
+    # under both majors and a distro that only carries one is not stranded.
+    from mcp.server.mcpserver import MCPServer
+except ImportError:                                     # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as MCPServer
 from mcp.types import ToolAnnotations
 
 from . import __version__, gate, offline_guard, selftest
@@ -83,16 +90,20 @@ COMPARTMENT_INSTRUCTIONS = (
     "unlocks out-of-band with `compartment unlock`."
 )
 
-mcp = FastMCP("compartment", instructions=COMPARTMENT_INSTRUCTIONS)
-
-# FastMCP takes no `version`, so the handshake would advertise the MCP SDK's
-# version as ours - clients display that as compartment's version. The low-level
-# server it wraps does carry one; set it, but never let an SDK internal
-# rename take the whole server down over a cosmetic field.
+# The handshake's serverInfo.version must be compartment's own, not the SDK's:
+# clients display it as compartment's version. mcp 2.x takes it in the
+# constructor; the 1.x FastMCP has no such argument, and there the low-level
+# server it wraps carries the field. Never let an SDK-internal rename take the
+# whole server down over a cosmetic field.
 try:
-    mcp._mcp_server.version = __version__
-except Exception:                                       # noqa: BLE001
-    pass
+    mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS,
+                    version=__version__)
+except TypeError:                                       # mcp 1.x
+    mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS)
+    try:
+        mcp._mcp_server.version = __version__
+    except Exception:                                   # noqa: BLE001
+        pass
 
 _state: dict = {"vault": None, "path": None, "caller": "unknown",
                 "last_op": time.time(), "auto_lock_min": 30,
