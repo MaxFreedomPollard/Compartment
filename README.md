@@ -155,6 +155,41 @@ hiding the reference facts so your own memories are visible.
 `compartment status` reports `organic_records` beside the total.
 `memory_recent` is the same view over MCP.
 
+## The app and the dashboard
+
+<p align="center">
+  <img src="docs/images/menubar-panel.png" width="360" alt="The macOS panel: vault state, settings, connected agents, the last five memories">
+</p>
+
+The same panel on each system: the **menu bar** on macOS, the
+**notification area** on Windows, and an ordinary window on **Linux**, listed
+in the applications menu. Linux gets a window on purpose: a tray icon may
+never appear on GNOME or Wayland, and the control that unlocks your memories
+must not fail silently.
+
+The panel shows whether the vault is open, how many memories it holds and how
+many you stored, the three settings worth changing (capture hook, whether
+reference facts appear in search, auto-lock), which agents are connected with
+buttons to connect Claude, Hermes Agent or OpenClaw, and the last five
+memories. You can unlock, lock and change your passphrase there without a
+terminal. The app keeps no vault in memory; it reads state from the CLI, so
+it costs nothing when idle. It is meant to be one of the many apps on your
+computer, not something you have to learn: every function is a button or a
+switch, and the defaults were chosen by measurement.
+
+The **Dashboard** button opens the whole vault in your browser: growth over
+time, the relation graph with every entity named, tags, per-agent counts and
+live search. It is served from RAM on 127.0.0.1 only, read-only, with no
+outbound requests.
+
+<p align="center">
+  <img src="docs/images/dashboard-tables.png" width="820" alt="compartment dash: namespaces, memories per agent, relation types, top tags and search">
+</p>
+
+<p align="center">
+  <img src="docs/images/dashboard.png" width="820" alt="compartment dash on a 51,000-memory vault: growth over time and the relation graph">
+</p>
+
 ## The mathematics
 
 Everything below is in one file,
@@ -297,41 +332,6 @@ matching memories sit just past the cut. The pool starts at 200 per channel
 and widens up to three times when filtering leaves too few. Below 20,000
 records the vector search is exact (SIMD matrix math, recall 1.0); above
 that, HNSW at about 99% recall.
-
-## The app and the dashboard
-
-<p align="center">
-  <img src="docs/images/menubar-panel.png" width="360" alt="The macOS panel: vault state, settings, connected agents, the last five memories">
-</p>
-
-The same panel on each system: the **menu bar** on macOS, the
-**notification area** on Windows, and an ordinary window on **Linux**, listed
-in the applications menu. Linux gets a window on purpose: a tray icon may
-never appear on GNOME or Wayland, and the control that unlocks your memories
-must not fail silently.
-
-The panel shows whether the vault is open, how many memories it holds and how
-many you stored, the three settings worth changing (capture hook, whether
-reference facts appear in search, auto-lock), which agents are connected with
-buttons to connect Claude, Hermes Agent or OpenClaw, and the last five
-memories. You can unlock, lock and change your passphrase there without a
-terminal. The app keeps no vault in memory; it reads state from the CLI, so
-it costs nothing when idle. It is meant to be one of the many apps on your
-computer, not something you have to learn: every function is a button or a
-switch, and the defaults were chosen by measurement.
-
-The **Dashboard** button opens the whole vault in your browser: growth over
-time, the relation graph with every entity named, tags, per-agent counts and
-live search. It is served from RAM on 127.0.0.1 only, read-only, with no
-outbound requests.
-
-<p align="center">
-  <img src="docs/images/dashboard-tables.png" width="820" alt="compartment dash: namespaces, memories per agent, relation types, top tags and search">
-</p>
-
-<p align="center">
-  <img src="docs/images/dashboard.png" width="820" alt="compartment dash on a 51,000-memory vault: growth over time and the relation graph">
-</p>
 
 ## Security and the lock model
 
