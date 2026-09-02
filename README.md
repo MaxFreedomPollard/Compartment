@@ -10,10 +10,6 @@ network, no telemetry.
 [![CI](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-<p align="center">
-  <img src="docs/images/dashboard.png" width="820" alt="compartment dash on a 51,000-memory vault: growth over time and the relation graph">
-</p>
-
 Compartment is persistent memory for AI agents, stored on your own computer.
 What an agent learns in one session is available in every later session, in
 every project, to every agent on the machine, and nothing leaves the machine.
@@ -331,6 +327,10 @@ outbound requests.
 
 <p align="center">
   <img src="docs/images/dashboard-tables.png" width="820" alt="compartment dash: namespaces, memories per agent, relation types, top tags and search">
+</p>
+
+<p align="center">
+  <img src="docs/images/dashboard.png" width="820" alt="compartment dash on a 51,000-memory vault: growth over time and the relation graph">
 </p>
 
 ## Security and the lock model
