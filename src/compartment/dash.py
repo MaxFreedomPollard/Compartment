@@ -36,9 +36,9 @@ from .vault import Vault, VaultLockedError
 
 TAG_HIDE_PREFIX = "id:"          # seed ids would swamp the tag cloud
 
-# Importance tiers (salience.py) → human buckets shown as "types of memories".
-# The page's JS colours memory rows from this same list (it is injected into
-# PAGE below), so the tier boundaries and the hex values cannot drift apart.
+# Importance tiers (salience.py). The page's JS colours memory rows from this
+# list (it is injected into PAGE below), so the tier boundaries and the hex
+# values cannot drift apart.
 TYPE_BUCKETS = [
     ("decisions & consent", 0.90, 1.01, "#e8b339"),
     ("personal facts & preferences", 0.80, 0.90, "#4fc3f7"),
@@ -101,13 +101,6 @@ def snapshot_stats(v: Vault, caller: str = "dash") -> dict:
             f"WHERE {ns} UNION SELECT object_n FROM relations WHERE {ns})",
             nsp + nsp).fetchone()["c"]
 
-        types = []
-        for label, lo, hi, color in TYPE_BUCKETS:
-            c = con.execute(
-                f"SELECT COUNT(*) c FROM records WHERE importance >= ? AND "
-                f"importance < ? AND {ns}", [lo, hi] + nsp).fetchone()["c"]
-            types.append({"label": label, "count": c, "color": color})
-
         # Bucket in LOCAL time: every other timestamp on the page is rendered
         # with the browser's locale, and a UTC bucket would let the last bar
         # and the newest "recent memory" disagree by a day.
@@ -140,7 +133,7 @@ def snapshot_stats(v: Vault, caller: str = "dash") -> dict:
         "entities": n_entities, "quarantined": n_quar,
         "namespaces": [e for e in st["namespaces"]
                        if e["namespace"] in allowed],
-        "types": types, "growth": growth,
+        "growth": growth,
         "tags": [{"tag": t, "count": c} for t, c in top_tags],
         "agents": [{"agent": a, "count": c} for a, c in top_agents],
         "predicates": [{"predicate": p, "count": c} for p, c in top_preds],
@@ -152,7 +145,11 @@ def snapshot_stats(v: Vault, caller: str = "dash") -> dict:
 
 
 def snapshot_graph(v: Vault, caller: str = "dash",
-                   max_edges: int = 400, max_nodes: int = 120) -> dict:
+                   max_edges: int = 400, max_nodes: int = 60) -> dict:
+    # Every node is drawn as a labelled pill, so the graph shows the most
+    # connected entities rather than every entity: a name has to fit on the
+    # page to be worth drawing. total_entities lets the page say how many
+    # it left out.
     # Vault.relations would append an audit row per page load; the store's
     # own query is the same data with no write. ACL is applied here instead.
     with v._oplock:
@@ -161,6 +158,10 @@ def snapshot_graph(v: Vault, caller: str = "dash",
         ns, nsp = _ns_clause(allowed)
         total = v.db.conn.execute(
             f"SELECT COUNT(*) c FROM relations WHERE {ns}", nsp).fetchone()["c"]
+        total_entities = v.db.conn.execute(
+            f"SELECT COUNT(*) c FROM (SELECT subject_n e FROM relations "
+            f"WHERE {ns} UNION SELECT object_n FROM relations WHERE {ns})",
+            nsp + nsp).fetchone()["c"]
         rels = [{"subject": r["subject"], "predicate": r["predicate"],
                  "object": r["object"]}
                 for r in v.db.query_relations(ns_in=allowed, limit=max_edges)]
@@ -181,7 +182,7 @@ def snapshot_graph(v: Vault, caller: str = "dash",
     # total_relations is every relation the caller may read; the graph draws
     # at most max_edges of them, and only those between drawn entities.
     return {"nodes": nodes, "edges": edges, "total_relations": total,
-            "shown_relations": len(edges)}
+            "shown_relations": len(edges), "total_entities": total_entities}
 
 
 def snapshot_recent(v: Vault, caller: str = "dash", limit: int = 20) -> dict:
@@ -457,19 +458,6 @@ h2 .sub{font-weight:400;letter-spacing:.3px;text-transform:none;
  color:var(--faint);margin-left:auto;font-size:11px}
 
 /* ---------- composition ---------- */
-.typebar{display:flex;height:14px;border-radius:999px;overflow:hidden;
- background:var(--card2);margin-bottom:16px;border:1px solid var(--line)}
-.typebar div{min-width:3px;transition:width .8s cubic-bezier(.2,.7,.2,1);
- box-shadow:inset 0 0 6px rgba(255,255,255,.18)}
-.typebar div+div{border-left:1.5px solid rgba(0,0,0,.45)}
-.legend{display:flex;flex-wrap:wrap;gap:8px}
-.lg{display:inline-flex;align-items:baseline;gap:7px;font-size:12px;
- background:var(--card);border:1px solid var(--line);border-radius:12px;
- padding:6px 12px}
-.lg .sw{width:9px;height:9px;border-radius:3px;align-self:center;
- box-shadow:0 0 8px var(--c)}
-.lg b{font-variant-numeric:tabular-nums}
-.lg .pct{color:var(--faint);font-size:11px}
 
 /* ---------- charts ---------- */
 canvas{width:100%;display:block}
@@ -482,7 +470,7 @@ canvas{width:100%;display:block}
 #tip{position:absolute;pointer-events:none;display:none;z-index:2;
  background:rgba(16,20,28,.95);border:1px solid var(--line2);
  border-radius:10px;padding:7px 11px;font-size:12px;white-space:nowrap;
- box-shadow:0 8px 24px rgba(0,0,0,.5)}
+ line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,.5)}
 #tip b{color:var(--cyan)}
 #tip .d{color:var(--faint);font-size:11px}
 
@@ -543,11 +531,6 @@ footer i{width:5px;height:5px;border-radius:50%;background:var(--green);
  served from RAM</div>
 <div class="tiles" id="tiles"></div>
 <div class="grid">
- <div class="panel wide">
-  <h2>What the vault remembers</h2>
-  <div class="typebar" id="typebar"></div>
-  <div class="legend" id="typelegend"></div>
- </div>
  <div class="panel wide">
   <h2>Memories over time<span class="sub" id="growthhint"></span></h2>
   <canvas id="growth" height="170"></canvas>
@@ -629,18 +612,6 @@ function tiles(s){
   `<div class="n">${typeof n==="number"?fmt(n):n}</div>`+
   `<div class="l">${l}</div></div>`).join("");
 }
-function types(s){
- const total=s.types.reduce((a,b)=>a+b.count,0)||1;
- $("typebar").innerHTML=s.types.map(t=>
-  `<div style="background:linear-gradient(180deg,${t.color},${t.color}cc);`+
-  `width:0%" data-w="${100*t.count/total}" title="${esc(t.label)}: ${fmt(t.count)}"></div>`).join("");
- requestAnimationFrame(()=>requestAnimationFrame(()=>{
-  [...$("typebar").children].forEach(d=>d.style.width=d.dataset.w+"%");}));
- $("typelegend").innerHTML=s.types.map(t=>
-  `<span class="lg" style="--c:${t.color}"><span class="sw"
-    style="background:${t.color}"></span>${esc(t.label)}
-   <b>${fmt(t.count)}</b><span class="pct">${(100*t.count/total).toFixed(1)}%</span></span>`).join("");
-}
 function growth(s){
  const c=$("growth"),dpr=devicePixelRatio||1;
  const W=c.clientWidth,H=170;c.width=W*dpr;c.height=H*dpr;
@@ -694,88 +665,113 @@ function chips(id,items,k,v,cls){
   :'<span class="hint">none yet</span>';
 }
 function graph(g){
+ /* Every entity is drawn as a pill with its name inside: no unlabeled
+    shapes. Size and colour follow the number of relations. The server sends
+    the most connected entities (see snapshot_graph), so the picture stays
+    readable however large the vault. */
  const c=$("graph"),dpr=devicePixelRatio||1;
- const W=c.clientWidth,H=400;c.width=W*dpr;c.height=H*dpr;
- c.style.height=H+"px";
+ const W=c.clientWidth,n=g.nodes.length;
+ const H=Math.max(380,Math.min(760,120+n*10));
+ c.width=W*dpr;c.height=H*dpr;c.style.height=H+"px";
  const x=c.getContext("2d");x.scale(dpr,dpr);
  const total=g.total_relations===undefined?g.edges.length:g.total_relations;
- $("graphcount").textContent=g.nodes.length?
-  (g.edges.length<total
-   ? `${g.nodes.length} entities · ${fmt(g.edges.length)} of ${fmt(total)} relations drawn`
-   : `${g.nodes.length} entities · ${fmt(g.edges.length)} relations`):"";
- if(!g.nodes.length){
+ const totalEnt=g.total_entities===undefined?n:g.total_entities;
+ $("graphcount").textContent=n?
+  (n<totalEnt?`${n} most connected of ${fmt(totalEnt)} entities`:`${n} entities`)+
+  " · "+(g.edges.length<total
+   ?`${fmt(g.edges.length)} of ${fmt(total)} relations drawn`
+   :`${fmt(g.edges.length)} relations`):"";
+ if(!n){
   $("graphhint").innerHTML="no relations mapped yet - the agent adds them "+
    "with <b>memory_link</b>, and you can add one yourself with "+
    "<b>compartment link \"Maya\" \"works at\" \"Acme\"</b>";
   return;}
- $("graphhint").innerHTML="<b>node size & warmth</b> = connectedness · hover for names";
- const maxDeg=Math.max(...g.nodes.map(n=>n.degree),1);
- const N=g.nodes.map((n,i)=>({...n,
-  x:W/2+Math.cos(6.28*i/g.nodes.length)*Math.min(W,H)/3.2,
-  y:H/2+Math.sin(6.28*i/g.nodes.length)*H/3.2,vx:0,vy:0}));
- const idx=Object.fromEntries(N.map((n,i)=>[n.id,i]));
+ $("graphhint").innerHTML="<b>size and colour</b> = number of relations · hover a name to list its relations";
+ const maxDeg=Math.max(...g.nodes.map(v=>v.degree),1);
+ const trunc=s=>s.length>26?s.slice(0,25)+"…":s;
+ const font=fs=>`600 ${fs}px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif`;
+ const N=g.nodes.map((v,i)=>{
+  const fs=Math.round(11+4*Math.sqrt(v.degree/maxDeg));
+  x.font=font(fs);const label=trunc(v.label);
+  const w=x.measureText(label).width+18,h=fs+12;
+  return {...v,label,fs,w,h,r:Math.sqrt(w*w+h*h)/2,
+   x:W/2+Math.cos(6.28*i/n)*Math.min(W,H)/3,
+   y:H/2+Math.sin(6.28*i/n)*H/3,vx:0,vy:0};});
+ const idx=Object.fromEntries(N.map((v,i)=>[v.id,i]));
  const E=g.edges.map(e=>({a:idx[e.s],b:idx[e.o],p:e.p}));
- const cap=v=>Math.max(-5,Math.min(5,v));
- for(let it=0;it<300;it++){
-  for(let i=0;i<N.length;i++)for(let j=i+1;j<N.length;j++){
+ const cap=v=>Math.max(-6,Math.min(6,v));
+ const clampIn=v=>{v.x=Math.max(v.w/2+4,Math.min(W-v.w/2-4,v.x));
+  v.y=Math.max(v.h/2+4,Math.min(H-v.h/2-4,v.y));};
+ for(let it=0;it<360;it++){
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){
    const a=N[i],b=N[j];let dx=a.x-b.x,dy=a.y-b.y;
-   const d=Math.sqrt(dx*dx+dy*dy)||1,f=Math.min(3,900/(d*d));
+   const d=Math.sqrt(dx*dx+dy*dy)||1,min=a.r+b.r+10;
+   let f=Math.min(4,2600/(d*d));
+   if(d<min)f+=(min-d)*0.25;
    dx=dx/d*f;dy=dy/d*f;a.vx+=dx;a.vy+=dy;b.vx-=dx;b.vy-=dy;}
   E.forEach(e=>{const a=N[e.a],b=N[e.b];
    const dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
-   const f=Math.max(-2,Math.min(2,(d-95)*0.01));
+   const f=Math.max(-2.5,Math.min(2.5,(d-(a.r+b.r+70))*0.012));
    a.vx+=dx/d*f;a.vy+=dy/d*f;b.vx-=dx/d*f;b.vy-=dy/d*f;});
-  N.forEach(n=>{n.vx+=(W/2-n.x)*0.008;n.vy+=(H/2-n.y)*0.008;
-   n.vx=cap(n.vx*0.6);n.vy=cap(n.vy*0.6);
-   n.x+=n.vx;n.y+=n.vy;
-   n.x=Math.max(18,Math.min(W-18,n.x));
-   n.y=Math.max(18,Math.min(H-18,n.y));});
+  N.forEach(v=>{v.vx+=(W/2-v.x)*0.006;v.vy+=(H/2-v.y)*0.006;
+   v.vx=cap(v.vx*0.6);v.vy=cap(v.vy*0.6);v.x+=v.vx;v.y+=v.vy;clampIn(v);});
  }
- const warm=(deg)=>{const t=Math.sqrt(deg/maxDeg);
+ /* pills are rectangles: a last pass separates any that still overlap */
+ for(let pass=0;pass<16;pass++){
+  let moved=false;
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){
+   const a=N[i],b=N[j];
+   const ox=(a.w+b.w)/2+6-Math.abs(a.x-b.x),oy=(a.h+b.h)/2+6-Math.abs(a.y-b.y);
+   if(ox>0&&oy>0){moved=true;
+    if(ox<oy){const s=(a.x<b.x?-1:1)*ox/2;a.x+=s;b.x-=s;}
+    else{const s=(a.y<b.y?-1:1)*oy/2;a.y+=s;b.y-=s;}
+    clampIn(a);clampIn(b);}}
+  if(!moved)break;
+ }
+ const warm=deg=>{const t=Math.sqrt(deg/maxDeg);
   const r=Math.round(88+t*(232-88)),g2=Math.round(166+t*(179-166)),
         b=Math.round(255+t*(57-255));
   return `rgb(${r},${g2},${b})`;};
+ function pill(v,col,alpha,hl){
+  x.globalAlpha=alpha;
+  const rr=v.h/2,X=v.x-v.w/2,Y=v.y-v.h/2;
+  x.beginPath();x.moveTo(X+rr,Y);x.lineTo(X+v.w-rr,Y);
+  x.arc(X+v.w-rr,Y+rr,rr,-Math.PI/2,Math.PI/2);x.lineTo(X+rr,Y+v.h);
+  x.arc(X+rr,Y+rr,rr,Math.PI/2,3*Math.PI/2);x.closePath();
+  x.fillStyle=col;x.shadowColor=col;x.shadowBlur=hl?16:0;x.fill();x.shadowBlur=0;
+  if(hl){x.lineWidth=1.5;x.strokeStyle="#ffffff";x.stroke();}
+  x.font=font(v.fs);x.textBaseline="middle";x.textAlign="center";
+  x.fillStyle="#0b0f16";x.fillText(v.label,v.x,v.y+0.5);
+  x.globalAlpha=1;
+ }
+ const linked=(i,j)=>E.some(e=>(e.a===i&&e.b===j)||(e.b===i&&e.a===j));
  function draw(hover){
   x.clearRect(0,0,W,H);
-  E.forEach(e=>{
-   const a=N[e.a],b=N[e.b];
+  E.forEach(e=>{const a=N[e.a],b=N[e.b];
    const on=hover>=0&&(e.a===hover||e.b===hover);
    const mx=(a.x+b.x)/2+(a.y-b.y)*0.12,my=(a.y+b.y)/2+(b.x-a.x)*0.12;
-   x.strokeStyle=on?"rgba(126,224,255,.75)":"rgba(130,150,190,.20)";
-   x.lineWidth=on?1.6:1;
+   x.strokeStyle=on?"rgba(126,224,255,.85)":"rgba(130,150,190,.32)";
+   x.lineWidth=on?1.8:1;
    x.beginPath();x.moveTo(a.x,a.y);x.quadraticCurveTo(mx,my,b.x,b.y);x.stroke();});
-  N.forEach((n,i)=>{
-   const r=3.5+2.6*Math.sqrt(n.degree);
-   const col=warm(n.degree);
-   const dimmed=hover>=0&&i!==hover&&
-    !E.some(e=>(e.a===hover&&e.b===i)||(e.b===hover&&e.a===i));
-   x.globalAlpha=dimmed?0.35:1;
-   x.beginPath();x.arc(n.x,n.y,r,0,7);
-   x.fillStyle=col;x.shadowColor=col;x.shadowBlur=i===hover?18:9;
-   x.fill();x.shadowBlur=0;x.globalAlpha=1;});
-  const labeled=N.map((n,i)=>[n,i]).sort((a,b)=>b[0].degree-a[0].degree)
-   .slice(0,16).map(p=>p[1]);
-  x.font="11px -apple-system,sans-serif";x.textBaseline="middle";
-  labeled.forEach(i=>{const n=N[i];
-   if(hover>=0&&i!==hover)x.globalAlpha=0.55;
-   const r=3.5+2.6*Math.sqrt(n.degree);
-   x.lineWidth=3;x.strokeStyle="rgba(8,10,15,.85)";
-   x.strokeText(n.label,n.x+r+5,n.y);
-   x.fillStyle=i===hover?"#7ee0ff":"#c9d2e3";
-   x.fillText(n.label,n.x+r+5,n.y);x.globalAlpha=1;});
+  N.map((v,i)=>i).sort((i,j)=>N[i].degree-N[j].degree).forEach(i=>{
+   const dimmed=hover>=0&&i!==hover&&!linked(hover,i);
+   pill(N[i],warm(N[i].degree),dimmed?0.28:1,i===hover);});
  }
  draw(-1);
  const tip=$("tip");
  c.onmousemove=ev=>{const r=c.getBoundingClientRect();
-  const mx=ev.clientX-r.left,my=ev.clientY-r.top;let best=-1,bd=230;
-  N.forEach((n,i)=>{const d=(n.x-mx)**2+(n.y-my)**2;if(d<bd){bd=d;best=i;}});
+  const mx=ev.clientX-r.left,my=ev.clientY-r.top;let best=-1;
+  N.forEach((v,i)=>{if(Math.abs(v.x-mx)<=v.w/2+2&&Math.abs(v.y-my)<=v.h/2+2)best=i;});
   draw(best);
-  if(best>=0){const n=N[best];
+  if(best>=0){const v=N[best];
+   const rel=E.filter(e=>e.a===best||e.b===best).slice(0,8).map(e=>
+    e.a===best?`→ ${esc(e.p)} <b>${esc(N[e.b].label)}</b>`
+              :`<b>${esc(N[e.a].label)}</b> ${esc(e.p)} →`);
    tip.style.display="block";
-   tip.style.left=Math.min(n.x+14,W-150)+"px";
-   tip.style.top=(n.y-34)+"px";
-   tip.innerHTML=`<b>${esc(n.label)}</b> <span class="d">· ${n.degree}
-    relation${n.degree===1?"":"s"}</span>`;
+   tip.style.left=Math.min(v.x+v.w/2+8,W-260)+"px";
+   tip.style.top=Math.max(4,v.y-v.h/2-8-18*(rel.length+1))+"px";
+   tip.innerHTML=`<b>${esc(v.label)}</b> <span class="d">· ${v.degree} relation${v.degree===1?"":"s"}</span>`+
+    (rel.length?`<div class="d">${rel.join("<br>")}</div>`:"");
   }else tip.style.display="none";};
  c.onmouseleave=()=>{draw(-1);tip.style.display="none";};
 }
@@ -806,7 +802,7 @@ async function refresh(){
   setBadge("indexbadge",s.index);
   setBadge("auditbadge",s.audit_ok?"audit chain verified":"AUDIT CHAIN BROKEN",
    s.audit_ok?"badge ok":"badge bad");
-  tiles(s);types(s);growth(s);
+  tiles(s);growth(s);
   tablefill("nstable",s.namespaces.map(n=>[n.namespace,n.records]));
   tablefill("agtable",s.agents.map(a=>[a.agent,a.count]));
   chips("tagchips",s.tags,"tag","count");

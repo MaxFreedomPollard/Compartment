@@ -45,16 +45,13 @@ def test_page_and_stats(served):
     assert status == 200 and b"Compartment" in body and b"<canvas" in body
     assert headers["Cache-Control"] == "no-store"
     assert "default-src 'none'" in headers["Content-Security-Policy"]
+    # the importance tiers rank recall; they are not a panel on the page
+    assert b"What the vault remembers" not in body
 
     status, body, _ = _get(served + "api/stats")
     s = json.loads(body)
     assert s["records"] == 2 and s["relations"] == 1 and s["entities"] == 2
-    assert {t["label"] for t in s["types"]} == {
-        "decisions & consent", "personal facts & preferences",
-        "machine & configuration", "substantive statements", "pleasantries"}
-    by_label = {t["label"]: t["count"] for t in s["types"]}
-    assert by_label["personal facts & preferences"] == 1
-    assert by_label["machine & configuration"] == 1
+    assert "types" not in s
     assert s["audit_ok"] is True and s["growth"]
 
 
@@ -63,6 +60,7 @@ def test_graph_recent_search(served):
     g = json.loads(body)
     assert {n["label"] for n in g["nodes"]} == {"Max", "Outreach"}
     assert g["edges"] == [{"s": "max", "o": "outreach", "p": "works at"}]
+    assert g["total_entities"] == 2 and g["total_relations"] == 1
 
     _, body, _ = _get(served + "api/recent")
     texts = [m["text"] for m in json.loads(body)["recent"]]

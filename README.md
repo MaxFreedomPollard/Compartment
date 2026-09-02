@@ -11,7 +11,7 @@ network, no telemetry.
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 <p align="center">
-  <img src="docs/images/dashboard.png" width="820" alt="compartment dash on a 51,000-memory vault: memories by kind, growth over time, the relation graph">
+  <img src="docs/images/dashboard.png" width="820" alt="compartment dash on a 51,000-memory vault: growth over time and the relation graph">
 </p>
 
 Compartment is persistent memory for AI agents, stored on your own computer.
@@ -348,9 +348,9 @@ switch, and the defaults come from the measurements above.
 Linux, the applications menu entry). `init --no-app` skips the app on
 headless machines and in CI.
 
-**`compartment dash`** opens the whole vault in your browser: memories by
-kind, growth over time, the relation graph, tags, per-agent counts, live
-search. It serves from RAM on 127.0.0.1 only, behind a random URL token,
+**`compartment dash`** opens the whole vault in your browser: growth over
+time, the relation graph with every entity named, tags, per-agent counts,
+live search. It serves from RAM on 127.0.0.1 only, behind a random URL token,
 read-only, with no outbound requests and no configuration. Ctrl-C closes it.
 
 <p align="center">
