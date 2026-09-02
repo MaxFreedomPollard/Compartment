@@ -30,43 +30,6 @@ it. A new vault comes with about 6,700 reference facts about hardware,
 operating systems, ports, encodings and shell tools. They are ordinary
 memories, and one switch removes them from search.
 
-## Install
-
-| | |
-|---|---|
-| **pip** (macOS, Linux, Windows) | `pip install compartment && compartment init` |
-| **pipx / uv** | `pipx install compartment` or `uv tool install compartment`, then `compartment init` |
-| **One click** (macOS) | open **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest). Python, the embedding model and every dependency are inside it |
-| **Claude Code plugin** | after `pip install compartment && compartment init`: `/plugin marketplace add MaxFreedomPollard/Compartment`, then `/plugin install compartment@maxfreedompollard`. Codex reads the same marketplace file |
-| **Docker** | `docker build -t compartment .` from a checkout; see [Wiring each agent](#wiring-each-agent) |
-
-The pip route needs Python 3.11 or newer. The app runs on macOS 13 or
-newer, on Windows with the Microsoft Visual C++ runtime installed, and on
-any Linux desktop.
-
-`init` asks you to choose a passphrase, creates the vault, loads the
-reference facts, connects Claude Code, Hermes Agent or OpenClaw if they are
-installed, and starts the app: a menu bar item on macOS, a tray icon on
-Windows, a window on Linux. Restart your agent and it has a memory.
-
-To connect an agent later, or any other client:
-
-```bash
-compartment integrate claude      # Claude Code + Claude Desktop
-compartment integrate hermes      # Hermes Agent
-compartment integrate openclaw    # OpenClaw
-compartment integrate --list      # the 28 MCP clients it can wire: Cursor, VS Code, Cline, Roo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Oh My Pi, LM Studio, AnythingLLM, BoltAI ...
-compartment integrate --all       # every one of them that is installed here
-```
-
-`claude`, `hermes` and `openclaw` also get the **`/compartmentalize`** skill
-installed in their skills directories. Any other MCP client uses this block
-(stdio transport, no environment variables):
-
-```json
-{ "mcpServers": { "compartment": { "command": "compartment", "args": ["serve"] } } }
-```
-
 ## How it compares with other memory servers
 
 Where each server keeps memory and what protects it, as documented by each
@@ -390,6 +353,134 @@ kind, growth over time, the relation graph, tags, per-agent counts, live
 search. It serves from RAM on 127.0.0.1 only, behind a random URL token,
 read-only, with no outbound requests and no configuration. Ctrl-C closes it.
 
+## Security and the lock model
+
+The primitives: XChaCha20-Poly1305 encryption on everything at rest,
+including embedding vectors, because vectors can be inverted back to text ·
+Argon2id key slots, LUKS-style · a key per record, so `forget --shred`
+destroys the key and the content is unrecoverable rather than marked deleted
+· an fsync'd sealed journal, atomic compaction, and tested kill -9 recovery ·
+a hash-chained audit log (`compartment audit verify`) · signed vault
+manifests and packs · stdio transport with no open ports · a runtime guard
+that aborts on any socket attempt (`--assert-offline`), with CI running the
+whole suite under it on Linux, macOS and Windows. The full threat model,
+including what Compartment cannot protect against, is in
+[SECURITY.md](SECURITY.md).
+
+You lock and unlock the vault yourself.
+
+- **`compartment unlock`** opens the vault with your passphrase. Compartment
+  never generates a password, seed or recovery phrase, and holds no
+  credential you do not. (Vaults from older versions that were issued a
+  recovery phrase still accept it.)
+- **`compartment lock`** closes it and clears every stored credential.
+  Agents can do the same with the `memory_lock` tool.
+- **`compartment 2fa enable`** adds a second factor: your passphrase plus a
+  keyfile, for example on a USB stick. Both feed Argon2id together, so the
+  requirement is enforced by the cryptography, not by a setting; a stolen
+  vault file plus your passphrase opens nothing without the keyfile. The
+  keyfile's location is remembered, so unlocking feels the same while it is
+  present.
+
+After a normal unlock the vault stays open across processes, logouts and
+logins for as long as you leave it, until a restart or power loss, until the
+auto-lock timer fires (15, 30 or 60 idle minutes in the panel; `0` never),
+or until you lock it. A restart or power loss always locks it: the unlock
+credential is the master key wrapped with a random per-boot secret that
+lives only in kernel memory and is never written to disk, so a new boot
+cannot open it. A copy of the credential file on its own is useless.
+
+On macOS, `compartment unlock --keychain` is an explicit opt-in that survives
+reboots. The `memory_unlock` MCP tool exists but is off by default, because
+enabling it puts the passphrase in the model's context.
+
+## One vault, many agents, any machine
+
+Claude, Hermes Agent, Cursor and the CLI can use one vault at the same
+time. Writes are serialised by an advisory file lock, every process detects
+writes by others and reloads, and each caller has its own identity and
+namespace with rw / ro / none grants, so a scratch agent can read without
+writing.
+
+A locked vault is one portable file:
+
+```bash
+compartment lock --sign
+scp ~/.compartment/memory.vault other-machine:
+compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
+```
+
+`lock --sign` adds an Ed25519 manifest that the recipient can check with
+`compartment verify` and no credential. `export --plaintext` writes the vault
+as JSONL and `import` reads it back, so you are never locked in.
+[FORMAT.md](FORMAT.md) specifies the `.vault` and `.mpack` files byte by
+byte.
+
+**Memory packs** are signed, read-only bundles of curated memories
+(`compartment pack build | install | remove | list | export`). They install
+under `packs/<name>`, read-only for every caller, and
+`include_packs_in_search` toggles them. A pack's signature is checked against
+a key you trust, never against the key inside the pack. The reference facts
+are the one pack that lives in `main` as ordinary memories.
+[PACKS.md](PACKS.md) covers authoring.
+
+`compartment setup airgap-bundle` prepares an install for a machine with no
+network; `setup download-model` and `setup download-longmemeval` fetch what
+the optional benchmarks need.
+
+## Measured, on an 8 GB baseline laptop
+
+Every number below is reproducible on your machine with `compartment
+selftest` and `compartment bench` (`--longmemeval` runs the retrieval
+benchmark).
+
+| Metric | Measured |
+|---|---|
+| Fresh install → open vault, offline | seconds, zero network |
+| Vector search, 20k records (HNSW) | p95 0.68 ms |
+| Full hybrid search (embed + windows + keywords + evidence fusion) | median 11.6 ms, p95 14.7 ms |
+| Peak RSS, model + vault + index resident | 319 MB |
+| Store one memory (embed + encrypt + fsync journal) | ~40 ms |
+| Wheel size, model included | ~30 MB |
+| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash, ranking) | 800+ tests, offline guard active |
+
+## Install
+
+| | |
+|---|---|
+| **pip** (macOS, Linux, Windows) | `pip install compartment && compartment init` |
+| **pipx / uv** | `pipx install compartment` or `uv tool install compartment`, then `compartment init` |
+| **One click** (macOS) | open **Compartment.pkg** from the [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest). Python, the embedding model and every dependency are inside it |
+| **Claude Code plugin** | after `pip install compartment && compartment init`: `/plugin marketplace add MaxFreedomPollard/Compartment`, then `/plugin install compartment@maxfreedompollard`. Codex reads the same marketplace file |
+| **Docker** | `docker build -t compartment .` from a checkout; see [Wiring each agent](#wiring-each-agent) |
+
+The pip route needs Python 3.11 or newer. The app runs on macOS 13 or
+newer, on Windows with the Microsoft Visual C++ runtime installed, and on
+any Linux desktop.
+
+`init` asks you to choose a passphrase, creates the vault, loads the
+reference facts, connects Claude Code, Hermes Agent or OpenClaw if they are
+installed, and starts the app: a menu bar item on macOS, a tray icon on
+Windows, a window on Linux. Restart your agent and it has a memory.
+
+To connect an agent later, or any other client:
+
+```bash
+compartment integrate claude      # Claude Code + Claude Desktop
+compartment integrate hermes      # Hermes Agent
+compartment integrate openclaw    # OpenClaw
+compartment integrate --list      # the 28 MCP clients it can wire: Cursor, VS Code, Cline, Roo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Oh My Pi, LM Studio, AnythingLLM, BoltAI ...
+compartment integrate --all       # every one of them that is installed here
+```
+
+`claude`, `hermes` and `openclaw` also get the **`/compartmentalize`** skill
+installed in their skills directories. Any other MCP client uses this block
+(stdio transport, no environment variables):
+
+```json
+{ "mcpServers": { "compartment": { "command": "compartment", "args": ["serve"] } } }
+```
+
 ## Wiring each agent
 
 Each of these is also a button in the app under **CONNECT AN AGENT**. On
@@ -465,97 +556,6 @@ Client-by-client walkthroughs are in
 stdio only, no port, unprivileged user, vault on a bind mount at `/data`.
 Create the vault on the host first with `compartment init`, because that
 step prompts for the passphrase.
-
-## One vault, many agents, any machine
-
-Claude, Hermes Agent, Cursor and the CLI can use one vault at the same
-time. Writes are serialised by an advisory file lock, every process detects
-writes by others and reloads, and each caller has its own identity and
-namespace with rw / ro / none grants, so a scratch agent can read without
-writing.
-
-A locked vault is one portable file:
-
-```bash
-compartment lock --sign
-scp ~/.compartment/memory.vault other-machine:
-compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
-```
-
-`lock --sign` adds an Ed25519 manifest that the recipient can check with
-`compartment verify` and no credential. `export --plaintext` writes the vault
-as JSONL and `import` reads it back, so you are never locked in.
-[FORMAT.md](FORMAT.md) specifies the `.vault` and `.mpack` files byte by
-byte.
-
-**Memory packs** are signed, read-only bundles of curated memories
-(`compartment pack build | install | remove | list | export`). They install
-under `packs/<name>`, read-only for every caller, and
-`include_packs_in_search` toggles them. A pack's signature is checked against
-a key you trust, never against the key inside the pack. The reference facts
-are the one pack that lives in `main` as ordinary memories.
-[PACKS.md](PACKS.md) covers authoring.
-
-`compartment setup airgap-bundle` prepares an install for a machine with no
-network; `setup download-model` and `setup download-longmemeval` fetch what
-the optional benchmarks need.
-
-## Security and the lock model
-
-The primitives: XChaCha20-Poly1305 encryption on everything at rest,
-including embedding vectors, because vectors can be inverted back to text ·
-Argon2id key slots, LUKS-style · a key per record, so `forget --shred`
-destroys the key and the content is unrecoverable rather than marked deleted
-· an fsync'd sealed journal, atomic compaction, and tested kill -9 recovery ·
-a hash-chained audit log (`compartment audit verify`) · signed vault
-manifests and packs · stdio transport with no open ports · a runtime guard
-that aborts on any socket attempt (`--assert-offline`), with CI running the
-whole suite under it on Linux, macOS and Windows. The full threat model,
-including what Compartment cannot protect against, is in
-[SECURITY.md](SECURITY.md).
-
-You lock and unlock the vault yourself.
-
-- **`compartment unlock`** opens the vault with your passphrase. Compartment
-  never generates a password, seed or recovery phrase, and holds no
-  credential you do not. (Vaults from older versions that were issued a
-  recovery phrase still accept it.)
-- **`compartment lock`** closes it and clears every stored credential.
-  Agents can do the same with the `memory_lock` tool.
-- **`compartment 2fa enable`** adds a second factor: your passphrase plus a
-  keyfile, for example on a USB stick. Both feed Argon2id together, so the
-  requirement is enforced by the cryptography, not by a setting; a stolen
-  vault file plus your passphrase opens nothing without the keyfile. The
-  keyfile's location is remembered, so unlocking feels the same while it is
-  present.
-
-After a normal unlock the vault stays open across processes, logouts and
-logins for as long as you leave it, until a restart or power loss, until the
-auto-lock timer fires (15, 30 or 60 idle minutes in the panel; `0` never),
-or until you lock it. A restart or power loss always locks it: the unlock
-credential is the master key wrapped with a random per-boot secret that
-lives only in kernel memory and is never written to disk, so a new boot
-cannot open it. A copy of the credential file on its own is useless.
-
-On macOS, `compartment unlock --keychain` is an explicit opt-in that survives
-reboots. The `memory_unlock` MCP tool exists but is off by default, because
-enabling it puts the passphrase in the model's context.
-
-## Measured, on an 8 GB baseline laptop
-
-Every number below is reproducible on your machine with `compartment
-selftest` and `compartment bench` (`--longmemeval` runs the retrieval
-benchmark).
-
-| Metric | Measured |
-|---|---|
-| Fresh install → open vault, offline | seconds, zero network |
-| Vector search, 20k records (HNSW) | p95 0.68 ms |
-| Full hybrid search (embed + windows + keywords + evidence fusion) | median 11.6 ms, p95 14.7 ms |
-| Peak RSS, model + vault + index resident | 319 MB |
-| Store one memory (embed + encrypt + fsync journal) | ~40 ms |
-| Wheel size, model included | ~30 MB |
-| Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash, ranking) | 800+ tests, offline guard active |
 
 ## Configuration
 
