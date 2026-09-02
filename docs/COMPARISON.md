@@ -19,6 +19,9 @@ this file.
 | claude-mem | local SQLite + Chroma | not documented | sign-in required (email magic link), subscription after a trial for the hosted observer [5] | account + provider calls; usage telemetry on by default [9] | Apache-2.0 |
 | basic-memory | Markdown files + SQLite index | not documented | none locally | usage telemetry to Umami on by default, opt-out [10] | AGPL-3.0 |
 | Hindsight (Vectorize) | one container with embedded PostgreSQL | not documented | an LLM key (local models configurable) | LLM calls; vendor states no telemetry | MIT |
+| Supermemory | cloud service, or a self-hosted prebuilt binary (the server source is not in the repository) | not documented for self-host; the cloud states AES-256 class encryption | an account (cloud) or an LLM key (self-host) | cloud calls; the vendor states the self-hosted binary sends no analytics [11] | MIT (repository) |
+| Cognee | SQLite + LanceDB + Kuzu locally by default, or cloud | not documented | an LLM key (`LLM_API_KEY` is step two of the README) | LLM calls; usage telemetry on unless `TELEMETRY_DISABLED` is set [12] | Apache-2.0 |
+| MemOS | Neo4j + Qdrant when self-hosted, or MemOS Cloud; a local plugin uses SQLite | not documented | an LLM key | LLM calls; the local plugin ships `telemetry: { enabled: true }` [13] | Apache-2.0 |
 
 Sources
 
@@ -32,6 +35,9 @@ Sources
 8. letta-code `src/telemetry/index.ts`: "Enabled by default unless explicitly disabled" (`LETTA_CODE_TELEM`, `DO_NOT_TRACK`). https://github.com/letta-ai/letta-code/blob/main/src/telemetry/index.ts
 9. claude-mem `src/services/telemetry/consent.ts`: "Default: on (opt-out — anonymous events only)". https://github.com/thedotmack/claude-mem/blob/main/src/services/telemetry/consent.ts
 10. basic-memory README, *Telemetry*: events go to Umami Cloud; `BASIC_MEMORY_NO_PROMOS` defaults to `false` and "disables promos and all telemetry". https://github.com/basicmachines-co/basic-memory#telemetry
+11. Supermemory docs, *Self-Hosting Configuration*, section *Telemetry*: the self-hosted binary sends no analytics. https://supermemory.ai/docs/self-hosting/configuration#telemetry
+12. `cognee/shared/utils.py`: events are posted to `https://test.prometh.ai` unless `TELEMETRY_DISABLED` is set in the environment. https://github.com/topoteretes/cognee/blob/main/cognee/shared/utils.py
+13. `apps/memos-local-plugin/core/config/defaults.ts`: `telemetry: { enabled: true }`; the README's self-host path is `docker compose up` with Neo4j and Qdrant. https://github.com/MemTensor/MemOS/blob/main/apps/memos-local-plugin/core/config/defaults.ts
 
 What the table does not say
 
