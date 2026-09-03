@@ -1,5 +1,5 @@
 name: compartment
-version: 4.9.4
+version: 4.9.5
 description: "Compartment - high-security, fully offline, encrypted vector memory. AEAD-encrypted vault, locked-by-default after restart, native Hermes provider, no API key."
 pip_dependencies: []
 requires_env: []
