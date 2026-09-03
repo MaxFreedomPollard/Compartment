@@ -10,7 +10,7 @@ network, no telemetry.
 [![CI](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.MaxFreedomPollard%2Fcompartment-6c47ff)](https://registry.modelcontextprotocol.io/v0/servers?search=compartment)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.MaxFreedomPollard%2Fcompartment-6c47ff)](https://maxfreedompollard.github.io/Compartment/registry)
 [![Cursor Directory](https://img.shields.io/badge/Cursor_Directory-listed-111111)](https://cursor.directory/plugins/compartment)
 [![Glama](https://img.shields.io/badge/Glama-listed-2ea44f)](https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment)
 [![MCP Market](https://img.shields.io/badge/MCP_Market-listed-0ea5e9)](https://mcpmarket.com/server/compartment)
@@ -725,7 +725,7 @@ third-party sharing, retention, and contact, is at
 ## Where to find it
 
 Compartment is listed on [PyPI](https://pypi.org/project/compartment/), the
-[official MCP registry](https://registry.modelcontextprotocol.io/v0/servers?search=compartment),
+[official MCP registry](https://maxfreedompollard.github.io/Compartment/registry),
 the [Cursor Directory](https://cursor.directory/plugins/compartment),
 [Glama](https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment),
 [LobeHub](https://lobehub.com/mcp/maxfreedompollard-compartment),

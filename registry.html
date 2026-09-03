@@ -1,0 +1,23 @@
+---
+layout: null
+permalink: /registry
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compartment in the MCP Registry</title>
+<style>body{font:16px/1.55 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}code,pre{font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f3f1;border-radius:4px}code{padding:.15em .4em}pre{padding:1rem;overflow:auto}a{color:#0645ad}h1{font-size:1.6rem}</style>
+</head>
+<body>
+<h1>Compartment in the official MCP Registry</h1>
+<p>Compartment is published in the <a href="https://registry.modelcontextprotocol.io/">Model Context Protocol registry</a>, the shared catalogue that MCP clients read, under the name <code>io.github.MaxFreedomPollard/compartment</code>. Each release is published there by the same workflow that publishes to PyPI, so the registry's latest version is always the one <code>pip install compartment</code> serves.</p>
+<h2>Install</h2>
+<pre>pip install compartment &amp;&amp; compartment init</pre>
+<p>Then wire your client: <code>compartment integrate claude</code>, <code>hermes</code>, <code>openclaw</code>, <code>cursor</code>, or any of the 28 clients that <code>compartment integrate --list</code> names. Clients that install straight from the registry run it as <code>uvx compartment serve</code>.</p>
+<h2>Verify it yourself</h2>
+<p>The registry has no web page of its own; it is an API. The current entry, as JSON: <a href="https://registry.modelcontextprotocol.io/v0.1/servers/io.github.MaxFreedomPollard%2Fcompartment/versions">every published version</a>, or <a href="https://registry.modelcontextprotocol.io/v0/servers?search=compartment">a search for "compartment"</a>. The version flagged <code>isLatest</code> names the PyPI release it installs.</p>
+<p><a href="https://github.com/MaxFreedomPollard/Compartment">Compartment on GitHub</a> · <a href="https://pypi.org/project/compartment/">on PyPI</a></p>
+</body>
+</html>
