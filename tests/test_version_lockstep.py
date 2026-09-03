@@ -63,6 +63,13 @@ def test_server_json_carries_both_spellings():
     assert d["version"] == _semver(_version())
 
 
+def test_gemini_extension_json_matches_the_package():
+    """The Gemini CLI extensions gallery shows this version and the CLI
+    compares it on update, so it moves with the package like plugin.json."""
+    d = json.loads((ROOT / "gemini-extension.json").read_text(encoding="utf-8"))
+    assert d["version"] == _semver(_version())
+
+
 def test_plugin_json_matches_the_package():
     d = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
     assert d["version"] == _semver(_version())

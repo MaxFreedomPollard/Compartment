@@ -32,6 +32,7 @@ server without the app.
 #      server.json   packages[0].version = "2.1"    the string PyPI serves
 #      server.json   version             = "2.1.0"  the SEMVER form
 #      plugin.json   version             = "2.1.0"  Agent Plugins manifest
+#      gemini-extension.json version       = "2.1.0"  Gemini CLI extension manifest
 #
 #    The two server.json fields are deliberately NOT the same value. Step 5
 #    explains why; setting them both to "2.1" is what published a registry

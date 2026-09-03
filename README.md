@@ -26,6 +26,7 @@ network, no telemetry.
 <a href="https://insiders.vscode.dev/redirect/mcp/install?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22vscode%22%2C%22serve%22%5D%7D&quality=insiders"><img src="https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=for-the-badge&logo=visualstudiocode&logoColor=white" alt="Install in VS Code Insiders" height="32"></a>
 <a href="https://maxfreedompollard.github.io/Compartment/add/lmstudio"><img src="https://files.lmstudio.ai/deeplink/mcp-install-dark.svg" alt="Add to LM Studio" height="32"></a>
 <a href="https://maxfreedompollard.github.io/Compartment/add/goose"><img src="https://img.shields.io/badge/goose-Install_Extension-1f1f1f?style=for-the-badge" alt="Install in goose" height="32"></a>
+<a href="https://kiro.dev/launch/mcp/add?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22kiro%22%2C%22serve%22%5D%7D"><img src="https://kiro.dev/images/add-to-kiro.svg" alt="Add to Kiro" height="32"></a>
 </p>
 
 Claude Code, Claude Desktop, Hermes Agent and OpenClaw are wired by one
@@ -746,6 +747,8 @@ and [Jenqyang/Awesome-AI-Agents](https://github.com/Jenqyang/Awesome-AI-Agents).
 <a href="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment"><img width="380" height="200" src="https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment/badge" alt="Compartment MCP server" /></a>
 
 Bugs and feature requests: [Issues](https://github.com/MaxFreedomPollard/Compartment/issues).
+Support and questions: [Discussions](https://github.com/MaxFreedomPollard/Compartment/discussions);
+security reports: [SECURITY.md](SECURITY.md).
 Questions and ideas: [Discussions](https://github.com/MaxFreedomPollard/Compartment/discussions).
 
 ---

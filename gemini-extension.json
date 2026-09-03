@@ -1,0 +1,16 @@
+{
+  "name": "compartment",
+  "version": "4.9.4",
+  "description": "Encrypted, fully offline long-term memory for Gemini CLI. One vault on your machine, shared by every MCP client. Requires `pip install compartment && compartment init` first.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "compartment": {
+      "command": "compartment",
+      "args": [
+        "--caller",
+        "gemini-cli",
+        "serve"
+      ]
+    }
+  }
+}
