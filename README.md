@@ -10,6 +10,27 @@ network, no telemetry.
 [![CI](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.MaxFreedomPollard%2Fcompartment-6c47ff)](https://registry.modelcontextprotocol.io/v0/servers?search=compartment)
+[![Cursor Directory](https://img.shields.io/badge/Cursor_Directory-listed-111111)](https://cursor.directory/plugins/compartment)
+[![Glama](https://img.shields.io/badge/Glama-listed-2ea44f)](https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment)
+[![MCP Market](https://img.shields.io/badge/MCP_Market-listed-0ea5e9)](https://mcpmarket.com/server/compartment)
+[![mcpservers.org](https://img.shields.io/badge/mcpservers.org-listed-8b5cf6)](https://mcpservers.org/servers/maxfreedompollard/compartment)
+[![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
+
+**One-click install** (after `pip install compartment && compartment init`):
+
+<p>
+<a href="cursor://anysphere.cursor-deeplink/mcp/install?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwiY3Vyc29yIiwic2VydmUiXX0="><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add to Cursor" height="32"></a>
+<a href="https://vscode.dev/redirect/mcp/install?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22vscode%22%2C%22serve%22%5D%7D"><img src="https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white" alt="Install in VS Code" height="32"></a>
+<a href="https://insiders.vscode.dev/redirect/mcp/install?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22vscode%22%2C%22serve%22%5D%7D&quality=insiders"><img src="https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=for-the-badge&logo=visualstudiocode&logoColor=white" alt="Install in VS Code Insiders" height="32"></a>
+<a href="lmstudio://add_mcp?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwibG0tc3R1ZGlvIiwic2VydmUiXX0="><img src="https://files.lmstudio.ai/deeplink/mcp-install-dark.svg" alt="Add to LM Studio" height="32"></a>
+<a href="goose://extension?cmd=uvx&arg=compartment&arg=--caller&arg=goose&arg=serve&id=compartment&name=Compartment&description=Encrypted%2C%20fully%20offline%20long-term%20memory%20for%20AI%20agents"><img src="https://img.shields.io/badge/goose-Install_Extension-1f1f1f?style=for-the-badge" alt="Install in goose" height="32"></a>
+</p>
+
+Claude Code, Claude Desktop, Hermes Agent and OpenClaw are wired by one
+command instead: `compartment integrate claude`, `hermes` or `openclaw`.
+
 Compartment is persistent memory for AI agents, stored on your own computer.
 What an agent learns in one session is available in every later session, in
 every project, to every agent on the machine, and nothing leaves the machine.
@@ -704,14 +725,20 @@ third-party sharing, retention, and contact, is at
 
 Compartment is listed on [PyPI](https://pypi.org/project/compartment/), the
 [official MCP registry](https://registry.modelcontextprotocol.io/v0/servers?search=compartment),
-[Glama](https://glama.ai/mcp/servers/@MaxFreedomPollard/Compartment),
+the [Cursor Directory](https://cursor.directory/plugins/compartment),
+[Glama](https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment),
 [LobeHub](https://lobehub.com/mcp/maxfreedompollard-compartment),
 [MCP Toplist](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment),
+[MCP Market](https://mcpmarket.com/server/compartment),
 [mcpservers.org](https://mcpservers.org/servers/maxfreedompollard/compartment),
 [TensorBlock](https://www.tensorblock.co/mcp/servers/github-maxfreedompollard-compartment-4ab11161),
+the [toolsdk.ai registry](https://github.com/toolsdk-ai/toolsdk-mcp-registry/blob/main/packages/knowledge-memory/compartment.json),
 [Libraries.io](https://libraries.io/pypi/compartment),
 [Snyk Advisor](https://snyk.io/advisor/python/compartment) and
-[deps.dev](https://deps.dev/pypi/compartment).
+[deps.dev](https://deps.dev/pypi/compartment), and in the curated lists
+[abordage/awesome-mcp](https://github.com/abordage/awesome-mcp),
+[TensorBlock/awesome-mcp-servers](https://github.com/TensorBlock/awesome-mcp-servers/blob/main/docs/knowledge-management--memory.md)
+and [Jenqyang/Awesome-AI-Agents](https://github.com/Jenqyang/Awesome-AI-Agents).
 
 [![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
 [![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
