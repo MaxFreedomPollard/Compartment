@@ -10,13 +10,12 @@ network, no telemetry.
 [![CI](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MaxFreedomPollard/Compartment/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.MaxFreedomPollard%2Fcompartment-6c47ff)](https://maxfreedompollard.github.io/Compartment/registry)
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
 [![Cursor Directory](https://img.shields.io/badge/Cursor_Directory-listed-111111)](https://cursor.directory/plugins/compartment)
 [![Glama](https://img.shields.io/badge/Glama-listed-2ea44f)](https://glama.ai/mcp/servers/MaxFreedomPollard/Compartment)
 [![MCP Market](https://img.shields.io/badge/MCP_Market-listed-0ea5e9)](https://mcpmarket.com/server/compartment)
 [![mcpservers.org](https://img.shields.io/badge/mcpservers.org-listed-8b5cf6)](https://mcpservers.org/servers/maxfreedompollard/compartment)
 [![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
-[![MCP Toplist](https://mcptoplist.com/badge/io.github.MaxFreedomPollard%2Fcompartment.svg)](https://mcptoplist.com/server/io.github.MaxFreedomPollard%2Fcompartment)
 
 **One-click install** (after `pip install compartment && compartment init`):
 
