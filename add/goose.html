@@ -1,0 +1,22 @@
+---
+layout: null
+permalink: /add/goose
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0; url=goose://extension?cmd=uvx&arg=compartment&arg=--caller&arg=goose&arg=serve&id=compartment&name=Compartment&description=Encrypted%2C%20fully%20offline%20long-term%20memory%20for%20AI%20agents">
+<title>Add Compartment to goose</title>
+<style>body{font:16px/1.55 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}code,pre{font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f3f1;border-radius:4px}code{padding:.15em .4em}pre{padding:1rem;overflow:auto}a{color:#0645ad}</style>
+</head>
+<body>
+<h1>Add Compartment to goose</h1>
+<p>The app should open now with Compartment ready to add. If it did not, <a href="goose://extension?cmd=uvx&arg=compartment&arg=--caller&arg=goose&arg=serve&id=compartment&name=Compartment&description=Encrypted%2C%20fully%20offline%20long-term%20memory%20for%20AI%20agents">open it by hand</a>.</p>
+<p>Before the first run, install the package and create the vault once: <code>pip install compartment &amp;&amp; compartment init</code>. The vault is encrypted under a passphrase you choose, and nothing leaves your machine.</p>
+<p>Manual setup: run <code>goose configure</code>, choose Add Extension, then Command-line Extension, and enter:</p>
+<pre>uvx compartment --caller goose serve</pre>
+<p><a href="https://github.com/MaxFreedomPollard/Compartment">Compartment on GitHub</a></p>
+</body>
+</html>

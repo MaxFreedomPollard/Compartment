@@ -1,0 +1,29 @@
+---
+layout: null
+permalink: /add/lmstudio
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0; url=lmstudio://add_mcp?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwibG0tc3R1ZGlvIiwic2VydmUiXX0=">
+<title>Add Compartment to LM Studio</title>
+<style>body{font:16px/1.55 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}code,pre{font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f3f1;border-radius:4px}code{padding:.15em .4em}pre{padding:1rem;overflow:auto}a{color:#0645ad}</style>
+</head>
+<body>
+<h1>Add Compartment to LM Studio</h1>
+<p>The app should open now with Compartment ready to add. If it did not, <a href="lmstudio://add_mcp?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwibG0tc3R1ZGlvIiwic2VydmUiXX0=">open it by hand</a>.</p>
+<p>Before the first run, install the package and create the vault once: <code>pip install compartment &amp;&amp; compartment init</code>. The vault is encrypted under a passphrase you choose, and nothing leaves your machine.</p>
+<p>Manual setup: in LM Studio open the MCP configuration (Program, then Install, then Edit mcp.json) and add:</p>
+<pre>{
+  "mcpServers": {
+    "compartment": {
+      "command": "compartment",
+      "args": ["--caller", "lm-studio", "serve"]
+    }
+  }
+}</pre>
+<p><a href="https://github.com/MaxFreedomPollard/Compartment">Compartment on GitHub</a></p>
+</body>
+</html>

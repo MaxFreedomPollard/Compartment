@@ -21,11 +21,11 @@ network, no telemetry.
 **One-click install** (after `pip install compartment && compartment init`):
 
 <p>
-<a href="cursor://anysphere.cursor-deeplink/mcp/install?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwiY3Vyc29yIiwic2VydmUiXX0="><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add to Cursor" height="32"></a>
+<a href="https://cursor.com/install-mcp?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwiY3Vyc29yIiwic2VydmUiXX0="><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add to Cursor" height="32"></a>
 <a href="https://vscode.dev/redirect/mcp/install?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22vscode%22%2C%22serve%22%5D%7D"><img src="https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white" alt="Install in VS Code" height="32"></a>
 <a href="https://insiders.vscode.dev/redirect/mcp/install?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22vscode%22%2C%22serve%22%5D%7D&quality=insiders"><img src="https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=for-the-badge&logo=visualstudiocode&logoColor=white" alt="Install in VS Code Insiders" height="32"></a>
-<a href="lmstudio://add_mcp?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwibG0tc3R1ZGlvIiwic2VydmUiXX0="><img src="https://files.lmstudio.ai/deeplink/mcp-install-dark.svg" alt="Add to LM Studio" height="32"></a>
-<a href="goose://extension?cmd=uvx&arg=compartment&arg=--caller&arg=goose&arg=serve&id=compartment&name=Compartment&description=Encrypted%2C%20fully%20offline%20long-term%20memory%20for%20AI%20agents"><img src="https://img.shields.io/badge/goose-Install_Extension-1f1f1f?style=for-the-badge" alt="Install in goose" height="32"></a>
+<a href="https://maxfreedompollard.github.io/Compartment/add/lmstudio"><img src="https://files.lmstudio.ai/deeplink/mcp-install-dark.svg" alt="Add to LM Studio" height="32"></a>
+<a href="https://maxfreedompollard.github.io/Compartment/add/goose"><img src="https://img.shields.io/badge/goose-Install_Extension-1f1f1f?style=for-the-badge" alt="Install in goose" height="32"></a>
 </p>
 
 Claude Code, Claude Desktop, Hermes Agent and OpenClaw are wired by one
