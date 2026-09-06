@@ -166,7 +166,8 @@ vault and checked on open, so similarity scores stay comparable. To change
 model, run `compartment reindex --re-embed`.
 
 **No LLM inside.** Embeddings run locally with a bundled 384-dimension int8
-ONNX model in under 300 MB of RAM. The host model decides what to store and
+ONNX model, in one shared process of about 70 MB that every agent on the
+machine uses. The host model decides what to store and
 forget; Compartment captures, encrypts and recalls. That split keeps the
 offline guarantee absolute and every decision reproducible. With an offline
 LLM, the whole agent runs with no network.
@@ -362,9 +363,12 @@ Argon2id key slots, LUKS-style · a key per record, so `forget --shred`
 destroys the key and the content is unrecoverable rather than marked deleted
 · an fsync'd sealed journal, atomic compaction, and tested kill -9 recovery ·
 a hash-chained audit log (`compartment audit verify`) · signed vault
-manifests and packs · stdio transport with no open ports · a runtime guard
-that aborts on any socket attempt (`--assert-offline`), with CI running the
-whole suite under it on Linux, macOS and Windows. The full threat model,
+manifests and packs · stdio transport with no open ports; the one local
+socket is the shared embedding process's Unix socket, in the same private
+directory as the unlock credential, carrying text in and vectors out and
+never a key · a runtime guard that aborts on any network socket attempt
+(`--assert-offline`), with CI running the whole suite under it on Linux,
+macOS and Windows. The full threat model,
 including what Compartment cannot protect against, is in
 [SECURITY.md](SECURITY.md).
 
@@ -412,7 +416,9 @@ setting up: the app's **Connect an agent** buttons wire Claude, Hermes Agent
 and OpenClaw, and what one agent stores the others recall. Claude, Hermes
 Agent, Cursor and the CLI can use the vault at the same time: writes are
 serialised by a file lock, every process notices writes by others and
-reloads, and each agent has its own identity and namespace.
+reloads, and each agent has its own identity and namespace. Their servers
+share one embedding process too, so ten agents cost one model in RAM, and
+it leaves a few minutes after the last of them does.
 
 A locked vault is one file, `memory.vault` in the `.compartment` folder of
 your home directory. To move to another machine, lock the vault, copy the
@@ -453,14 +459,17 @@ the optional benchmarks need.
 
 Every number below is reproducible on your machine with `compartment
 selftest` and `compartment bench` (`--longmemeval` runs the retrieval
-benchmark).
+benchmark); `compartment embed-daemon status` reports the shared process's
+own size.
 
 | Metric | Measured |
 |---|---|
 | Fresh install → open vault, offline | seconds, zero network |
 | Vector search, 20k records (HNSW) | p95 0.68 ms |
 | Full hybrid search (embed + windows + keywords + evidence fusion) | median 11.6 ms, p95 14.7 ms |
-| Peak RSS, model + vault + index resident | 319 MB |
+| Shared embedding process, model loaded, once per machine | 68 MB resident |
+| The same after two batches of 64 long text windows | 71 MB; before 4.9.6 every agent's server kept 1.5 GB, then 3 GB |
+| An MCP server process with its model in the shared daemon | 60 MB, plus its vault and index |
 | Store one memory (embed + encrypt + fsync journal) | ~40 ms |
 | Wheel size, model included | ~30 MB |
 | Test suite (crypto, tamper, crash, offline, concurrency, 2FA, graph, dash, ranking) | 800+ tests, offline guard active |
@@ -621,6 +630,7 @@ Global flags, before the command: `--vault PATH`, `--caller NAME`,
 | `hook` | the Claude Code capture hook: `install --pin-vault`, `uninstall`, `status`, `capture` |
 | `import-claude` | pull in what Claude Code already wrote. `--dir`, `--namespace`, `--dry-run` |
 | `serve` | the MCP server, over stdio |
+| `embed-daemon` | the shared embedding process every agent uses: `status`, `stop`, `run` |
 | `dash` | read the vault in a browser: 127.0.0.1, one-time token, GET only |
 | `export` / `import` | `export --plaintext` writes it unencrypted; `import` reads it back |
 | `rekey` | change the passphrase. `--new-passphrase-stdin` |
@@ -679,6 +689,7 @@ copy; a later install backs up a changed copy rather than overwriting it.
 | `retag_interval_hours` | `6` | how often the background pass recomputes tags. `0` turns it off |
 | `retag_prune` | `false` | whether that pass may also remove tags |
 | `index_precision` | `"f32"` | `"int8"` uses a quarter of the RAM |
+| `embed_daemon` | `true` | ask the machine's shared embedding process for vectors instead of loading the model in this process |
 | `unlock_tool_enabled` | `false` | lets an agent unlock the vault. Off because the passphrase would cross the model's context |
 
 ### Environment
@@ -686,7 +697,10 @@ copy; a later install backs up a changed copy rather than overwriting it.
 `COMPARTMENT_VAULT` which vault to use, `COMPARTMENT_PASSPHRASE` for scripts
 and CI, `COMPARTMENT_SESSION_DIR` where the unlock credential lives,
 `COMPARTMENT_UI_SCALE` panel scale, `COMPARTMENT_ASSERT_OFFLINE` abort on any
-network attempt. `HERMES_HOME`, `OPENCLAW_HOME` and `XDG_DATA_HOME` are read
+network attempt. `COMPARTMENT_EMBED_DAEMON=0` keeps the embedding model
+inside each process instead of the shared one, `COMPARTMENT_EMBED_SOCKET`
+moves that process's socket, `COMPARTMENT_EMBED_IDLE` is how many seconds it
+outlives its last client (300). `HERMES_HOME`, `OPENCLAW_HOME` and `XDG_DATA_HOME` are read
 where they apply. Anything exported as `ENGRAM_*` still works.
 
 ### MCP tools

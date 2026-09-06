@@ -145,6 +145,34 @@ before proceeding - a stale writer gets a loud VaultStaleError, never
 silent corruption. Namespace ACLs are per-caller; `--caller` identity is
 declarative (see the hostile-host limitation above).
 
+## The shared embedding process
+
+Since 4.9.6 the encoder runs once per machine, in a daemon that every
+`compartment serve`, the command line and the app talk to over a Unix domain
+socket, rather than once per agent. What crosses that socket: the text of a
+memory being stored or of a query being searched, going in; unit vectors
+coming out. What never crosses it: a passphrase, a master key, a record key,
+or anything read from the vault at rest. The daemon opens no vault and holds
+no key; a capture of its memory is a copy of the model and of whatever text
+was in flight.
+
+The socket lives in the session directory (`~/.compartment/session`, mode
+0700) beside the boot-bound unlock credential. The daemon accepts a
+connection only from a process with its own uid (`SO_PEERCRED` on Linux,
+`LOCAL_PEERCRED` on macOS); a client connects only to a socket file its own
+uid owns, and only to a daemon that reports the same protocol, the same
+package version and the same SHA-256 of the model file, so a vector never
+comes from a model other than the one the vault is pinned to. A process
+running as the same user is already inside the trust boundary - it can read
+the session credential and open the vault directly - so the socket gives
+that user nothing they did not have. It is not a network listener:
+`--assert-offline` allows AF_UNIX and forbids everything else, exactly as
+before.
+
+`COMPARTMENT_EMBED_DAEMON=0`, or `embed_daemon: false` in the vault's
+settings, keeps the model inside each process instead. Windows has no
+AF_UNIX in Python and always does.
+
 ## Reporting
 
 Report vulnerabilities privately to the maintainer. No telemetry exists in
