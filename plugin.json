@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "compartment",
-  "version": "4.9.5",
+  "version": "4.9.6",
   "description": "High-security, fully offline, encrypted vector memory for AI agents. AEAD-encrypted vault, locked by default after restart, no API key and no network at runtime.",
   "author": {
     "name": "Max Freedom Pollard",
