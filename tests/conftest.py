@@ -1,3 +1,4 @@
+import os
 import pathlib
 import sys
 
@@ -5,6 +6,14 @@ import pytest
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
+
+# Set at import, not only in the autouse fixture below: pytest builds
+# session-scoped fixtures such as seeded_vault_path BEFORE a test's
+# function-scoped fixtures, so their Vault.create ran in the raw process
+# environment and started a shared embedding daemon on the developer's real
+# socket path. The fixture still exists so a test can flip it with
+# monkeypatch and have it restored.
+os.environ.setdefault("COMPARTMENT_EMBED_DAEMON", "0")
 
 from compartment import claude_desktop as _claude_desktop  # noqa: E402
 from compartment.vault import Vault  # noqa: E402
