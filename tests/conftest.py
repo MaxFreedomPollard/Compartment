@@ -46,6 +46,21 @@ def no_real_session_store(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_shared_embedding_daemon(monkeypatch):
+    """Every test embeds in its own process unless it asks for the daemon.
+
+    The shared daemon is the right default for a machine full of agents and
+    the wrong one for a test suite: the first vault a test created would
+    start a daemon in the developer's real session directory, every later
+    test would talk to it, and it would sit there holding a model for five
+    minutes after the run. The tests that are about the daemon set this
+    variable back to 1 themselves, with a socket in a temp directory, and
+    stop what they started.
+    """
+    monkeypatch.setenv("COMPARTMENT_EMBED_DAEMON", "0")
+
+
+@pytest.fixture(autouse=True)
 def no_real_supervisors(monkeypatch, tmp_path, request):
     """No test talks to the machine's own launchd, systemd or Task Scheduler,
     or writes a start-at-login entry into the real home directory.

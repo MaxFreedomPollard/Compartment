@@ -8,8 +8,11 @@ at download time by `compartment setup download-model`.
 from __future__ import annotations
 
 from .home import env, home
+import dataclasses
+import functools
 import json
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +43,17 @@ BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages
 CHUNK_WINDOW = 448
 CHUNK_STRIDE = 384
 MAX_CHUNKS = 64
+
+# Padded tokens per inference batch. The attention tensors inside the encoder
+# scale with batch x sequence^2, so a batch is not "64 texts", it is however
+# many texts fit under this many padded tokens: 64 short memories of about 60
+# tokens, or 9 full 448-token windows. Measured on an M1 with the int8 model, a
+# batch of 64 full windows peaked at 1.3-1.5 GB of RAM whatever the allocator
+# did afterwards; 8 windows peaked at 250 MB and took the same time overall
+# (3.5 s for 64 windows either way). Texts are sorted by length before
+# packing, so a batch never pads sixty short texts out to the length of one
+# long one.
+BATCH_TOKENS = 4096
 # Pinned hashes of the bundled model files (recorded at bundling time).
 BUNDLED_HASHES = {
     "model_quantized.onnx": "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
@@ -104,6 +118,54 @@ def _verify_hashes(d: Path, expected: dict[str, str], label: str) -> None:
             )
 
 
+@dataclasses.dataclass(frozen=True)
+class ModelInfo:
+    """Everything about a model that can be known without loading it."""
+    name: str
+    dir: Path
+    onnx: Path
+    tokenizer: Path
+    sha256: str
+    dim: int
+    prefix_query: str
+    prefix_passage: str
+
+
+@functools.lru_cache(maxsize=None)
+def model_info(model_name: str = DEFAULT_MODEL) -> ModelInfo:
+    """Verify a model's files against their pins and describe it. No runtime.
+
+    Opening a vault checks that the model on this machine is the one the vault
+    was built with, and it used to do that by constructing an Embedder: an
+    ONNX session and a tokenizer, about 50 MB of RAM and a fifth of a second,
+    in every process that so much as reads a record - the menu bar app's
+    status poll, `compartment status`, every MCP server at startup whether or
+    not the agent ever searches. The pin is a SHA-256 of a file, and hashing
+    the file is all the check ever needed. The result is cached per process;
+    the files do not change underneath a running install, and when they do
+    (an upgrade replaced the tree) a stale answer here is no worse than the
+    session that was already running on the old files.
+    """
+    d = resolve_model_dir(model_name)
+    if model_name == DEFAULT_MODEL:
+        _verify_hashes(d, BUNDLED_HASHES, "bundled model")
+        return ModelInfo(model_name, d, d / "model_quantized.onnx",
+                         d / "tokenizer.json",
+                         BUNDLED_HASHES["model_quantized.onnx"], DEFAULT_DIM,
+                         BGE_QUERY_INSTRUCTION, "")
+    pin_file = d / "HASHES.json"
+    if not pin_file.is_file():
+        raise ModelError(f"model {model_name}: HASHES.json missing (re-download)")
+    pins = json.loads(pin_file.read_text(encoding="utf-8"))
+    _verify_hashes(d, pins["files"], f"model {model_name}")
+    onnx_file = next(p for p in d.glob("*.onnx"))
+    # Verified equal to the file a moment ago, so the pin IS the file's hash.
+    sha = pins["files"].get(onnx_file.name) or sha256(onnx_file.read_bytes())
+    return ModelInfo(model_name, d, onnx_file, d / "tokenizer.json", sha,
+                     int(pins["dim"]), pins.get("prefix_query", ""),
+                     pins.get("prefix_passage", ""))
+
+
 def _missing_runtime_error(exc: ImportError) -> ModelError | None:
     """The actionable form of onnxruntime's Windows DLL failure, or None.
 
@@ -144,53 +206,93 @@ class Embedder:
         except Exception:                                   # noqa: BLE001
             pass
 
+        info = model_info(model_name)
+        self.info = info
         self.model_name = model_name
-        d = resolve_model_dir(model_name)
-        if model_name == DEFAULT_MODEL:
-            _verify_hashes(d, BUNDLED_HASHES, "bundled model")
-            self.dim = DEFAULT_DIM
-            self.prefix_query = BGE_QUERY_INSTRUCTION
-            self.prefix_passage = ""
-            onnx_file = d / "model_quantized.onnx"
-        else:
-            pin_file = d / "HASHES.json"
-            if not pin_file.is_file():
-                raise ModelError(f"model {model_name}: HASHES.json missing (re-download)")
-            pins = json.loads(pin_file.read_text(encoding="utf-8"))
-            _verify_hashes(d, pins["files"], f"model {model_name}")
-            self.dim = int(pins["dim"])
-            self.prefix_query = pins.get("prefix_query", "")
-            self.prefix_passage = pins.get("prefix_passage", "")
-            onnx_file = next(p for p in d.glob("*.onnx"))
-
-        self.model_sha256 = sha256(onnx_file.read_bytes())
-        self.tok = Tokenizer.from_file(str(d / "tokenizer.json"))
+        self.dim = info.dim
+        self.prefix_query = info.prefix_query
+        self.prefix_passage = info.prefix_passage
+        self.model_sha256 = info.sha256
+        self.tok = Tokenizer.from_file(str(info.tokenizer))
         self.tok.enable_truncation(max_length=512)
-        self.tok.enable_padding()
+        # Padding is done here, per batch, in _infer. The tokenizer's own
+        # padding pads a batch out to its longest member, which is exactly the
+        # waste the length-sorted packing below exists to avoid.
+        self.tok.no_padding()
+        # The tokenizer is one mutable object: chunk() switches truncation off
+        # and back on around its call. Inference runs concurrently just fine,
+        # so the lock covers the tokenizer only, not the session.
+        self._tok_lock = threading.Lock()
         so = ort.SessionOptions()
         so.log_severity_level = 3
-        self.sess = ort.InferenceSession(str(onnx_file), so,
+        # No memory arena. onnxruntime's arena keeps every byte it ever grew
+        # to and grows again on the next batch: measured, one batch of 64
+        # long windows took a process from 118 MB to 1.5 GB resident, a
+        # second identical batch to 3 GB, and neither was ever given back.
+        # Six MCP servers on one laptop each did this on their own. Without
+        # the arena the same work returns to under 90 MB when it is done, at
+        # the same speed for the batch sizes BATCH_TOKENS allows.
+        so.enable_cpu_mem_arena = False
+        self.sess = ort.InferenceSession(str(info.onnx), so,
                                          providers=["CPUExecutionProvider"])
         self._needs_token_type = any(
             i.name == "token_type_ids" for i in self.sess.get_inputs())
 
-    def _run(self, texts: list[str]) -> np.ndarray:
-        enc = self.tok.encode_batch(texts)
-        ids = np.array([e.ids for e in enc], dtype=np.int64)
-        mask = np.array([e.attention_mask for e in enc], dtype=np.int64)
-        feed = {"input_ids": ids, "attention_mask": mask}
+    def _encode(self, texts: list[str]) -> list[list[int]]:
+        """Token ids per text, truncated to the model's 512, never padded."""
+        with self._tok_lock:
+            return [e.ids for e in self.tok.encode_batch(texts)]
+
+    def _infer(self, ids: list[list[int]]) -> np.ndarray:
+        """CLS-pool one padded batch. Pads with id 0 and mask 0, which is what
+        the tokenizer's own padding produced, so nothing about a vector
+        depends on which batch its text happened to land in."""
+        width = max(len(x) for x in ids)
+        arr = np.zeros((len(ids), width), dtype=np.int64)
+        mask = np.zeros((len(ids), width), dtype=np.int64)
+        for row, x in enumerate(ids):
+            arr[row, :len(x)] = x
+            mask[row, :len(x)] = 1
+        feed = {"input_ids": arr, "attention_mask": mask}
         if self._needs_token_type:
-            feed["token_type_ids"] = np.zeros_like(ids)
+            feed["token_type_ids"] = np.zeros_like(arr)
         out = self.sess.run(None, feed)[0]
         cls = out[:, 0].astype(np.float32)
         norms = np.linalg.norm(cls, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return cls / norms
 
+    def _run(self, texts: list[str]) -> np.ndarray:
+        return self._infer(self._encode(texts))
+
+    @staticmethod
+    def _batches(order: list[int], ids: list[list[int]], batch: int,
+                 budget: int = BATCH_TOKENS) -> list[list[int]]:
+        """Group length-sorted indices so that no batch exceeds `batch` texts
+        or `budget` padded tokens. The last index added to a group is its
+        longest, so the padded size is the group's length times that."""
+        groups: list[list[int]] = []
+        current: list[int] = []
+        for i in order:
+            if current and (len(current) >= batch
+                            or (len(current) + 1) * len(ids[i]) > budget):
+                groups.append(current)
+                current = []
+            current.append(i)
+        if current:
+            groups.append(current)
+        return groups
+
     def embed_passages(self, texts: list[str], batch: int = 64) -> np.ndarray:
         texts = [self.prefix_passage + t for t in texts]
-        chunks = [self._run(texts[i:i + batch]) for i in range(0, len(texts), batch)]
-        return np.vstack(chunks) if chunks else np.zeros((0, self.dim), np.float32)
+        if not texts:
+            return np.zeros((0, self.dim), np.float32)
+        ids = self._encode(texts)
+        order = sorted(range(len(ids)), key=lambda i: len(ids[i]))
+        out = np.empty((len(ids), self.dim), dtype=np.float32)
+        for group in self._batches(order, ids, batch):
+            out[group] = self._infer([ids[i] for i in group])
+        return out
 
     def embed_query(self, text: str) -> np.ndarray:
         return self._run([self.prefix_query + text])[0]
@@ -207,12 +309,12 @@ class Embedder:
         """
         if not text:
             return [text]
-        self.tok.no_truncation()
-        try:
-            enc = self.tok.encode(text, add_special_tokens=False)
-        finally:
-            self.tok.enable_truncation(max_length=512)
-            self.tok.enable_padding()
+        with self._tok_lock:
+            self.tok.no_truncation()
+            try:
+                enc = self.tok.encode(text, add_special_tokens=False)
+            finally:
+                self.tok.enable_truncation(max_length=512)
         ids = enc.ids
         if len(ids) <= window:
             return [text]
@@ -230,3 +332,22 @@ class Embedder:
     def embed_record(self, text: str) -> np.ndarray:
         """(n_chunks, dim) for one record. Row 0 is always its opening."""
         return self.embed_passages(self.chunk(text))
+
+
+def get_embedder(model_name: str = DEFAULT_MODEL, *, shared: bool | None = None):
+    """The embedder a vault should use: the machine's shared embedding
+    process when it is available, this process's own model otherwise.
+
+    `shared=None` means "whatever the environment says", which is on
+    everywhere the daemon runs (see embed_daemon.enabled). The two objects
+    answer the same calls with the same vectors, so callers hold whichever
+    they are given and never ask which. The fallback is inside the remote
+    object too: if the daemon goes away mid-session the vault keeps working
+    on a local model without anyone asking it to.
+    """
+    from . import embed_daemon      # local import: the daemon imports us
+    if embed_daemon.enabled(shared):
+        remote = embed_daemon.RemoteEmbedder.connect(model_name)
+        if remote is not None:
+            return remote
+    return Embedder(model_name)

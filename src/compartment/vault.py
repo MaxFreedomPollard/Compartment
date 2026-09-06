@@ -33,7 +33,7 @@ from . import audit, crypto, gate, vaultfile, wire
 from .platforms import FileLock
 from .acl import AclError, VaultConfig
 from .crypto import CryptoError, TamperError
-from .embed import CHUNK_WINDOW, DEFAULT_MODEL, Embedder
+from .embed import CHUNK_WINDOW, DEFAULT_MODEL, Embedder, get_embedder, model_info
 from .store import Store
 from .vindex import BRUTE_FORCE_LIMIT, build_index
 
@@ -344,7 +344,7 @@ class Vault:
             raise CryptoError("Empty passphrase refused - the user sets it")
         master = crypto.new_key()
         slot_pw = crypto.make_passphrase_slot(master, passphrase)
-        emb = Embedder(model_name)
+        emb = get_embedder(model_name)
         header = vaultfile.VaultHeader(
             vault_id=uuid.uuid4().hex,
             created=datetime.datetime.now(datetime.UTC).isoformat(),
@@ -415,17 +415,23 @@ class Vault:
                       "loss during a store.")
             v.save()  # compact replayed journal into the payload
         if check_model:
-            emb = Embedder(model_name)
-            if emb.model_sha256 != db.get_meta("model_sha256"):
+            # The pin is a hash of a file, so hashing the file is the whole
+            # check. Opening a vault used to build the encoder to answer this
+            # - onnxruntime, tokenizer, model, in every process that opened
+            # a vault for any reason. Now the model is loaded by the first
+            # store or search that needs it, and by the shared daemon when
+            # there is one, so a `compartment status`, the app's poll, or an
+            # MCP server nobody has searched from yet costs no runtime at all.
+            if model_info(model_name).sha256 != db.get_meta("model_sha256"):
                 raise CryptoError(
                     "Embedding model on this machine does not match the model "
                     "this vault was built with. Refusing to open (would corrupt "
                     "search). Install the matching model, or migrate the vault "
                     "with: compartment reindex --re-embed"
                 )
-            v._embedder = emb
-        else:
-            v._embedder = None  # caller must reembed() before searching
+        # Either way the embedder is built on first use; with check_model
+        # off the caller must reembed() before searching.
+        v._embedder = None
         v._rebuild_index()
         # Rule 6, the first half. After the index exists, because the sweep
         # takes windows out of it. Never fatal: a vault that cannot be tidied
@@ -480,7 +486,7 @@ class Vault:
         """Migrate the vault to a different embedding model: re-embed every
         record locally (fully offline) and re-pin the model. Returns count."""
         self._require_open()
-        emb = Embedder(model_name)
+        emb = get_embedder(model_name, shared=self._embed_daemon_setting())
         rows = self.db.conn.execute("SELECT id FROM records ORDER BY ikey").fetchall()
         texts = [self.db.decrypt_text(self.db.get_row(r["id"]), self._master)
                  for r in rows]
@@ -587,11 +593,21 @@ class Vault:
         if self._locked or self._master is None:
             raise VaultLockedError("Vault is locked. Unlock it first.")
 
+    def _embed_daemon_setting(self) -> bool | None:
+        """The vault's `embed_daemon` setting, None when it says nothing."""
+        try:
+            value = self.config.settings.get("embed_daemon")
+        except AttributeError:
+            return None
+        return None if value is None else bool(value)
+
     @property
     def embedder(self) -> Embedder:
         self._require_open()
         if self._embedder is None:
-            self._embedder = Embedder(self.db.get_meta("model_name", DEFAULT_MODEL))
+            self._embedder = get_embedder(
+                self.db.get_meta("model_name", DEFAULT_MODEL),
+                shared=self._embed_daemon_setting())
         return self._embedder
 
     def _rank_candidates(self, query: str, qvec, pool: int):
@@ -1637,7 +1653,20 @@ class Vault:
         n = self.db.count()
         dim = int(self.header.model["dim"])
         vec_bytes = n * dim * 4
-        est_mb = 200 + (vec_bytes * 2) // (1024 * 1024)  # model+runtime ≈200MB base
+        from . import embed_daemon
+        emb = self._embedder
+        daemon_on = embed_daemon.enabled(self._embed_daemon_setting())
+        if emb is None:
+            mode = "not loaded"
+        elif getattr(emb, "shared", False):
+            mode = "shared daemon"
+        else:
+            mode = "in-process"
+        # Measured on the int8 default model: about 120 MB for a process that
+        # holds the model itself, about 60 MB for one that asks the shared
+        # daemon, plus the index. The daemon's own ~70 MB is paid once per
+        # machine and is not this process's.
+        est_mb = (60 if daemon_on else 120) + (vec_bytes * 2) // (1024 * 1024)
         ok, entries, msg = audit.verify(self.db.conn)
         # Seeded starting memories vs. what real use actually stored. A vault
         # can hold thousands of records and still have learned nothing about
@@ -1671,6 +1700,8 @@ class Vault:
                             set(self._readable_namespaces(caller))]),
             "packs": self.pack_list(),
             "model": self.header.model,
+            "embedder": {"mode": mode, "shared_daemon": daemon_on,
+                         "daemon_pid": getattr(emb, "daemon_pid", None)},
             "index": self.index.kind,
             "projected_ram_mb": est_mb,
             "brute_force_limit": BRUTE_FORCE_LIMIT,

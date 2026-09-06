@@ -24,7 +24,7 @@ from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
                session)
 from .acl import VaultConfig
 from .crypto import CryptoError
-from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, user_model_dir
+from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, get_embedder, user_model_dir
 from .vault import Vault, keychain_clear, keychain_get, keychain_store
 from .vaultfile import read_vault_file, verify_manifest
 
@@ -427,6 +427,16 @@ def cmd_update(args) -> None:
         pass
     print(f"  updated: now {ver}")
     print("  your vault and settings are untouched")
+    # The shared embedding daemon is a process running the build that
+    # started it. Stopping it here means the next search, from any agent,
+    # starts one from the code that was just installed; every connected
+    # server reconnects on its own.
+    from . import embed_daemon
+    try:
+        if embed_daemon.stop().get("stopped"):
+            print("  embedding daemon stopped - the next search starts the new build")
+    except Exception:                                    # noqa: BLE001
+        pass
     if not args.no_app and sys.platform in ("darwin", "win32"):
         _restart_status_bar_app(args.vault)
 
@@ -1143,6 +1153,22 @@ def cmd_retag(args) -> None:
           "memory text, dates and importance untouched")
 
 
+def cmd_embed_daemon(args) -> None:
+    """The shared embedding process: is it up, stop it, or run one here."""
+    from . import embed_daemon
+    sub = getattr(args, "embed_cmd", None) or "status"
+    if sub == "run":
+        sys.exit(embed_daemon.run(
+            Path(args.socket) if getattr(args, "socket", None) else None,
+            getattr(args, "idle", None)))
+    if sub == "stop":
+        _print(embed_daemon.stop())
+        return
+    out = embed_daemon.status()
+    out["enabled"] = embed_daemon.enabled()
+    _print(out)
+
+
 def cmd_serve(args) -> None:
     from . import server
     argv = ["--vault", args.vault, "--caller", args.caller]
@@ -1271,7 +1297,7 @@ def cmd_pack_build(args) -> None:
         identity = packs.new_identity(args.creator)
         ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
         print(f"generated new signing identity → {ident_path} (keep it private)")
-    emb = Embedder(DEFAULT_MODEL)
+    emb = get_embedder(DEFAULT_MODEL)
     vectors = emb.embed_passages([r["text"] for r in records])
     pw = None
     if args.encrypt:
@@ -2149,6 +2175,25 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("serve", help="run the MCP stdio server")
     p.set_defaults(fn=cmd_serve)
+
+    pe = sub.add_parser("embed-daemon",
+                        help="the shared embedding process every agent on "
+                             "this machine uses (status, stop, run)")
+    pe_sub = pe.add_subparsers(dest="embed_cmd")
+    p = pe_sub.add_parser("status", help="is it running, for whom, how big")
+    p.set_defaults(fn=cmd_embed_daemon)
+    p = pe_sub.add_parser("stop", help="ask it to exit; the next search "
+                                       "starts a fresh one")
+    p.set_defaults(fn=cmd_embed_daemon)
+    p = pe_sub.add_parser("run", help="run it in the foreground (agents "
+                                      "start it on their own; this is for "
+                                      "supervisors and debugging)")
+    p.add_argument("--socket", help="listen here instead of the session dir")
+    p.add_argument("--idle", type=int,
+                   help="seconds without a client before exiting (default 300)")
+    p.set_defaults(fn=cmd_embed_daemon)
+    # Bare `compartment embed-daemon` reports status.
+    pe.set_defaults(fn=cmd_embed_daemon, embed_cmd=None)
 
     p = sub.add_parser("dash", help="open the vault dashboard in your browser")
     p.set_defaults(fn=cmd_dash)
