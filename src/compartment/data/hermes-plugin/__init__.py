@@ -358,3 +358,16 @@ class CompartmentMemoryProvider(MemoryProvider):
                 self._vault.save()
             except Exception as exc:
                 logger.warning("compartment shutdown save failed: %s", exc)
+
+
+def register(ctx) -> None:
+    """Plugin entry point: hand Hermes the provider instance.
+
+    Hermes's memory loader calls ``register(ctx)`` first and only falls back
+    to scanning the module for a ``MemoryProvider`` subclass when it is
+    missing, so this changes nothing for existing installs. It is required by
+    the Nous plugin catalog's admission probe (``hermes plugins validate``),
+    which imports the plugin in a bare interpreter and fails with "no
+    register() function" without it.
+    """
+    ctx.register_memory_provider(CompartmentMemoryProvider())
