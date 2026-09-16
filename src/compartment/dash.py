@@ -226,7 +226,7 @@ def snapshot_search(v: Vault, query: str, caller: str = "dash",
         v._require_open()
         allowed = set(v._readable_namespaces(caller))
         qvec = v.embedder.embed_query(query)
-        boosted, vec_score, scores = v._rank_candidates(query, qvec,
+        boosted, vec_score, static = v._rank_candidates(query, qvec,
                                                         CANDIDATE_POOL)
 
         results = []

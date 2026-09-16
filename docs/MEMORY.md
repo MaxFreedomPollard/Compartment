@@ -135,14 +135,19 @@ accumulate is contradictory stances.
 soft OR over independent evidence, in log space:
 `score = -0.75·log(1 - p_vec) - 0.25·log(1 - p_lex)` plus a small
 rank-agreement residue, so either channel alone can establish relevance
-and neither can veto the other. Importance and recency then MULTIPLY:
-`final = score · (1 + 0.15·(2·importance - 1) + recency)`, where recency
-is `0.10·2^(-age/180d)` for a fact and `0.30·2^(-age/30d)` for an opinion,
-measured from its last re-affirmation - so the current stance outranks a
-stale one, and a prior can only reorder memories that already matched. In
-practice: ask "what theme does the user like?" and the dark-mode
-preference wins on relevance; ask "did the user say to email the client?"
-and the consent decision wins.
+and neither can veto the other. A memory's age is then counted in MEMORIES
+rather than in days: the semantic half of its evidence is shifted, in
+odds, by `2^(-q/0.5)`, where `q` is the share of the vault's own memories
+written after it. So a fortnight-old memory is barely touched in a quiet
+vault and halved in one that wrote five hundred memories in the same
+fortnight. Importance MULTIPLIES what is left,
+`final = evidence · (1 + 0.15·(2·importance - 1))`, and an opinion adds
+`0.30·2^(-age/30d)` from its last re-affirmation, so the current stance
+outranks a stale one. A prior can only reorder memories that already
+matched, and the relevance floors read the unaged score, so recency cannot
+remove one either. In practice: ask "what theme does the user like?" and
+the dark-mode preference wins on relevance; ask "did the user say to email
+the client?" and the consent decision wins.
 
 **The agent-directed path.** The host model (Hermes, Claude, anything)
 also holds `compartment_store` / `compartment_forget` tools, so the intelligence

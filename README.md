@@ -112,8 +112,8 @@ the old record instead of inserting, and the caller resends with
 Restating a live opinion refreshes its date instead of storing a copy.
 Superseded records are removed from search but kept in the audit chain and
 readable by id, with a pointer to their replacement. `supersedes` also works
-on facts, for corrections. Opinion ranking weights recency much more than
-fact ranking, so the newest opinion wins. `compartment opinions audit` finds
+on facts, for corrections. Opinion ranking carries a recency bonus that fact
+ranking does not, so the newest opinion wins. `compartment opinions audit` finds
 overlapping live opinions in older vaults and keeps the newest, or reports
 them for manual merging.
 
@@ -320,15 +320,19 @@ does well, sized to break ties:
 + w_rrf · k · [ 1/(k + rank_vec) + 1/(k + rank_lex) ]      w_rrf = 0.10, k = 20
 ```
 
-### Importance and recency multiply the score
+### Importance and recency reorder the score
 
 ```
-final(d) = score(d) · ( 1 + w_imp · (2·importance(d) - 1)
-                          + w_rec · 2^( -age_days(d) / half_life ) )
+evidence(d) = aged( vec term, q(d) ) + lex term + rank residue
+final(d)    = evidence(d) · ( 1 + w_imp · (2·importance(d) - 1) + w_op )
 
-facts:     w_imp = 0.15   w_rec = 0.10   half_life = 180 days, from `created`
-opinions:  w_imp = 0.15   w_rec = 0.30   half_life = 30 days,  from the last
-                                         re-affirmation (`affirmed`)
+aged(s, q)  = log( 1 + 2^( -q / half_life_share ) · (e^s - 1) )
+
+q(d)             = share of the vault's own memories written after this one
+half_life_share  = 0.5, so the median memory is worth half the odds
+w_imp            = 0.15, for facts and opinions alike
+w_op             = 0.30 · 2^( -age_days / 30 ) for an opinion, from the last
+                   re-affirmation (`affirmed`); 0 for a fact
 ```
 
 **Multiplicative, so a prior can only reorder memories that already
@@ -342,9 +346,27 @@ centring they would all get the same boost and importance would do nothing.
 Centred, an unweighted memory is neutral and only a deliberate weight moves
 it.
 
-A fact's recency bonus halves every 180 days from when it was stored. An
-opinion's halves every 30 days from when it was last re-affirmed, at three
-times the weight, so the newest opinion on a subject wins.
+**A memory's age is counted in memories, not in days.** A fact does not get
+less true in six months; what makes an old memory the wrong answer is that
+the vault has moved on, and how far it has moved is a question about how
+much was written. So a memory is as old as the share of the vault written
+after it. Two memories added in a fortnight leaves a fortnight-old memory
+untouched; five hundred added in the same fortnight halves the odds behind
+its semantic evidence. The population counted is the vault's own live
+memories in the namespaces being searched: not the reference facts and not
+an installed pack, which arrive in their thousands at one instant and have
+no age in this sense.
+
+The shift is applied to the semantic channel only, and in odds, so a strong
+match is nudged and a faint one is scaled away. A literal identifier is left
+alone: a commit SHA that appears in exactly one memory names that memory
+whether it was written yesterday or last year. And the relevance floors read
+the unaged score, so recency chooses the ORDER of the results and never
+which ones come back.
+
+An opinion carries a second prior on top of that, and that one is on the
+clock: it halves every 30 days from when it was last re-affirmed, heavily
+enough that the newest opinion on a subject wins.
 
 ### Retrieval order
 
@@ -681,6 +703,7 @@ copy; a later install backs up a changed copy rather than overwriting it.
 | `auto_lock_minutes` | `30` | idle time before it locks. `0` never locks |
 | `search_starter_facts` | `true` | whether the seeded facts join search results |
 | `include_packs_in_search` | `true` | the same, for installed packs |
+| `recency_half_life_share` | `0.5` | how much of the vault has to be newer than a memory before its semantic evidence is worth half the odds. `0` turns the recency prior off |
 | `expire_memories` | `true` | remove expired memories automatically |
 | `duplicate_threshold` | `0.97` | cosine similarity at which a store is a duplicate |
 | `max_memory_chars` | `200` | the one-claim length limit for authored memories. `0` disables the length and layout checks |

@@ -131,6 +131,15 @@ class Store:
         # silent for that query - for a server that holds one vault open for
         # weeks, that is the rest of the session.
         self._df_cache: dict[str, int] = {}
+        # The recency population: the reference times of the live organic
+        # records, sorted, with each one's namespace beside it. Ranking asks
+        # how much of the vault is newer than a candidate, which is a binary
+        # search into this array, so it is built once and kept until a write
+        # moves a record in or out of it (see _invalidate_recency). Rebuilding
+        # it per search would be a full table scan per query.
+        self._recency_cache: tuple[np.ndarray, np.ndarray,
+                                   dict[str, int]] | None = None
+        self._recency_subsets: dict[frozenset[str], np.ndarray] = {}
         if image is not None:
             self.conn.deserialize(image)
             # idempotent schema upgrade: vaults sealed by older versions gain
@@ -269,6 +278,7 @@ class Store:
             self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
                               (rid, text))
         self._invalidate_df()
+        self._invalidate_recency()
         return rid
 
     def tombstone(self, record_id: str, by: str) -> bool:
@@ -282,12 +292,16 @@ class Store:
             (by, record_id))
         self.conn.execute("DELETE FROM fts WHERE id = ?", (record_id,))
         self._invalidate_df()
+        self._invalidate_recency()
         return cur.rowcount > 0
 
     def reaffirm(self, record_id: str, ts: float) -> bool:
         """Refresh an opinion's affirmed time: it was just re-stated."""
         cur = self.conn.execute(
             "UPDATE records SET affirmed = ? WHERE id = ?", (ts, record_id))
+        # FTS is untouched, so df stands; the record's reference time just
+        # moved to the front of the vault, so the population does not.
+        self._invalidate_recency()
         return cur.rowcount > 0
 
     def restore_children(self, record_id: str, master_key: bytes) -> list[str]:
@@ -315,6 +329,7 @@ class Store:
             restored.append(rid)
         if restored:
             self._invalidate_df()
+            self._invalidate_recency()
         return restored
 
     def vectors_of(self, record_id: str) -> list[tuple[int, np.ndarray]]:
@@ -348,8 +363,85 @@ class Store:
         changes, which is the only thing df depends on."""
         self._df_cache.clear()
 
+    def _invalidate_recency(self) -> None:
+        """Drop the cached recency population. Called wherever a write adds a
+        record, removes one, or moves its reference time.
+
+        Kept separate from _invalidate_df because the two answer to different
+        things: df follows the FTS content, this follows `created`, `affirmed`,
+        `ns`, `pack`, `tags` and `superseded_by`. Several writes call both.
+        set_kind, touch, migrate_wire, reembed and the importance and expiry
+        updates cannot move a record in or out of the population or change its
+        time, so they call neither. set_tags cannot either: the "id:" tag that
+        marks a starting memory is protected and re-merged on every write."""
+        self._recency_cache = None
+        self._recency_subsets.clear()
+
+    def _recency_population(self) -> tuple[np.ndarray, np.ndarray,
+                                           dict[str, int]]:
+        """Build, or return, the sorted times and their namespace codes.
+
+        Organic means what the rest of the code means by it: not a pack
+        record, and not one of the starting memories, which arrive in their
+        thousands at one instant and would otherwise drown every memory the
+        user stored themselves. Starting memories carry no `pack` name, so
+        the mark is their "id:" tag, exactly as vault.is_seeded reads it. The
+        tag list is stored as JSON with escaped ASCII, so a tag beginning
+        `id:` always renders as the four characters this matches."""
+        if self._recency_cache is None:
+            rows = self.conn.execute(
+                "SELECT ns, COALESCE(affirmed, created) AS t FROM records "
+                "WHERE superseded_by IS NULL AND pack IS NULL "
+                "AND instr(tags, '\"id:') = 0 ORDER BY t").fetchall()
+            times = np.fromiter((r["t"] for r in rows), dtype=np.float64,
+                                count=len(rows))
+            index: dict[str, int] = {}
+            codes = np.fromiter(
+                (index.setdefault(r["ns"], len(index)) for r in rows),
+                dtype=np.int32, count=len(rows))
+            self._recency_cache = (times, codes, index)
+        return self._recency_cache
+
+    def recency_times(self, namespaces: set[str] | None = None) -> np.ndarray:
+        """Sorted reference times of the live organic records in `namespaces`.
+
+        A record's reference time is `affirmed` when it has one and `created`
+        otherwise, so a re-affirmed memory counts as the recent memory it is.
+        `namespaces=None` asks for the whole population. Ranking turns one of
+        these arrays plus one record's time into the share of the vault that
+        is newer than it."""
+        times, codes, index = self._recency_population()
+        if namespaces is None or index.keys() <= set(namespaces):
+            return times                      # nothing to mask out
+        key = frozenset(namespaces)
+        hit = self._recency_subsets.get(key)
+        if hit is None:
+            wanted = [index[ns] for ns in key if ns in index]
+            if not wanted:
+                hit = times[:0]
+            elif len(wanted) == 1:
+                hit = times[codes == wanted[0]]
+            else:
+                hit = times[np.isin(codes, np.asarray(wanted, dtype=np.int32))]
+            self._recency_subsets[key] = hit
+        return hit
+
     def get_row(self, record_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+
+    #: What ranking and the post-ranking filters read. Everything else on a
+    #: record is a blob: the ciphertext, the wrapped key and the head vector
+    #: come to about two kilobytes each, and a search scores a thousand
+    #: candidates, so SELECT * costs megabytes of copying to reach eleven
+    #: small columns. The full row is fetched only for the results returned.
+    RANK_COLUMNS = ("id, ns, pack, tags, importance, created, affirmed, "
+                    "kind, superseded_by, expires, discovered")
+
+    def rank_row(self, record_id: str) -> sqlite3.Row | None:
+        """One candidate's ranking and filtering columns, without its body."""
+        return self.conn.execute(
+            f"SELECT {self.RANK_COLUMNS} FROM records WHERE id = ?",
+            (record_id,)).fetchone()
 
     def decrypt_text(self, row: sqlite3.Row, master_key: bytes) -> str:
         rk = crypto.unwrap_record_key(master_key, row["id"], row["key_wrapped"])
@@ -393,6 +485,7 @@ class Store:
         # one thing forget() must never do.
         self.conn.execute("DELETE FROM vecs WHERE id = ?", (record_id,))
         self._invalidate_df()
+        self._invalidate_recency()
         if cur.rowcount == 0:
             return False
         if shred:

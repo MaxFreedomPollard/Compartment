@@ -202,16 +202,20 @@ def test_export_carries_history_and_import_skips_it(vault, tmp_path):
 # ----------------------------------------------------------------- ranking
 
 def test_opinion_prior_is_recency_heavy():
+    """The comparisons are now opinion against opinion. A fact's age is
+    counted in memories rather than in days and has left prior() entirely,
+    so "decays harder than a fact" no longer says anything: a fact does not
+    decay on the clock at all."""
     now = time.time()
     old = now - 90 * 86400
     # a re-affirmed opinion outranks its own age
     assert R.prior(0.5, old, now=now, kind="opinion", affirmed=now) > \
-        R.prior(0.5, old, now=now)
-    # an unaffirmed old opinion decays harder than an old fact
+        R.prior(0.5, old, now=now, kind="opinion")
+    # and a stale one has handed nearly all of that boost back
     assert R.prior(0.5, old, now=now, kind="opinion") < \
-        R.prior(0.5, old, now=now)
-    # defaults unchanged: the fact prior is what it always was
-    assert R.prior(0.5, now, now=now) == pytest.approx(R.W_RECENCY)
+        0.2 * R.prior(0.5, now, now=now, kind="opinion")
+    # a fact with the default importance carries no prior at all
+    assert R.prior(0.5, now, now=now) == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------- curation

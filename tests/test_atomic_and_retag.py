@@ -484,12 +484,22 @@ def test_results_never_exceed_the_generous_cap(vault):
 
 
 def test_every_returned_result_clears_the_relevance_floor(vault):
-    from compartment.ranking import RESULT_ABSOLUTE_FLOOR, RESULT_RELATIVE_FLOOR
+    """The floor reads the UNAGED score, which is why it is read here from
+    the scorer rather than from the returned `score`. Recency orders the
+    results and is not allowed to decide which ones come back, so a memory
+    can be published below the cut it passed."""
+    from compartment.ranking import (CANDIDATE_POOL, RESULT_ABSOLUTE_FLOOR,
+                                     RESULT_RELATIVE_FLOOR)
     _fill(vault, 25, "Fact {i} about vault encryption keys.")
-    got = vault.search("vault encryption keys", caller="test")["results"]
+    query = "vault encryption keys"
+    got = vault.search(query, caller="test")["results"]
     assert got
-    floor = max(RESULT_ABSOLUTE_FLOOR, got[0]["score"] * RESULT_RELATIVE_FLOOR)
-    assert all(r["score"] >= floor for r in got)
+    allowed = set(vault._readable_namespaces("test"))
+    _fused, _cos, static = vault._rank_candidates(
+        query, vault.embedder.embed_query(query), CANDIDATE_POOL, allowed)
+    best = max(static[r["id"]] for r in got)
+    floor = max(RESULT_ABSOLUTE_FLOOR, best * RESULT_RELATIVE_FLOOR)
+    assert all(static[r["id"]] >= floor for r in got)
     # and best-first ordering is preserved
     assert [r["score"] for r in got] == sorted((r["score"] for r in got),
                                                reverse=True)

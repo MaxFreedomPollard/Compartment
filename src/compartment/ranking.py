@@ -57,15 +57,77 @@ is the piece that makes a literal hit and a semantic hit comparable at all.
 
 PRIORS
 ------
-Importance and recency MULTIPLY the result rather than adding to it, so they
-can only reorder memories that already matched. An additive prior lets a very
-important memory surface for a question it has nothing to do with, which is how
-a memory system starts feeling haunted.
+Importance MULTIPLIES the result rather than adding to it, so it can only
+reorder memories that already matched. An additive prior lets a very important
+memory surface for a question it has nothing to do with, which is how a memory
+system starts feeling haunted.
 
 Importance is centred on the 0.5 default, so an unweighted memory is exactly
 neutral. Without centring, a vault's thousands of starting facts all sit at the
 same 0.5 and collect the same silent boost as everything else, which is another
 way of saying importance did nothing at all.
+
+Opinions carry a second, deliberate prior on top of that: a stance decays on a
+short wall-clock half-life from the day it was last re-affirmed, so among live
+opinions on one subject the newest wins. That one is about a claim that
+REVISES rather than accumulates, and it is separate from the recency below.
+
+The net doctrine: importance and recency reorder matches. Neither can invent
+one, and recency cannot delete one either.
+
+RECENCY, COUNTED IN MEMORIES RATHER THAN DAYS
+---------------------------------------------
+A fact does not get less true in six months. What makes an old memory the wrong
+answer is that the vault has moved on since, and how far it has moved is a
+question about how much was written, not about how long it took. A vault that
+gained two memories in a fortnight has not moved on; a vault that gained five
+hundred has. So a memory's age here is the SHARE of the vault that is newer
+than it,
+
+    q(m) = |{ r in P : t(r) > t(m) }| / |P|
+
+with t = affirmed if set, else created, so a re-affirmed memory is a recent
+memory. The newest record has q = 0, the median one q = 0.5, the oldest one
+q just under 1.
+
+P, the population, is the LIVE ORGANIC records of the namespaces being
+searched. Not the starting memories: every install seeds thousands of them at
+one instant, and counting them would park a user's first few hundred own
+memories at q below 0.07, leaving the prior inert for exactly the people the
+product ships to. A pack arrived all at once and has no age in this sense, so
+a pack record carries no recency prior at all (q = None). Namespace-scoped
+because in a shared vault one agent writing five thousand records in a week
+must not push another agent's whole history to q = 1.
+
+The prior enters in ODDS, not as a multiplier on the score. An evidence term s
+is -log P(not relevant), so its odds are e^s - 1, a prior multiplies odds, and
+the shifted term is log(1 + rho . (e^s - 1)). Doing it in odds is what makes
+the shift behave: strong evidence is NUDGED (it loses at most log 4 nats, even
+at q = 1) while weak evidence is CUT in proportion, which is the right way
+round. A multiplier on the score would take the same fraction off both.
+
+It shifts the SEMANTIC term only. Recency is a prior on which memory a
+question MEANS. A literal identifier says which memory a question NAMES, and
+naming does not age: the record holding the one commit sha the user typed is
+the answer whether it was written yesterday or last year. Leaving the literal
+channel alone also keeps the forced bound above intact under the new prior,
+since the semantic term can now only go down.
+
+    cosine  semantic term   q=0     q=0.1   q=0.5   q=1.0
+    0.50    0.404           1.00    0.89    0.55    0.29
+    0.65    0.824           1.00    0.91    0.60    0.34
+    0.80    1.590           1.00    0.93    0.68    0.43
+
+MEMBERSHIP IS DECIDED WITHOUT RECENCY. The floors that choose how many results
+come back read the UNAGED evidence; recency then orders what was admitted. The
+absolute floor asks whether the evidence is real, which is not a question age
+can answer, and without this rule a vault's only relevant memory would drop
+below the floor for being old and the vault would answer "nothing found" about
+something it knows.
+
+Cost: one SQL scan per mutation to rebuild the population (about 10 ms at
+7,000 records), then a masked binary search per candidate, well under a
+millisecond per query.
 
 MEASURED, on 44 queries against a real 6,705-memory vault, comparing this
 against the previous scorer end to end:
@@ -97,15 +159,25 @@ RRF_RESIDUE_K = 20
 
 # --- priors -------------------------------------------------------------------
 W_IMPORTANCE = 0.15
-W_RECENCY = 0.10
-RECENCY_HALF_LIFE_DAYS = 180.0
-# Opinions age differently from facts. A fact learned in March is as true in
-# September; a stance held in March may have been revised twice since, and
-# what a reader wants is the CURRENT one. So an opinion's recency runs from
-# the day it was last re-affirmed (falling back to created), decays on a much
-# shorter half-life, and carries three times the weight - enough that among
-# live opinions on one subject the newest wins decisively, while staying
-# multiplicative: it reorders matches and can never manufacture one. The
+# How much of the vault has to be newer than a memory before its semantic
+# evidence is worth half the odds. 0.5 says the median memory, the one with
+# half the vault written after it, is the half-way point: the newest memory
+# keeps odds 1, the oldest keeps 1/4. A smaller share ages memories faster and
+# starts hiding a vault's older half behind whatever was written last month; a
+# larger one flattens the prior until a busy vault stops preferring what it
+# just learned. 0.5 is also the only value with a plain reading, which is what
+# a user editing the setting has to reason with.
+RECENCY_HALF_LIFE_SHARE = 0.5
+# Opinions age differently from facts, and on a different clock. A fact
+# learned in March is as true in September, and what dates it is the vault
+# having moved on, which is the count above. A stance held in March may have
+# been revised twice since, and what a reader wants is the CURRENT one, which
+# is a question about the calendar however quiet the vault has been. So an
+# opinion carries this SECOND prior on top: it runs from the day the stance
+# was last re-affirmed (falling back to created), decays on a short wall-clock
+# half-life, and is weighted heavily enough that among live opinions on one
+# subject the newest wins decisively, while staying multiplicative: it
+# reorders matches and can never manufacture one. The
 # stronger mechanism for replaced opinions is superseding, which removes the
 # old record from retrieval entirely; this prior settles the remainder, the
 # same-subject opinions nobody has explicitly reconciled yet.
@@ -213,45 +285,100 @@ def information_coverage(term_info: dict[str, float], text: str) -> float:
     return min(_CERTAINTY_CAP, max(0.0, got / total))
 
 
+def _vec_term(p_vec: float) -> float:
+    """The semantic channel's contribution, on its own so recency can shift
+    it without touching what the literal channel established."""
+    return -W_VEC * math.log(1.0 - min(_CERTAINTY_CAP, max(0.0, p_vec)))
+
+
+def _lex_term(p_lex: float) -> float:
+    return -W_LEX * math.log(1.0 - min(_CERTAINTY_CAP, max(0.0, p_lex)))
+
+
+def _rrf_residue(vec_rank: int | None, lex_rank: int | None) -> float:
+    if not W_RRF:
+        return 0.0
+    residue = 0.0
+    if vec_rank is not None:
+        residue += 1.0 / (RRF_RESIDUE_K + vec_rank + 1)
+    if lex_rank is not None:
+        residue += 1.0 / (RRF_RESIDUE_K + lex_rank + 1)
+    return W_RRF * residue * RRF_RESIDUE_K
+
+
 def evidence(p_vec: float, p_lex: float,
              vec_rank: int | None = None, lex_rank: int | None = None) -> float:
     """Combine two independent channels as a soft OR, in log space."""
-    score = (-W_VEC * math.log(1.0 - min(_CERTAINTY_CAP, max(0.0, p_vec)))
-             - W_LEX * math.log(1.0 - min(_CERTAINTY_CAP, max(0.0, p_lex))))
-    if W_RRF:
-        residue = 0.0
-        if vec_rank is not None:
-            residue += 1.0 / (RRF_RESIDUE_K + vec_rank + 1)
-        if lex_rank is not None:
-            residue += 1.0 / (RRF_RESIDUE_K + lex_rank + 1)
-        score += W_RRF * residue * RRF_RESIDUE_K
-    return score
+    return (_vec_term(p_vec) + _lex_term(p_lex)
+            + _rrf_residue(vec_rank, lex_rank))
+
+
+def recency_odds(newer_share: float | None,
+                 half_life_share: float = RECENCY_HALF_LIFE_SHARE) -> float:
+    """Prior odds for a memory with this share of the vault newer than it.
+
+    1.0 for the newest memory and for anything outside the population, which
+    is how a pack record and a brand new one both come through unaged. A
+    half_life_share of 0 turns the whole prior off."""
+    if newer_share is None or half_life_share <= 0.0:
+        return 1.0
+    q = min(1.0, max(0.0, float(newer_share)))
+    return 2.0 ** (-q / float(half_life_share))
+
+
+def aged_term(term: float, newer_share: float | None,
+              half_life_share: float = RECENCY_HALF_LIFE_SHARE) -> float:
+    """One evidence term, shifted by the recency prior IN ODDS.
+
+    A term is -log P(not relevant), so its odds are e^term - 1; the prior
+    multiplies those odds and this reads the result back as a term. Monotone
+    in `term`, so equally aged memories keep their order, and never above
+    `term`, so ageing can only cost a memory rank."""
+    rho = recency_odds(newer_share, half_life_share)
+    if rho >= 1.0 or term <= 0.0:
+        return term
+    return math.log1p(rho * math.expm1(term))
+
+
+def aged_evidence(p_vec: float, p_lex: float, newer_share: float | None = None,
+                  vec_rank: int | None = None, lex_rank: int | None = None,
+                  half_life_share: float = RECENCY_HALF_LIFE_SHARE) -> float:
+    """Evidence with the semantic channel aged and the literal one left alone.
+
+    What a question MEANS is a guess that the vault having moved on can
+    weaken. What a question NAMES it cannot: an identifier that occurs in one
+    memory names that memory whatever year it was written."""
+    return (aged_term(_vec_term(p_vec), newer_share, half_life_share)
+            + _lex_term(p_lex) + _rrf_residue(vec_rank, lex_rank))
 
 
 def prior(importance: float, created: float, now: float | None = None,
           kind: str = "fact", affirmed: float | None = None) -> float:
     """Multiplicative modulation: reranks a match, never manufactures one.
 
-    `kind` and `affirmed` are optional so every existing caller keeps its
-    behavior bit for bit: with the defaults this is the fact prior it always
-    was. An opinion's recency runs from its last re-affirmation on the
-    shorter, heavier opinion constants above."""
-    now = time.time() if now is None else now
+    For a fact this is importance alone, so a fact stored with the default
+    0.5 carries no prior at all: its age is counted in memories rather than
+    days and reaches the score through aged_evidence instead. `created`,
+    `now`, `kind` and `affirmed` stay in the signature for the opinion
+    branch, whose recency runs from the last re-affirmation on the shorter,
+    heavier opinion constants above."""
     centred = 2.0 * float(importance) - 1.0        # 0.5 default -> exactly 0
     if kind == "opinion":
+        now = time.time() if now is None else now
         ref = float(affirmed or created)
         age_days = max(0.0, (now - ref) / SECONDS_PER_DAY)
         recency = math.exp(
             -math.log(2.0) * age_days / OPINION_RECENCY_HALF_LIFE_DAYS)
         return W_IMPORTANCE * centred + W_RECENCY_OPINION * recency
-    age_days = max(0.0, (now - float(created)) / SECONDS_PER_DAY)
-    recency = math.exp(-math.log(2.0) * age_days / RECENCY_HALF_LIFE_DAYS)
-    return W_IMPORTANCE * centred + W_RECENCY * recency
+    return W_IMPORTANCE * centred
 
 
 def final_score(p_vec: float, p_lex: float, importance: float, created: float,
                 vec_rank: int | None = None, lex_rank: int | None = None,
                 now: float | None = None, kind: str = "fact",
-                affirmed: float | None = None) -> float:
-    return evidence(p_vec, p_lex, vec_rank, lex_rank) * (
+                affirmed: float | None = None,
+                newer_share: float | None = None,
+                half_life_share: float = RECENCY_HALF_LIFE_SHARE) -> float:
+    return aged_evidence(p_vec, p_lex, newer_share, vec_rank, lex_rank,
+                         half_life_share) * (
         1.0 + prior(importance, created, now, kind=kind, affirmed=affirmed))
