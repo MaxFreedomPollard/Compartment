@@ -91,6 +91,25 @@ def test_the_starting_memories_are_not_in_the_population(seeded_vault):
     assert v.status()["organic_records"] == before + 3
 
 
+def test_memories_stored_at_one_instant_age_as_one_block(vault):
+    """Spec: a record's own time does not count against it, so a bulk import
+    stamped at one moment is one tie block rather than a queue in which each
+    record is older than the one beside it. This is the strictly-newer rule,
+    and it is the whole difference between side="right" and side="left"."""
+    at_once = 1_700_000_000.0
+    ids = [_store(vault, f"Imported memory number {i} about the archive",
+                  created=at_once)["id"] for i in range(6)]
+    shares = [Vault._newer_share(vault.db.rank_row(rid),
+                                 vault.db.recency_times()) for rid in ids]
+    assert shares == [0.0] * 6, "nothing is newer, so nothing in the block ages"
+
+    _store(vault, "One memory written after the import", created=at_once + 60)
+    shares = [Vault._newer_share(vault.db.rank_row(rid),
+                                 vault.db.recency_times()) for rid in ids]
+    assert shares == [pytest.approx(1 / 7)] * 6, (
+        "one record is newer than the block, so each of the six is 1 of 7")
+
+
 def test_the_population_is_scoped_to_the_namespaces_asked_for(vault):
     """In a shared vault, one agent writing thousands of records in a week
     must not age another agent's whole history."""
@@ -296,10 +315,26 @@ def test_an_explicit_top_k_is_the_first_k_of_the_recency_order(tmp_path):
 # ------------------------------------------------- the starting memories ---
 
 def test_a_starting_memory_is_scored_without_recency(seeded_vault):
+    """The vault's own memories age; the ones that arrived with it do not.
+
+    The two organic records are stored inside the test on purpose. Without
+    them the population can be empty, _newer_share short-circuits at n < 2,
+    nothing in the vault ages, and the test would pass whether the seeded
+    exemption were there or not. With them, an old organic record IS aged in
+    the same call, which is what gives the seeded half of the assertion its
+    teeth. Written with _journal=False and never saved, so nothing reaches
+    the shared fixture's file.
+    """
     v = seeded_vault
-    query = "what is a vector embedding"
+    now = time.time()
+    old = _store(v, "The zarquon manifold note the agent wrote down",
+                 created=now - 400 * DAY, _journal=False)["id"]
+    _store(v, "A memory about something else the agent learned later",
+           created=now, _journal=False)
+    query = "zarquon manifold"
     fused, _cosine, static = v._rank_candidates(
         query, v.embedder.embed_query(query), R.CANDIDATE_POOL)
+    assert fused[old] < static[old], "the vault's own old memory must age"
     seeded = [rid for rid in fused if is_seeded(v.db.get_row(rid)["tags"])]
     assert seeded, "the seeded vault should produce starting memories"
     for rid in seeded:

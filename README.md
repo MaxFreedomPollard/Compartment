@@ -112,10 +112,10 @@ the old record instead of inserting, and the caller resends with
 Restating a live opinion refreshes its date instead of storing a copy.
 Superseded records are removed from search but kept in the audit chain and
 readable by id, with a pointer to their replacement. `supersedes` also works
-on facts, for corrections. Opinion ranking carries a recency bonus that fact
-ranking does not, so the newest opinion wins. `compartment opinions audit` finds
-overlapping live opinions in older vaults and keeps the newest, or reports
-them for manual merging.
+on facts, for corrections. Opinion ranking carries a recency bonus that
+fact ranking does not, so the newest opinion wins. `compartment opinions
+audit` finds overlapping live opinions in older vaults and keeps the
+newest, or reports them for manual merging.
 
 **Capture does not depend on the model.** A host that declares its own
 memory in its system prompt can override any tool instruction. So
@@ -362,7 +362,9 @@ match is nudged and a faint one is scaled away. A literal identifier is left
 alone: a commit SHA that appears in exactly one memory names that memory
 whether it was written yesterday or last year. And the relevance floors read
 the unaged score, so recency chooses the ORDER of the results and never
-which ones come back.
+which ones come back. One consequence: a returned memory's reported `score`
+is the aged one and can sit below the absolute floor it passed, so the floor
+is a cut the vault makes and not a property of the number it hands back.
 
 An opinion carries a second prior on top of that, and that one is on the
 clock: it halves every 30 days from when it was last re-affirmed, heavily

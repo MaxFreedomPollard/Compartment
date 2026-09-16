@@ -785,8 +785,9 @@ def cmd_expire(args) -> None:
 
 
 def cmd_recent(args) -> None:
-    """What did memory just learn? Search ranks by relevance, so without
-    this there is no way to answer that from the terminal."""
+    """What did memory just learn? Search ranks by relevance, and prefers
+    newer memories only among the ones that already matched, so without this
+    there is no way to answer that from the terminal."""
     v = _open_vault(args)
     out = v.recent(caller=args.caller, namespace=args.namespace,
                    limit=args.limit, include_seeded=args.all)

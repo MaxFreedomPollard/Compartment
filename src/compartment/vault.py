@@ -694,13 +694,22 @@ class Vault:
 
         Pack records and the starting memories are the exemption: thousands
         of them arrive at one instant, so they have no age in this sense and
-        counting them would flatten everyone else's."""
-        if row is None or row["pack"] is not None or is_seeded(row["tags"]):
+        counting them would flatten everyone else's. The seeded test is the
+        raw string the population SQL matches rather than is_seeded, so the
+        two halves of one measure cannot disagree about who is in it, and a
+        candidate costs no JSON parse.
+
+        side="right" is the strictly-newer rule: a record's own time does not
+        count against it, so a bulk import stamped at one instant ages as one
+        block instead of aging each other."""
+        if (row is None or row["pack"] is not None
+                or '"id:' in row["tags"]):
             return None
         n = int(times.size)
         if n < 2:
             return 0.0                    # nothing to be older than
-        t = row["affirmed"] or row["created"]
+        # COALESCE(affirmed, created), matching the population SQL exactly.
+        t = row["created"] if row["affirmed"] is None else row["affirmed"]
         return float(n - np.searchsorted(times, t, side="right")) / n
 
     def _recency_half_life(self) -> float:
@@ -1208,10 +1217,11 @@ class Vault:
         # one path that returns memories to a model.
         starter = self.config.settings.get("search_starter_facts", True)
 
-        # The cheap filters first, over EVERY scored record and best-first by
-        # score. None of them decrypts, and membership below has to be judged
-        # against the whole pool rather than against the first windowful of
-        # it, which is also the order the results come back in.
+        # The cheap filters first, best-first by score and stopping once
+        # `want` records have passed them. None of them decrypts. Membership
+        # is therefore judged among the first MAX_RESULTS survivors in recency
+        # order, which is what the previous scorer cost; past that cap the
+        # result set is pathological anyway and the cap is what answers it.
         survivors = []                     # ids, best-first
         for rid in sorted(boosted, key=boosted.get, reverse=True):
             row = self.db.rank_row(rid)
@@ -1251,6 +1261,8 @@ class Vault:
                 if discovered_until and d > discovered_until:
                     continue
             survivors.append(rid)
+            if len(survivors) >= want:
+                break
 
         if adaptive and survivors:
             # Everything whose evidence stands up against the best answer to
@@ -1264,7 +1276,7 @@ class Vault:
             survivors = [rid for rid in survivors if static[rid] >= floor]
 
         results = []
-        for rid in survivors[:want]:
+        for rid in survivors:
             # Now the whole record, for the only memories being handed back.
             row = self.db.get_row(rid)
             text = self.db.decrypt_text(row, self._master)

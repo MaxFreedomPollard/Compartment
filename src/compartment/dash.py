@@ -226,6 +226,9 @@ def snapshot_search(v: Vault, query: str, caller: str = "dash",
         v._require_open()
         allowed = set(v._readable_namespaces(caller))
         qvec = v.embedder.embed_query(query)
+        # No namespace set, so recency counts against the whole vault: this
+        # ranks exactly as an all-namespace search by a caller who can read
+        # everything, rather than as a third scoring rule of its own.
         boosted, vec_score, static = v._rank_candidates(query, qvec,
                                                         CANDIDATE_POOL)
 

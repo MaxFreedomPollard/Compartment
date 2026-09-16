@@ -125,9 +125,9 @@ can answer, and without this rule a vault's only relevant memory would drop
 below the floor for being old and the vault would answer "nothing found" about
 something it knows.
 
-Cost: one SQL scan per mutation to rebuild the population (about 10 ms at
-7,000 records), then a masked binary search per candidate, well under a
-millisecond per query.
+Cost, measured: one SQL scan per mutation to rebuild the population, about
+5 ms at 7,000 records and 40 ms at 50,000, then a masked binary search per
+candidate, about half a millisecond for a whole query's pool.
 
 MEASURED, on 44 queries against a real 6,705-memory vault, comparing this
 against the previous scorer end to end:
@@ -222,7 +222,17 @@ RESULT_RELATIVE_FLOOR = 0.5
 # NOTHING in the vault is relevant and the "best" hit is itself meaningless
 # ("the capital of France" peaked at 0.64 against a vault with no geography in
 # it). It cannot separate a weak question from a wrong one, and is not asked to.
-RESULT_ABSOLUTE_FLOOR = 0.7
+#
+# It moved from 0.7 to 0.64 when the fact recency prior left prior(). The old
+# prior was not only an ordering signal: it multiplied every fact's score by up
+# to 1.10, and this threshold was calibrated against scores carrying that
+# bonus. Removing it moved every score down by up to 9% while the floor stood
+# still, and the tail of an adaptive result set fell off it: 36 results became
+# 20 on one measured query. 0.7 / 1.10 restores the breadth the number was
+# chosen for. The nonsense peak it exists to reject was itself measured WITH
+# the bonus, so the 0.64 reading is about 0.58 on the new scale, still under
+# the floor and still rejected.
+RESULT_ABSOLUTE_FLOOR = 0.64
 # The generous cap. Deliberately far above any plausible answer size: it exists
 # so a pathological query cannot return the whole vault, not to shape ordinary
 # results. Even 100 atomic memories is less text than the eight paragraph-sized

@@ -372,8 +372,11 @@ class Store:
         `ns`, `pack`, `tags` and `superseded_by`. Several writes call both.
         set_kind, touch, migrate_wire, reembed and the importance and expiry
         updates cannot move a record in or out of the population or change its
-        time, so they call neither. set_tags cannot either: the "id:" tag that
-        marks a starting memory is protected and re-merged on every write."""
+        time, so they call neither. set_tags can: protecting the "id:" prefix
+        stops a starting memory's mark being REMOVED, not a new one being
+        added, and the population reads `tags`. No caller writes such a tag,
+        but the call is one dictionary clear and is cheaper than the
+        reasoning."""
         self._recency_cache = None
         self._recency_subsets.clear()
 
@@ -399,8 +402,15 @@ class Store:
             codes = np.fromiter(
                 (index.setdefault(r["ns"], len(index)) for r in rows),
                 dtype=np.int32, count=len(rows))
+            # Handed out by reference to every caller, so make it read-only
+            # rather than trust them all: one in-place write would corrupt
+            # the age of every record until the next mutation.
+            times.setflags(write=False)
             self._recency_cache = (times, codes, index)
         return self._recency_cache
+
+    #: Distinct namespace sets whose masked subsets are worth keeping.
+    RECENCY_SUBSET_CAP = 64
 
     def recency_times(self, namespaces: set[str] | None = None) -> np.ndarray:
         """Sorted reference times of the live organic records in `namespaces`.
@@ -416,6 +426,13 @@ class Store:
         key = frozenset(namespaces)
         hit = self._recency_subsets.get(key)
         if hit is None:
+            # A caller may search any namespace string it is granted,
+            # including ones holding no records, so this is caller-driven and
+            # would otherwise grow without limit in a long-lived server. A
+            # vault has a handful of real namespace sets; past that the
+            # entries are noise and are cheaper to rebuild than to keep.
+            if len(self._recency_subsets) >= self.RECENCY_SUBSET_CAP:
+                self._recency_subsets.clear()
             wanted = [index[ns] for ns in key if ns in index]
             if not wanted:
                 hit = times[:0]
@@ -423,6 +440,7 @@ class Store:
                 hit = times[codes == wanted[0]]
             else:
                 hit = times[np.isin(codes, np.asarray(wanted, dtype=np.int32))]
+            hit.setflags(write=False)     # cached and shared, like the whole
             self._recency_subsets[key] = hit
         return hit
 
@@ -531,6 +549,7 @@ class Store:
                 out.append(t)
         self.conn.execute("UPDATE records SET tags = ? WHERE id = ?",
                           (json.dumps(out), record_id))
+        self._invalidate_recency()
         return out
 
     def all_vectors(self) -> tuple[list[str], list[int], np.ndarray]:

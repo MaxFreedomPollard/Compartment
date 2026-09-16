@@ -139,8 +139,9 @@ and neither can veto the other. A memory's age is then counted in MEMORIES
 rather than in days: the semantic half of its evidence is shifted, in
 odds, by `2^(-q/0.5)`, where `q` is the share of the vault's own memories
 written after it. So a fortnight-old memory is barely touched in a quiet
-vault and halved in one that wrote five hundred memories in the same
-fortnight. Importance MULTIPLIES what is left,
+vault, while in one that wrote five hundred memories in the same fortnight
+the odds behind it halve and about 60% of the term survives. Importance
+MULTIPLIES what is left,
 `final = evidence · (1 + 0.15·(2·importance - 1))`, and an opinion adds
 `0.30·2^(-age/30d)` from its last re-affirmation, so the current stance
 outranks a stale one. A prior can only reorder memories that already
