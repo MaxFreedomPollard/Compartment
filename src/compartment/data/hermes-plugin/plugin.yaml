@@ -1,7 +1,15 @@
 name: compartment
 version: 4.10.0
 description: "Compartment - high-security, fully offline, encrypted vector memory. AEAD-encrypted vault, locked-by-default after restart, native Hermes provider, no API key."
-pip_dependencies: []
+# The engine. `hermes plugins install compartment` (the plugin catalog) and
+# `hermes memory setup` install it into the Hermes environment from this
+# line; `compartment integrate hermes` installs it itself, so there it is
+# already satisfied. The floor is the oldest release that shipped this
+# exact provider, not the newest: Hermes resolves plugin dependencies
+# behind a two-week age filter, so a floor younger than that refuses to
+# install for two weeks.
+pip_dependencies:
+  - "compartment>=4.9.3"
 requires_env: []
 hooks:
   - on_session_switch

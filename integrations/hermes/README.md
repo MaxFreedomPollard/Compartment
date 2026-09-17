@@ -5,7 +5,16 @@ mechanism Hindsight and Mem0 use. Hermes discovers user-installed providers
 in `~/.hermes/plugins/<name>/` and activates the one named by
 `memory.provider` in `~/.hermes/config.yaml`.
 
-Install (four steps, see the plugin's docstring for detail):
+Install from the Hermes plugin catalog (the entry installs this directory
+and the engine into the Hermes environment):
+
+```bash
+hermes plugins install compartment
+compartment init                     # once; stays unlocked until restart
+hermes memory setup                  # select compartment
+```
+
+Or by hand (four steps, see the plugin's docstring for detail):
 
 ```bash
 ~/.hermes/hermes-agent/venv/bin/python -m pip install compartment

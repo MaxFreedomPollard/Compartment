@@ -1,6 +1,13 @@
 """Compartment memory provider for Hermes.
 
-Select it like any other memory provider:
+From the Hermes plugin catalog, one command installs this directory and
+the engine it needs into the Hermes environment:
+
+    hermes plugins install compartment
+    compartment init          (once; then it stays unlocked until restart)
+    hermes memory setup       (select compartment)
+
+By hand, the same thing in four steps:
 
     1. pip install compartment into the Hermes venv
        (~/.hermes/hermes-agent/venv/bin/pip install compartment)
@@ -358,3 +365,14 @@ class CompartmentMemoryProvider(MemoryProvider):
                 self._vault.save()
             except Exception as exc:
                 logger.warning("compartment shutdown save failed: %s", exc)
+
+
+def register(ctx) -> None:
+    """Hermes plugin entry point: hand the loader one provider instance.
+
+    The plugin loader and `hermes plugins validate` (the catalog admission
+    check) both import this module and call register(ctx). Activation is
+    still `memory.provider: compartment` in config.yaml; registering here
+    makes nothing active by itself.
+    """
+    ctx.register_memory_provider(CompartmentMemoryProvider())
