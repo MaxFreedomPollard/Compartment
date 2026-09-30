@@ -219,49 +219,66 @@ def test_creating_a_vault_really_works(tmp_path, monkeypatch):
     assert st["records"] > 0
 
 
-def test_fetch_state_uses_the_cli(vault_path, monkeypatch):
-    """State comes from subprocess calls, so the app never holds the model
-    in memory. Stub them and assert the shape it builds."""
+def _fake_view(monkeypatch, answer):
+    """fetch_state asks `vaultview --once` through _json_run; stand in."""
+    calls = []
+
+    def fake(argv, timeout=60):
+        calls.append(list(argv))
+        return answer
+
+    monkeypatch.setattr(menubar, "_json_run", fake)
+    return calls
+
+
+def test_fetch_state_asks_the_vault_view_once(vault_path, monkeypatch):
+    """One process, one answer holding the status and the recent memories.
+    It used to be two CLI processes, each decrypting the whole vault, and
+    the second one rewrote the vault file on its way out."""
     from compartment import claude_hooks
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: True)
     open(vault_path, "wb").write(b"x")          # just needs to exist
-
-    def fake(vault, *sub):
-        if sub[0] == "status":
-            return {"locked": False, "records": 100, "organic_records": 7}
-        return {"counts": {"total": 100, "organic": 7},
-                "results": [{"text": "older", "created_local": "2026-01-01 00:00",
-                             "tags": ["a"]},
-                            {"text": "newest", "created_local": "2026-01-02 00:00",
-                             "tags": ["b"]}]}
-
-    monkeypatch.setattr(menubar, "_json_cmd", fake)
+    calls = _fake_view(monkeypatch, {
+        "ok": True, "exists": True, "locked": False, "records": 100,
+        "organic": 7,
+        "recent": [{"text": "older", "created_local": "2026-01-01 00:00",
+                    "tags": ["a"]},
+                   {"text": "newest", "created_local": "2026-01-02 00:00",
+                    "tags": ["b"]}]})
     st = menubar.fetch_state(vault_path)
+    assert len(calls) == 1
+    assert "compartment.vaultview" in calls[0] and "--once" in calls[0]
     assert st["locked"] is False and st["records"] == 100 and st["organic"] == 7
     # newest first: the list is glanced at, not scrolled
     assert [r["text"] for r in st["recent"]] == ["newest", "older"]
     assert menubar.summarise(st) == "100 memories · 7 stored by you"
 
 
-def test_fetch_state_skips_recent_when_locked(vault_path, monkeypatch):
+def test_fetch_state_is_locked_only_when_the_view_says_so(vault_path,
+                                                          monkeypatch):
     from compartment import claude_hooks
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
     open(vault_path, "wb").write(b"x")
-    monkeypatch.setattr(menubar, "_json_cmd",
-                        lambda v, *s: {"locked": True, "records": 5}
-                        if s[0] == "status" else pytest.fail("must not run"))
+    _fake_view(monkeypatch, {"ok": True, "exists": True, "locked": True})
     st = menubar.fetch_state(vault_path)
     assert st["locked"] is True and st["recent"] == []
     assert "unlock" in menubar.summarise(st)
+    assert menubar.lock_badge(st) == "locked"
 
 
-def test_fetch_state_survives_a_broken_cli(vault_path, monkeypatch):
+def test_a_failed_read_is_never_shown_as_locked(vault_path, monkeypatch):
+    """Clicking the menu bar seemed to lock the vault by itself. It did not:
+    a read that failed or timed out was reported as "locked", and the panel
+    offered to unlock a vault that had been open all along."""
     from compartment import claude_hooks
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
     open(vault_path, "wb").write(b"x")
-    monkeypatch.setattr(menubar, "_json_cmd", lambda v, *s: None)
+    _fake_view(monkeypatch, None)
     st = menubar.fetch_state(vault_path)
-    assert st["error"] == "could not read vault status"
+    assert st["locked"] is None
+    assert "Could not refresh" in st["error"]
+    assert menubar.lock_badge(st) == "unknown"
+    assert "locked" not in menubar.summarise(st)
 
 
 def test_compartment_bin_never_returns_the_app_launcher(tmp_path, monkeypatch):

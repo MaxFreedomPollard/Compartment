@@ -163,35 +163,22 @@ class LoadedVaultFile:
     journal_cts: list[bytes]
     truncated_tail: bool  # a partial (crashed, unacknowledged) final journal entry was discarded
     tail_bytes: int = 0   # how many bytes that partial tail occupied
+    #: Byte offsets: where the journal begins (just past the payload), and
+    #: where its last COMPLETE entry ends. A reader that keeps the vault open
+    #: resumes from journal_end when more entries are appended, instead of
+    #: decrypting the whole payload again.
+    journal_start: int = 0
+    journal_end: int = 0
 
 
-def read_vault_file(path: str) -> LoadedVaultFile:
-    with open(path, "rb") as f:
-        raw = f.read()
-    if len(raw) < 10 or raw[:4] != MAGIC:
-        raise VaultFormatError(f"{path} is not a Compartment vault (bad magic)")
-    (version,) = struct.unpack(">H", raw[4:6])
-    if version != FORMAT_VERSION:
-        raise VaultFormatError(
-            f"Vault format version {version} is not supported by this build "
-            f"(supported: {FORMAT_VERSION})"
-        )
-    (hlen,) = struct.unpack(">I", raw[6:10])
-    if len(raw) < 10 + hlen:
-        raise VaultFormatError("Vault header truncated")
-    try:
-        header = VaultHeader.from_json(json.loads(raw[10 : 10 + hlen]))
-    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError,
-            ValueError) as exc:
-        raise VaultFormatError(
-            f"Vault header is corrupt (modified or damaged): {exc}") from exc
+def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
+    """The journal entries in raw[pos:], framed as append_journal_entry writes
+    them. Returns (entries, end of the last complete entry, whether a partial
+    entry followed it, how many bytes that partial entry occupied).
 
-    pos = 10 + hlen
-    payload_ct = raw[pos : pos + header.payload_len]
-    if len(payload_ct) != header.payload_len:
-        raise VaultFormatError("Vault payload truncated")
-    pos += header.payload_len
-
+    One parser for both callers - opening a vault, and a reader catching up
+    on what was appended since - so the two can never disagree about what
+    counts as a torn write and what counts as tampering."""
     journal_cts: list[bytes] = []
     truncated_tail = False
     tail_bytes = 0
@@ -234,8 +221,45 @@ def read_vault_file(path: str) -> LoadedVaultFile:
             break
         journal_cts.append(body)
         pos += JOURNAL_PREFIX + elen
+    return journal_cts, pos, truncated_tail, tail_bytes
+
+
+def read_vault_file(path: str) -> LoadedVaultFile:
+    with open(path, "rb") as f:
+        raw = f.read()
+    return parse_vault_bytes(raw, path)
+
+
+def parse_vault_bytes(raw: bytes, path: str = "vault") -> LoadedVaultFile:
+    """A whole vault file, already read into memory. `path` only names it in
+    errors."""
+    if len(raw) < 10 or raw[:4] != MAGIC:
+        raise VaultFormatError(f"{path} is not a Compartment vault (bad magic)")
+    (version,) = struct.unpack(">H", raw[4:6])
+    if version != FORMAT_VERSION:
+        raise VaultFormatError(
+            f"Vault format version {version} is not supported by this build "
+            f"(supported: {FORMAT_VERSION})"
+        )
+    (hlen,) = struct.unpack(">I", raw[6:10])
+    if len(raw) < 10 + hlen:
+        raise VaultFormatError("Vault header truncated")
+    try:
+        header = VaultHeader.from_json(json.loads(raw[10 : 10 + hlen]))
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError,
+            ValueError) as exc:
+        raise VaultFormatError(
+            f"Vault header is corrupt (modified or damaged): {exc}") from exc
+
+    pos = 10 + hlen
+    payload_ct = raw[pos : pos + header.payload_len]
+    if len(payload_ct) != header.payload_len:
+        raise VaultFormatError("Vault payload truncated")
+    pos += header.payload_len
+
+    journal_cts, end, truncated_tail, tail_bytes = parse_journal(raw, pos)
     return LoadedVaultFile(header, payload_ct, journal_cts, truncated_tail,
-                           tail_bytes)
+                           tail_bytes, journal_start=pos, journal_end=end)
 
 
 def decrypt_payload(header: VaultHeader, payload_ct: bytes, master_key: bytes) -> dict[str, bytes]:
@@ -243,11 +267,16 @@ def decrypt_payload(header: VaultHeader, payload_ct: bytes, master_key: bytes) -
     return unpack_sections(plain)
 
 
-def decrypt_journal(header: VaultHeader, journal_cts: list[bytes], master_key: bytes) -> list[dict]:
+def decrypt_journal(header: VaultHeader, journal_cts: list[bytes], master_key: bytes,
+                    first_seq: int = 0) -> list[dict]:
     """Entries are decrypted one at a time and each falls back on its own, so
-    a vault upgraded mid-journal (older entries, newer appends) still replays."""
+    a vault upgraded mid-journal (older entries, newer appends) still replays.
+
+    Each entry is sealed to its position in the journal, so `first_seq` says
+    where these ones start: 0 for a whole journal, the number already read
+    for entries appended since."""
     entries = []
-    for seq, ct in enumerate(journal_cts):
+    for seq, ct in enumerate(journal_cts, start=first_seq):
         plain = crypto.unseal_any(master_key, ct, *wire.journal(header.vault_id, seq))
         entries.append(json.loads(plain))
     return entries

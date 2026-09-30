@@ -10,9 +10,11 @@ Design notes:
   first-run marker all come from `menubar`, which keeps no AppKit at module
   level for exactly this reason. One data layer, one set of tests, two
   front ends - the platforms differ only in how a window is drawn.
-* State is read by shelling out to the `compartment` CLI rather than opening
-  the vault in-process, so an idle tray app is not sitting on an embedding
-  model. Same trade as macOS.
+* The vault is never opened in this process. One child process,
+  `compartment.vaultview`, keeps it open read-only while the panel is in use
+  and reads only what changed; the panel opens at once from the last state
+  it knew and refreshes in the background. Same design as macOS - it is the
+  same PanelState.
 * Tk owns the main thread and pystray runs detached. Tk is not thread-safe and
   its mainloop must be on the main thread; pystray's Windows backend is a
   message loop that is happy anywhere. Tray callbacks therefore never touch a
@@ -34,10 +36,11 @@ from .home import env, home
 from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, create_vault,
-                      default_vault, fetch_state, integrate, lock_vault,
+                      default_vault, integrate, lock_vault,
                       open_dashboard, stop_dashboard,
                       release_instance_lock, self_check,
-                      set_setting, starter_note, summarise, unlock_vault)
+                      set_setting, starter_note, summarise, unlock_vault,
+                      PanelState)
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -101,10 +104,14 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     if not state.get("exists"):
         rows.append(("create", "Create vault"))
     else:
-        rows.append(("unlock", "Unlock") if state["locked"] else ("lock", "Lock"))
+        # Unlock only for a vault known to be locked: offering it on a guess
+        # is how a failed read used to look like a locked vault. Lock in every
+        # other state, unknown included, since locking is always safe.
+        rows.append(("unlock", "Unlock") if state["locked"] is True
+                    else ("lock", "Lock"))
         # Changing the passphrase re-wraps the master key, which only exists
         # in hand while the vault is open - so it is offered only then.
-        if not state["locked"]:
+        if state["locked"] is False:
             rows.append(("change", "Change password"))
     s = state["settings"]
     rows.append(("heading", "SETTINGS"))
@@ -136,6 +143,11 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     recent = state.get("recent") or []
     if not state.get("exists"):
         rows.append(("empty", "nothing yet - create the vault above"))
+    elif state["locked"]:
+        rows.append(("empty", "unlock the vault to see them"))
+    elif state["locked"] is None or state.get("checking"):
+        rows.append(("empty", "reading the vault…" if state.get("checking")
+                     else "not available until the vault can be read"))
     elif not recent:
         rows.append(("empty", starter_note(state)))
     for r in recent:
@@ -865,7 +877,15 @@ def run(vault: str | None = None, show: bool = False,
         # 1.3333 is the 96-DPI baseline Tk already assumes on Windows.
         root.tk.call("tk", "scaling", 1.3333 * S)
     root.withdraw()                                   # no stray empty window
-    panel: dict = {"win": None, "note": None}
+    panel: dict = {"win": None, "note": None, "entries": [], "shown": None}
+
+    # What the panel shows, kept current in the background: it opens at once
+    # from what this holds, and a read that lands later updates it in place.
+    # The read finishes on its own thread; Tk is not thread-safe, so it hands
+    # back through after(0, ...), exactly as the tray icon's callbacks do.
+    states = PanelState(vault_path)
+    states.refresh(include_vault=False)               # local files: instant
+    states.on_change = lambda: root.after(0, landed)
 
     def _content(frame, state) -> None:
         """Everything the panel shows. Packs into `frame`, never sizes it -
@@ -875,7 +895,8 @@ def run(vault: str | None = None, show: bool = False,
         # Changing the passphrase gets the whole panel to itself, rather than
         # being appended below a panel that is already full. Two boxes, Save
         # and the reason the last attempt failed all belong on screen at once.
-        if state["exists"] and not state["locked"] and panel.get("changing"):
+        if (state["exists"] and state["locked"] is False
+                and panel.get("changing")):
             ttk.Label(frame, text="Change password", wraplength=WRAP,
                       font=("Segoe UI", 10, "bold")).pack(anchor="w")
             ttk.Label(frame, text=summarise(state), wraplength=WRAP,
@@ -884,6 +905,7 @@ def run(vault: str | None = None, show: bool = False,
             new = ttk.Entry(frame, show="•", width=34)
             new.pack(anchor="w")
             rep = ttk.Entry(frame, show="•", width=34)
+            panel["entries"] += [new, rep]
             rep.pack(anchor="w", pady=(6, 0))
             new.focus_set()
 
@@ -928,6 +950,7 @@ def run(vault: str | None = None, show: bool = False,
             new_pw = ttk.Entry(frame, show="\u2022", width=34)
             new_pw.pack(anchor="w", pady=(8, 0))
             new_rep = ttk.Entry(frame, show="\u2022", width=34)
+            panel["entries"] += [new_pw, new_rep]
             new_rep.pack(anchor="w", pady=(6, 0))
             new_pw.focus_set()
 
@@ -955,6 +978,9 @@ def run(vault: str | None = None, show: bool = False,
                         note = f"could not create the vault: {exc}"
                     panel["creating"] = False
                     panel["create_note"] = note
+                    if os.path.exists(vault_path):
+                        states.mark(exists=True, locked=None, checking=True,
+                                    error=None)
                     refresh()
                 (panel.get("win") or root).after(50, work)
 
@@ -976,12 +1002,15 @@ def run(vault: str | None = None, show: bool = False,
             unlock_row.pack(fill="x", pady=(8, 0))
             entry = ttk.Entry(unlock_row, show="\u2022", width=26)
             entry.pack(side="left")
+            panel["entries"].append(entry)
             entry.focus_set()
 
             def do_unlock(*_):
                 ok, note = unlock_vault(vault_path, entry.get())
                 entry.delete(0, "end")        # never leave it on screen
                 panel["note"] = None if ok else note
+                if ok:
+                    states.mark(locked=False, checking=True, error=None)
                 refresh()
 
             entry.bind("<Return>", do_unlock)
@@ -1003,7 +1032,7 @@ def run(vault: str | None = None, show: bool = False,
         expiring = tk.BooleanVar(value=s.get("expire_memories", True))
 
         def toggle(key, var):
-            set_setting(vault_path, key, bool(var.get()))
+            states.set_settings(set_setting(vault_path, key, bool(var.get())))
             refresh()
 
         ttk.Checkbutton(frame, text="Create memories automatically",
@@ -1026,7 +1055,8 @@ def run(vault: str | None = None, show: bool = False,
         def set_lock(label):
             for m in AUTO_LOCK_CHOICES:
                 if auto_lock_label(m) == label:
-                    set_setting(vault_path, "auto_lock_minutes", m)
+                    states.set_settings(set_setting(vault_path,
+                                                    "auto_lock_minutes", m))
                     break
             refresh()
 
@@ -1058,7 +1088,7 @@ def run(vault: str | None = None, show: bool = False,
                     note = f"could not connect: {exc}"
                 panel["connect_busy"] = None
                 panel["connect_note"] = note
-                refresh()
+                refresh()             # and the ticks, once that config is read
             (panel.get("win") or root).after(50, work)
 
         wired = state.get("integrations") or {}
@@ -1079,7 +1109,17 @@ def run(vault: str | None = None, show: bool = False,
         ttk.Label(frame, text=f"LAST {RECENT_COUNT} MEMORIES",
                   font=("Segoe UI", 8, "bold")).pack(anchor="w")
         recent = state.get("recent") or []
-        if not recent:
+        if state["locked"] or state["locked"] is None or state.get("checking"):
+            # the same words the rows give; never the empty-vault note for a
+            # vault that is merely locked or not read yet
+            empty = [text for kind, text in panel_rows(state)
+                     if kind == "empty"]
+            if empty:
+                ttk.Label(frame, text=empty[0], foreground="#666",
+                          wraplength=WRAP,
+                          justify="left").pack(anchor="w", pady=(4, 0))
+            recent = []
+        elif not recent:
             ttk.Label(frame, text=starter_note(state), foreground="#666",
                       wraplength=WRAP,
                       justify="left").pack(anchor="w", pady=(4, 0))
@@ -1095,13 +1135,20 @@ def run(vault: str | None = None, show: bool = False,
         ttk.Separator(frame).pack(fill="x", pady=10)
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Refresh", command=refresh).pack(side="left")
-        if state["exists"] and not state["locked"]:
+        ttk.Button(buttons, text="Refresh",
+                   command=lambda: states.refresh_async(force=True)
+                   ).pack(side="left")
+        # Lock whenever the vault is not known to be locked - including
+        # before the first read and after a failed one; locking is safe in
+        # every state. The rest waits for a definite "unlocked".
+        if state["exists"] and state["locked"] is not True:
             ttk.Button(buttons, text="Lock now",
-                       command=lambda: (lock_vault(vault_path),
+                       command=lambda: (states.lock(
+                                            lambda: lock_vault(vault_path)),
                                         panel.update(note=None,
                                                      changing=False), refresh())
                        ).pack(side="left", padx=6)
+        if state["exists"] and state["locked"] is False:
             if not panel.get("changing"):
                 ttk.Button(buttons, text="Change password",
                            command=lambda: (panel.update(changing=True,
@@ -1123,7 +1170,9 @@ def run(vault: str | None = None, show: bool = False,
         """
         for child in win.winfo_children():
             child.destroy()
-        state = fetch_state(vault_path)
+        panel["entries"] = []
+        state = states.snapshot()          # reads nothing: a redraw never waits
+        panel["shown"] = state
 
         canvas = tk.Canvas(win, highlightthickness=0, borderwidth=0, width=PW)
         try:                                  # match the themed background
@@ -1197,14 +1246,42 @@ def run(vault: str | None = None, show: bool = False,
         win.deiconify()
         win.lift()
         win.focus_force()
+        # Only now, with the panel already up from what was known. Nothing
+        # changed on disk since the last look means nothing is read at all.
+        states.refresh_async()
 
-    def refresh() -> None:
+    def redraw() -> None:
         win = panel["win"]
         if win is not None and win.winfo_exists():
             build(win)
             place(win)
 
+    def refresh() -> None:
+        """After a click: show its result now, and re-read whatever it may
+        have changed in the background."""
+        redraw()
+        states.refresh_async()
+
+    def landed() -> None:
+        """A background read finished. Redraw in place - only when the panel
+        is up, something on it changed, and nobody is typing into it: a
+        redraw replaces the fields, and a half-typed passphrase must not
+        vanish. Anything skipped is drawn at the next open or click."""
+        win = panel["win"]
+        if win is None or not win.winfo_exists() or win.state() != "normal":
+            return
+        if states.snapshot() == panel.get("shown"):
+            return
+        for e in panel.get("entries") or []:
+            try:
+                if e.winfo_exists() and e.get():
+                    return
+            except Exception:                         # noqa: BLE001
+                pass
+        redraw()
+
     def quit_app() -> None:
+        states.close()
         stop_dashboard()
         icon = panel.get("icon")
         if icon is not None:
@@ -1227,7 +1304,8 @@ def run(vault: str | None = None, show: bool = False,
                 pystray.MenuItem("Open Compartment", from_tray(show_panel),
                                  default=True),
                 pystray.MenuItem("Lock now",
-                                 from_tray(lambda: (lock_vault(vault_path),
+                                 from_tray(lambda: (states.lock(
+                                     lambda: lock_vault(vault_path)),
                                                     panel.update(note=None),
                                                     refresh()))),
                 pystray.MenuItem("Open dashboard",
@@ -1242,6 +1320,9 @@ def run(vault: str | None = None, show: bool = False,
     # before is indistinguishable from an app that failed to start, which is
     # the single most expensive failure this app can have. Without an icon
     # there is nothing else to look at, so the window always opens.
+    # Read the vault now, in the background, so the first click already has
+    # numbers to show.
+    states.refresh_async()
     if show or not tray or claim_first_run(vault_path):
         root.after(200, show_panel)
 

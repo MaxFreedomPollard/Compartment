@@ -194,8 +194,12 @@ many you stored, the three settings worth changing (capture hook, whether
 reference facts appear in search, auto-lock), which agents are connected with
 buttons to connect Claude, Hermes Agent or OpenClaw, and the last five
 memories. You can unlock, lock and change your passphrase there without a
-terminal. The app keeps no vault in memory; it reads state from the CLI, so
-it costs nothing when idle. It is meant to be one of the many apps on your
+terminal. The panel opens instantly with what it last read and refreshes in
+the background, only when something actually changed. While you use it, one
+helper process keeps the vault open read-only and reads just the new memories
+as agents add them; after ten idle minutes it exits, so an idle app holds no
+vault and no key. Looking never locks, unlocks or rewrites the vault. It is
+meant to be one of the many apps on your
 computer, not something you have to learn: every function is a button or a
 switch, and the defaults were chosen by measurement.
 

@@ -80,12 +80,13 @@ import mmap
 import os
 import secrets
 import stat
+import sys
 import time
 from pathlib import Path
 
 from . import crypto, wire
 from .crypto import CryptoError, TamperError
-from .platforms import IS_WINDOWS, boot_time, machine_id
+from .platforms import IS_WINDOWS, boot_time, file_signature, machine_id
 
 # Session file format. Anything else on disk is not ours and is discarded:
 # a credential can only ever be opened by the boot that wrote it, so there is
@@ -420,9 +421,46 @@ def _canon(vault_path: str) -> str:
     return os.path.normcase(os.path.abspath(vault_path))
 
 
+def _name_for(vault_path: str) -> str:
+    return hashlib.sha256(_canon(vault_path).encode()).hexdigest()[:16] + ".session"
+
+
 def _file_for(vault_path: str) -> Path:
-    h = hashlib.sha256(_canon(vault_path).encode()).hexdigest()[:16]
-    return _session_dir() / f"{h}.session"
+    return _session_dir() / _name_for(vault_path)
+
+
+def credential_path(vault_path: str) -> Path:
+    """Where this vault's boot-session credential lives, touching nothing.
+
+    For watchers. `compartment unlock` writes this file and `compartment
+    lock` deletes it, so the status panel learns that someone locked or
+    unlocked in a terminal by looking at the file's modification time - the
+    one check cheap enough to make on every click. Unlike `_file_for`, it
+    never creates the session directory or changes its mode."""
+    return Path(env("SESSION_DIR", home() / "session")) / _name_for(vault_path)
+
+
+def watch_signature(vault_path: str) -> tuple:
+    """A value that changes whenever this vault's stored credential may have:
+    the boot-session file written or deleted, a Keychain credential added or
+    removed, the passphrase variable set or cleared.
+
+    Nothing is read, unsealed or decrypted - these are file modification
+    times - so it is cheap enough to take on every click of the status panel.
+    That is the point of it: the panel asks "is it still unlocked?" only when
+    this says the answer could have changed, and otherwise shows what it
+    already knows.
+
+    The Keychain credential lives in the login keychain, where `security`
+    puts a password when no keychain is named. Adding or deleting an item
+    rewrites that file; reading one does not, so the panel's own look-ups
+    never set this off."""
+    login_keychain = (Path.home() / "Library" / "Keychains"
+                      / "login.keychain-db")
+    return (file_signature(credential_path(vault_path)),
+            file_signature(login_keychain) if sys.platform == "darwin"
+            else None,
+            bool(env("PASSPHRASE")))
 
 
 def _write_private(p: Path, text: str) -> None:

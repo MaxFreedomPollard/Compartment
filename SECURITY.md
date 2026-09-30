@@ -145,6 +145,20 @@ before proceeding - a stale writer gets a loud VaultStaleError, never
 silent corruption. Namespace ACLs are per-caller; `--caller` identity is
 declarative (see the hostile-host limitation above).
 
+## The panel's reader
+
+Since 4.11.0 the menu bar and tray panel read the vault through one helper,
+`compartment.vaultview`, which the panel starts and talks to over the
+helper's own stdin and stdout. It has no socket and no port, so no other
+process can reach it. While it runs it holds the master key and the
+decrypted rows, as any `compartment serve` does. It opens the vault
+read-only: it writes nothing, compacts nothing, sweeps nothing and adds no
+audit rows, the same rule the dashboard keeps. It exits after ten minutes
+without a request, and it drops the key within 30 seconds of the stored
+credential disappearing, so a `compartment lock` typed in a terminal clears
+it too. The panel's Lock button ends it before clearing the credentials. An
+idle panel holds neither the vault nor the key.
+
 ## The shared embedding process
 
 Since 4.9.6 the encoder runs once per machine, in a daemon that every

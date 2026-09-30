@@ -392,3 +392,18 @@ def machine_id() -> str:
         value = socket.gethostname()
     _pin_machine_id(boot, value)
     return value
+
+
+def file_signature(path) -> tuple | None:
+    """(inode, size, modification time in ns) for a file, or None when it is
+    not there. Two signatures that are equal mean the file was not written
+    in between, which is what lets a watcher skip re-reading it.
+
+    All three, because each misses something alone: an append within one
+    clock tick keeps the mtime, an atomic replace can keep the size, and the
+    inode is the only one that shows a file was swapped for another."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)

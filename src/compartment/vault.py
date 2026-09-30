@@ -269,7 +269,12 @@ class Vault:
     # ------------------------------------------------------------------ init
 
     def __init__(self, path: str, header: vaultfile.VaultHeader, store: Store,
-                 master_key: bytes, config: VaultConfig):
+                 master_key: bytes, config: VaultConfig,
+                 build_index: bool = True):
+        """`build_index=False` is for a viewer that only reads rows (the
+        status panel's vaultview): the vector index is the costly part of an
+        open, and nothing that lists or counts memories uses it. A vault
+        opened that way cannot search."""
         self.path = path
         self.header = header
         self.db = store
@@ -286,7 +291,9 @@ class Vault:
         self._disk_state: tuple[int, int] | None = None
         if os.path.exists(path):
             self._disk_state = self._stat_disk()
-        self._rebuild_index()
+        self.index = None
+        if build_index:
+            self._rebuild_index()
 
     # -------------------------------------------------- multi-process safety
 
@@ -561,6 +568,25 @@ class Vault:
         """Resolution order: explicit passphrase → boot-session credential
         (dies on restart/power loss) → macOS Keychain (explicit opt-in,
         survives reboots) → env var."""
+        found = Vault.find_credential(path, passphrase)
+        if found is None:
+            raise CryptoError(
+                "Vault is locked (locked-by-default: every restart or power "
+                "loss requires one unlock). Run `compartment unlock` - it then "
+                "stays unlocked until the next restart or `compartment lock`."
+            )
+        return found
+
+    @staticmethod
+    def find_credential(path: str, passphrase: str | None = None
+                        ) -> tuple[str | None, bytes | None] | None:
+        """`resolve_credential`'s search, answering None when there is no
+        credential at all - which is exactly what "locked" means.
+
+        A CryptoError from here is a different answer: a credential file that
+        could not be read, a boot that cannot be identified. Nothing about
+        those says the vault is locked, and a caller that reports the state of
+        the vault (the status panel) must not say it is."""
         from . import session
         if passphrase:
             return passphrase, None
@@ -573,11 +599,7 @@ class Vault:
         from_env = env("PASSPHRASE")
         if from_env:
             return from_env, None
-        raise CryptoError(
-            "Vault is locked (locked-by-default: every restart or power loss "
-            "requires one unlock). Run `compartment unlock` - it then stays "
-            "unlocked until the next restart or `compartment lock`."
-        )
+        return None
 
     @staticmethod
     def load_keyfile_hint(path: str) -> bytes | None:
@@ -1321,6 +1343,22 @@ class Vault:
         """
         self._require_open()
         self._maybe_expire()
+        out = self.peek_recent(caller, namespace=namespace, limit=limit,
+                               include_seeded=include_seeded)
+        self._audit_and_capture(caller, "recent", f"n={len(out['results'])}")
+        return out
+
+    @_synchronized
+    def peek_recent(self, caller: str, namespace: str | None = None,
+                    limit: int = 20, include_seeded: bool = False) -> dict:
+        """`recent()` without its side effects: no expiry sweep, no audit row.
+
+        For the status panel, which glances at the vault every time someone
+        opens it and must leave the vault exactly as it found it - the same
+        rule the dashboard keeps. Expired records are still left out, so the
+        numbers match what `recent()` would report after its sweep.
+        """
+        self._require_open()
         if namespace is not None:
             self.config.grant_for(caller, namespace)
             allowed = {namespace}
@@ -1368,7 +1406,6 @@ class Vault:
             if row["quarantined"]:
                 rec["quarantined"] = True
             out.append(rec)
-        self._audit_and_capture(caller, "recent", f"n={len(out)}")
         return {"results": out,
                 "counts": {"total": total, "organic": organic,
                            "seeded": total - organic}}

@@ -9,19 +9,25 @@ Design notes:
 * The data layer is plain functions with no AppKit in sight, so it is
   testable on every OS in CI. AppKit is imported inside `run()`, which is the
   only part that cannot run headless.
-* State is read by shelling out to the `compartment` CLI rather than opening the
-  vault in-process. A status bar app that idles at 300 MB because it is
-  holding an embedding model would be a bad neighbour; a subprocess that
-  exits is not.
+* The vault is never opened in this process. A status bar app that idles at
+  hundreds of megabytes because it holds the vault would be a bad neighbour.
+  One child process, `compartment.vaultview`, keeps it open read-only while
+  the panel is in use, reads only what changed, and leaves after a few idle
+  minutes (see PanelState and that module).
+* A click never waits. The panel opens at once from the last state it knew,
+  and refreshes in the background only the parts whose files changed.
 * Settings live in `<vault>.config.json`, which needs no passphrase, so the
   toggles work whether or not the vault is currently unlocked.
 """
 from __future__ import annotations
 
 from .home import env, home
+import contextlib
+import datetime
 import errno
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -32,6 +38,7 @@ from pathlib import Path
 
 from . import __version__
 from .acl import VaultConfig
+from .platforms import file_signature
 
 AUTO_LOCK_CHOICES = [15, 30, 60, 0]          # 0 = never
 POPOVER_WIDTH = 360
@@ -205,7 +212,17 @@ def compartment_bin() -> str:
 
 
 def _cli_argv() -> list[str]:
-    """How this process runs the CLI.
+    """How this process runs the CLI. See _python_exe for which Python."""
+    return [_python_exe(), "-m", "compartment.cli"]
+
+
+def _view_argv(vault: str) -> list[str]:
+    """How this process starts the vault view (compartment.vaultview)."""
+    return [_python_exe(), "-m", "compartment.vaultview", "--vault", vault]
+
+
+def _python_exe() -> str:
+    """The interpreter this process runs Compartment's own modules with.
 
     NOT sys.executable. Inside the .app that is the bundle launcher, a small
     binary that always starts `compartment.cli menubar` and appends whatever
@@ -218,9 +235,7 @@ def _cli_argv() -> list[str]:
     PYTHONHOME points it at Contents/Resources/runtime inside the bundle, and
     at the venv or system prefix everywhere else."""
     exe = Path(sys.prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
-    if exe.exists():
-        return [str(exe), "-m", "compartment.cli"]
-    return [sys.executable, "-m", "compartment.cli"]
+    return str(exe) if exe.exists() else sys.executable
 
 
 def default_vault() -> str:
@@ -298,11 +313,19 @@ def _json_cmd(vault: str, *sub: str) -> dict | None:
     stops at the end of the first JSON value, so noise after the payload -
     whatever prints it - can never invalidate the payload itself.
     """
+    return _json_run([*_cli_argv(), "--vault", vault, *sub])
+
+
+def _json_run(argv: list[str], timeout: float = 60) -> dict | None:
+    """Run a command and parse the JSON it prints: _json_cmd's runner, for any
+    command line. None if it failed, timed out, or printed no JSON."""
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
-        p = subprocess.run([*_cli_argv(), "--vault", vault, *sub],
-                           capture_output=True, text=True, timeout=60,
-                           encoding="utf-8", errors="replace",
-                           env={**os.environ, "PATH": user_path()})
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, encoding="utf-8", errors="replace",
+                           env={**os.environ, "PATH": user_path()}, **kwargs)
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode != 0:
@@ -361,43 +384,442 @@ def set_setting(vault: str, key: str, value) -> dict:
     return read_settings(vault)
 
 
-def fetch_state(vault: str) -> dict:
-    """Everything the popover shows. Never raises - a status bar app that
-    dies because a vault is missing is worse than one that says so."""
-    state = {"vault": vault, "exists": os.path.exists(vault), "locked": True,
-             "records": 0, "organic": 0, "recent": [], "error": None,
-             "integrations": integration_status(vault),
-             "settings": {"capture_hook": False,
-                          "search_starter_facts": True,
-                          "expire_memories": True,
-                          "auto_lock_minutes": 30}}
+# ------------------------------------------------------------- panel state
+#
+# What the panel shows, and how it stays current without anyone waiting.
+#
+# A click never waits. The panel opens at once with the last thing it knew and
+# freshens in the background; when the fresh answer lands it updates in
+# place. And freshening does real work only for the parts whose files
+# changed, which it learns from modification times - a stat, instant:
+#
+#   the vault file, its config, the stored  -> ask the vault view
+#   credential, the date
+#   <vault>.config.json, Claude's settings  -> re-read the settings
+#   each agent's own configuration file     -> re-read which are connected
+#
+# The vault is read by `compartment.vaultview`: one child process that keeps
+# it open read-only and reads only what changed. See that module.
+
+#: How long one answer from the vault view may take. A cold read of a big
+#: vault is a few seconds; this is for a wedged process, not a slow one, and
+#: nothing waits on it but a background thread.
+VIEW_TIMEOUT = 60
+
+#: Windows: start child programs without a console window. They are console
+#: programs, and started from the tray (which has none) each would open one -
+#: and the vault view would keep its open for as long as it runs.
+_CREATE_NO_WINDOW = 0x08000000
+
+NO_VAULT_NOTE = "no vault yet - choose a passphrase below to create one"
+CREDENTIAL_REFUSED_NOTE = ("The saved unlock no longer opens this vault. "
+                           "Enter the passphrase to unlock it again.")
+
+DEFAULT_SETTINGS = {"capture_hook": False, "search_starter_facts": True,
+                    "expire_memories": True, "auto_lock_minutes": 30}
+
+
+def vault_presence(vault: str) -> bool | None:
+    """Whether the vault file is there: True, False, or None when the file
+    system will not say. None is not "missing" - a vault on a share that
+    stalled, or behind a permission error, is still a vault, and showing
+    "not set up" with a Create form over it is the same mistake as showing a
+    failed read as "locked"."""
     try:
-        state["settings"] = read_settings(vault)
+        os.stat(vault)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
+def settings_paths(vault: str) -> list:
+    """The files read_settings reads."""
+    from . import claude_hooks
+    return [VaultConfig.path_for(vault), claude_hooks.SETTINGS]
+
+
+def vault_signature(vault: str) -> tuple:
+    """Changes whenever what the panel shows about the vault could have: the
+    file itself (a store appends to it, a save replaces it), its config
+    (whether expired memories count), the stored credential (a lock or an
+    unlock, from anywhere), and the date (a memory can expire at midnight)."""
+    from . import session
+    return (file_signature(vault), file_signature(VaultConfig.path_for(vault)),
+            session.watch_signature(vault), datetime.date.today().isoformat())
+
+
+def apply_snapshot(state: dict, snap: dict | None) -> bool:
+    """Fold one answer from the vault view into the panel state.
+
+    Returns whether it was a definite answer. One that is not - the view
+    failed, timed out, could not tell - leaves `locked` exactly as the panel
+    last knew it and says why in `error`. It never guesses "locked": a read
+    that failed is not a vault that locked, and showing it as one is how a
+    click on the menu bar used to seem to lock the vault by itself."""
+    if snap is not None and snap.get("held"):
+        return False            # paused on purpose (a lock is under way)
+    state["checking"] = False
+    if not snap or not snap.get("ok"):
+        why = " ".join(str((snap or {}).get("error")
+                           or "the vault reader did not answer").split())
+        state["error"] = f"Could not refresh just now: {why[:160]}"
+        return False
+    if not snap.get("exists"):
+        state.update(exists=False, locked=True, records=0, organic=0,
+                     recent=[], error=NO_VAULT_NOTE)
+        return True
+    if snap.get("locked"):
+        state.update(exists=True, locked=True, records=0, organic=0,
+                     recent=[], error=(CREDENTIAL_REFUSED_NOTE
+                                       if snap.get("credential_refused")
+                                       else None))
+        return True
+    state.update(exists=True, locked=False,
+                 records=int(snap.get("records") or 0),
+                 organic=int(snap.get("organic") or 0),
+                 # newest first reads better in a list you glance at
+                 recent=list(reversed(snap.get("recent") or [])),
+                 error=None)
+    return True
+
+
+class ViewProcess:
+    """The panel's end of `compartment.vaultview`: one child process, spoken
+    to over its own pipes.
+
+    Started on first use, and again whenever it has gone - it leaves by itself
+    after some idle minutes, taking the key with it. Only background threads
+    ever wait on it, and never longer than VIEW_TIMEOUT."""
+
+    def __init__(self, vault: str):
+        self.vault = vault
+        self._proc = None
+        self._lines = None
+        self._lock = threading.Lock()         # one request at a time
+        self._starting = threading.Lock()     # a start and a hold never cross
+        self._held = threading.Event()        # set: start nothing
+        self._next = 0
+
+    def _start(self):
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = _CREATE_NO_WINDOW
+        proc = subprocess.Popen(
+            _view_argv(self.vault), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None if env("MENUBAR_DEBUG") else subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env={**os.environ, "PATH": user_path()}, **kwargs)
+        lines: queue.Queue = queue.Queue()
+
+        def pump():
+            try:
+                for line in proc.stdout:
+                    lines.put(line)
+            except (OSError, ValueError):
+                pass
+            finally:
+                lines.put(None)                 # it has gone
+
+        threading.Thread(target=pump, daemon=True,
+                         name="compartment-vaultview-reader").start()
+        self._proc, self._lines = proc, lines
+        return proc, lines
+
+    def _reap(self, proc) -> None:
+        if proc is None:
+            return
+        if self._proc is proc:
+            self._proc = self._lines = None
+        for step in (proc.stdin.close, proc.kill,
+                     lambda: proc.wait(timeout=2)):
+            try:
+                step()
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def request(self, op: str, timeout: float = VIEW_TIMEOUT,
+                **fields) -> dict | None:
+        """One answer, or None if there was none to be had. Never raises."""
+        with self._lock:
+            for _ in range(2):
+                with self._starting:
+                    if self._held.is_set():
+                        return {"ok": False, "held": True}
+                    proc, lines = self._proc, self._lines
+                    if proc is None or proc.poll() is not None:
+                        try:
+                            proc, lines = self._start()
+                        except (OSError, ValueError,
+                                subprocess.SubprocessError):
+                            return None
+                self._next += 1
+                rid = self._next
+                try:
+                    proc.stdin.write(json.dumps({"op": op, "id": rid,
+                                                 **fields}) + "\n")
+                    proc.stdin.flush()
+                except (OSError, ValueError):
+                    self._reap(proc)
+                    continue        # it left between the check and the write
+                answer = self._await(proc, lines, rid, timeout)
+                if answer is not self._GONE:
+                    return answer
+                # It ended without answering. The likeliest reason is that it
+                # was leaving, idle, as the request arrived: once more with a
+                # fresh one.
+            return None
+
+    _GONE = object()
+
+    def _await(self, proc, lines, rid, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                self._reap(proc)    # wedged: it goes, the next asks a new one
+                return None
+            try:
+                line = lines.get(timeout=left)
+            except queue.Empty:
+                continue
+            if line is None:
+                self._reap(proc)
+                return self._GONE
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(doc, dict) and doc.get("id") == rid:
+                return doc
+
+    def stop(self) -> None:
+        """End the running view now, key and all. Safe from any thread; a
+        request waiting on it comes back empty."""
+        self._reap(self._proc)
+
+    @contextlib.contextmanager
+    def held(self):
+        """No view process while this lasts: the running one ends at once and
+        no new one starts. The Lock button does its work inside this, so no
+        process of ours still holds the key once the vault is locked."""
+        with self._starting:
+            self._held.set()
+        try:
+            self.stop()
+            yield
+        finally:
+            self._held.clear()
+
+    def close(self) -> None:
+        """For quitting: it goes now and never comes back."""
+        with self._starting:
+            self._held.set()
+        self.stop()
+
+
+class _OnceView:
+    """A vault view that answers one question and exits (`vaultview
+    --once`). For callers that want a single answer now, not a process kept
+    for the next click."""
+
+    def __init__(self, vault: str):
+        self.vault = vault
+
+    def request(self, op: str, timeout: float = VIEW_TIMEOUT,
+                **fields) -> dict | None:
+        if op != "snapshot":
+            return None
+        limit = str(int(fields.get("limit", RECENT_COUNT)))
+        return _json_run([*_view_argv(self.vault), "--once", "--limit",
+                          limit], timeout=timeout)
+
+    def held(self):
+        return contextlib.nullcontext()
+
+    def stop(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class PanelState:
+    """What the panel shows, kept current cheaply. Shared by the menu bar and
+    the tray.
+
+    `state` is always something that can be drawn at once. `refresh()` brings
+    it up to date and does real work only for the parts whose files changed.
+    `refresh_async()` does the same on a background thread and then calls
+    `on_change` - from that thread - for the UI to redraw on its own. What
+    the user does through the panel (lock, unlock, a switch) goes straight
+    into `state` via mark() and set_settings(), so the redraw after a click
+    shows its result without waiting for any read."""
+
+    def __init__(self, vault: str, view=None, on_change=None):
+        self.vault = vault
+        self.view = view if view is not None else ViewProcess(vault)
+        self.on_change = on_change
+        self._lock = threading.RLock()
+        self._gen = 0                 # bumped by every action
+        self._sigs: dict = {}
+        self._thread = None
+        self._again = None            # None, or the force flag for a rerun
+        exists = vault_presence(vault) is not False
+        self.state = {
+            "vault": vault, "exists": exists,
+            # None: not read yet. Drawn as "reading the vault", never as
+            # locked or unlocked, because neither is known.
+            "locked": None if exists else True,
+            "checking": exists,
+            "records": 0, "organic": 0, "recent": [],
+            "error": None if exists else NO_VAULT_NOTE,
+            "integrations": {t: False for t, _ in INTEGRATION_TARGETS},
+            "settings": dict(DEFAULT_SETTINGS)}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self.state)
+
+    def refresh(self, force: bool = False, include_vault: bool = True) -> dict:
+        """Bring `state` up to date, reading only what changed (everything,
+        with `force`). Blocking; the UI calls refresh_async instead."""
+        for _ in range(3):
+            done = self._refresh_once(force, include_vault)
+            if done is not None:
+                return done
+            # Something was clicked while that read ran, and its result is on
+            # screen already. The read predates it, so it was dropped; read
+            # again, starting from what the click left.
+        return self.snapshot()
+
+    def _refresh_once(self, force: bool, include_vault: bool) -> dict | None:
+        with self._lock:
+            gen, sigs = self._gen, dict(self._sigs)
+            new = dict(self.state)
+        new_sigs = dict(sigs)
+
+        if include_vault:
+            sig = vault_signature(self.vault)
+            if force or sig != sigs.get("vault") or new["locked"] is None:
+                # Missing is answered here; anything else - there, or not
+                # sure - is the view's to answer, and it tells the two apart.
+                snap = (self.view.request("snapshot", limit=RECENT_COUNT)
+                        if vault_presence(self.vault) is not False
+                        else {"ok": True, "exists": False})
+                # A failed read keeps the old signature, so the next look
+                # asks again instead of trusting an answer it never got.
+                if apply_snapshot(new, snap):
+                    new_sigs["vault"] = sig
+
+        sig = tuple(file_signature(p) for p in settings_paths(self.vault))
+        if force or sig != sigs.get("settings"):
+            try:
+                new["settings"] = read_settings(self.vault)
+                new_sigs["settings"] = sig
+            except Exception as exc:                    # noqa: BLE001
+                new["error"] = f"could not read the settings: {exc}"
+
+        sig = tuple(file_signature(p) for p in integration_paths())
+        if force or sig != sigs.get("agents"):
+            new["integrations"] = integration_status(self.vault)
+            new_sigs["agents"] = sig
+
+        with self._lock:
+            if gen != self._gen:
+                return None
+            self.state, self._sigs = new, new_sigs
+            return dict(new)
+
+    def refresh_async(self, force: bool = False) -> None:
+        """refresh() on a background thread, then on_change(). Asked again
+        while one is running, it runs once more when that one finishes, so
+        the last word is always a read that started after the last change."""
+        with self._lock:
+            if self._thread is not None:
+                self._again = bool(self._again) or force
+                return
+            self._thread = threading.Thread(
+                target=self._run, args=(force,), daemon=True,
+                name="compartment-panel-refresh")
+            self._thread.start()
+
+    def _run(self, force: bool) -> None:
+        while True:
+            try:
+                self.refresh(force)
+            except Exception as exc:                    # noqa: BLE001
+                # Never let the thread die with the panel none the wiser.
+                with self._lock:
+                    self.state = {**self.state, "checking": False,
+                                  "error": f"could not refresh: {exc}"}
+            callback = self.on_change
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:                        # noqa: BLE001
+                    pass
+            with self._lock:
+                if self._again is None:
+                    self._thread = None
+                    return
+                force, self._again = self._again, None
+
+    # -- what the user did, shown at once --------------------------------
+
+    def mark(self, **fields) -> dict:
+        """Put what an action just did on screen now. A read already under way
+        predates it and is dropped when it lands, and the vault is read
+        afresh on the next refresh."""
+        with self._lock:
+            self._gen += 1
+            self.state = {**self.state, **fields}
+            self._sigs.pop("vault", None)
+            return dict(self.state)
+
+    def set_settings(self, settings: dict) -> dict:
+        with self._lock:
+            self._gen += 1
+            self.state = {**self.state, "settings": settings}
+            self._sigs.pop("settings", None)
+            return dict(self.state)
+
+    def lock(self, lock_fn) -> bool:
+        """Run `lock_fn` with no view process alive, then show locked."""
+        with self._lock:
+            self._gen += 1
+        with self.view.held():
+            ok = bool(lock_fn())
+        if ok:
+            self.mark(locked=True, checking=False, records=0, organic=0,
+                      recent=[], error=None)
+        else:
+            self.mark(error="Could not lock. Try `compartment lock` in a "
+                            "terminal.")
+        return ok
+
+    def close(self) -> None:
+        """For quitting."""
+        self.view.close()
+
+
+def fetch_state(vault: str) -> dict:
+    """Everything the panel shows, read once and synchronously, for
+    `compartment menubar --self-check` and anything else that wants a single
+    answer now. One process, one decrypt, nothing written. Never raises.
+
+    The panel itself does not call this: it keeps a PanelState, which never
+    makes a click wait for a read."""
+    try:
+        return PanelState(vault, view=_OnceView(vault)).refresh(force=True)
     except Exception as exc:                            # noqa: BLE001
-        state["error"] = str(exc)
-    if not state["exists"]:
-        state["error"] = ("no vault yet - choose a passphrase below to "
-                          "create one")
-        return state
-
-    status = _json_cmd(vault, "status")
-    if status is None:
-        state["error"] = "could not read vault status"
-        return state
-    state["locked"] = bool(status.get("locked", True))
-    state["records"] = int(status.get("records", 0) or 0)
-    state["organic"] = int(status.get("organic_records", 0) or 0)
-    if state["locked"]:
-        return state
-
-    recent = _json_cmd(vault, "recent", "--limit", str(RECENT_COUNT), "--json")
-    if recent:
-        counts = recent.get("counts") or {}
-        state["organic"] = int(counts.get("organic", state["organic"]))
-        state["records"] = int(counts.get("total", state["records"]))
-        # newest first reads better in a list you glance at
-        state["recent"] = list(reversed(recent.get("results") or []))
-    return state
+        return {"vault": vault, "exists": vault_presence(vault) is not False,
+                "locked": None, "checking": False, "records": 0,
+                "organic": 0, "recent": [], "error": f"could not read: {exc}",
+                "integrations": {t: False for t, _ in INTEGRATION_TARGETS},
+                "settings": dict(DEFAULT_SETTINGS)}
 
 
 #: The `compartment dash` started from the panel, if any. One per panel
@@ -615,7 +1037,7 @@ def integration_status(vault: str) -> dict:
     """
     out = {t: False for t, _ in INTEGRATION_TARGETS}
     try:                                                # Claude Code
-        p = Path.home() / ".claude.json"
+        p = _claude_code_config()
         if p.is_file():
             cfg = json.loads(p.read_text(encoding="utf-8"))
             out["claude"] = "compartment" in (cfg.get("mcpServers") or {})
@@ -628,20 +1050,44 @@ def integration_status(vault: str) -> dict:
         except Exception:                               # noqa: BLE001
             pass
     try:                                                # Hermes
-        hermes = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-        out["hermes"] = (hermes / "plugins" / "compartment"
-                         / "plugin.yaml").is_file()
+        out["hermes"] = _hermes_plugin_manifest().is_file()
     except OSError:
         pass
     try:                                                # OpenClaw
-        p = Path(os.environ.get("OPENCLAW_HOME",
-                                Path.home() / ".openclaw")) / "openclaw.json"
+        p = _openclaw_config()
         if p.is_file():
             cfg = json.loads(p.read_text(encoding="utf-8"))
             out["openclaw"] = "compartment" in (cfg.get("mcpServers") or {})
     except (OSError, ValueError):
         pass
     return out
+
+
+def _claude_code_config() -> Path:
+    return Path.home() / ".claude.json"
+
+
+def _hermes_plugin_manifest() -> Path:
+    return (Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+            / "plugins" / "compartment" / "plugin.yaml")
+
+
+def _openclaw_config() -> Path:
+    return (Path(os.environ.get("OPENCLAW_HOME", Path.home() / ".openclaw"))
+            / "openclaw.json")
+
+
+def integration_paths() -> list[Path]:
+    """Every file `integration_status` reads, so the panel can tell from their
+    modification times alone that no agent's configuration has changed, and
+    skip reading them. Built from the same helpers, so a target cannot be
+    read without also being watched.
+
+    Every one of them used to be read twice on every click, whether or not
+    anything in it had changed."""
+    from . import claude_desktop
+    return [_claude_code_config(), claude_desktop.config_path(),
+            _hermes_plugin_manifest(), _openclaw_config()]
 
 
 def agent_present(target: str, path: str | None = None) -> bool:
@@ -753,10 +1199,27 @@ def summarise(state: dict) -> str:
     """One line under the title. Also what --self-check prints."""
     if not state["exists"]:
         return "no vault"
+    if state["locked"] is None:
+        # Not known yet, or the only read so far failed. Saying "locked" here
+        # would invite a passphrase the vault may not need.
+        return ("reading the vault…" if state.get("checking")
+                else "status unknown - see the note below")
     if state["locked"]:
         return "locked - enter your passphrase to unlock"
+    if state.get("checking"):
+        return "unlocked - reading the vault…"
     return (f"{state['records']:,} memories · "
             f"{state['organic']:,} stored by you")
+
+
+def lock_badge(state: dict) -> str:
+    """The word beside the title. Only a definite answer says locked or
+    unlocked."""
+    if not state["exists"]:
+        return "not set up"
+    if state["locked"] is None:
+        return "checking…" if state.get("checking") else "unknown"
+    return "locked" if state["locked"] else "unlocked"
 
 
 def starter_note(state: dict) -> str:
@@ -1481,7 +1944,12 @@ def run(vault: str | None = None, show: bool = False,
     class Controller(NSObject):
         def init(self):
             self = objc.super(Controller, self).init()
-            self.state = fetch_state(vault_path)
+            # What is on screen comes from here, and a click never waits for
+            # it: the popover opens with what this already holds, and a read
+            # in the background updates it in place (stateArrived_).
+            self.panel = PanelState(vault_path, on_change=self._landed)
+            self.panel.refresh(include_vault=False)   # local files: instant
+            self.state = self.panel.snapshot()
             self.popover = None
             self.status_item = None
             self.body = None
@@ -1571,18 +2039,15 @@ def run(vault: str | None = None, show: bool = False,
 
         def buildBody(self):
             st = self.state
-            if self.changing_pw and st["exists"] and not st["locked"]:
+            if self.changing_pw and st["exists"] and st["locked"] is False:
                 return self.buildChangeBody(st)
             views = []
             # "locked" over an empty disk describes a vault that is not
             # there, and sends the user looking for the Unlock control that
-            # sentence implies.
-            if not st["exists"]:
-                badge = "not set up"
-            else:
-                badge = "locked" if st["locked"] else "unlocked"
+            # sentence implies. So does either word before the first read
+            # has landed; lock_badge says neither until one is known.
             title = row(label("Compartment", 15, bold=True),
-                        label(badge, 11, secondary=True))
+                        label(lock_badge(st), 11, secondary=True))
             views.append(title)
             views.append(label(summarise(st), 11, secondary=True))
             if st["error"]:
@@ -1693,7 +2158,9 @@ def run(vault: str | None = None, show: bool = False,
             # people, so it is a button.
             views.append(label("CONNECT AN AGENT", 10, bold=True,
                                secondary=True))
-            wired = integration_status(vault_path)
+            # Read by the state layer, and only when an agent's own config
+            # file changed - not on every click.
+            wired = st.get("integrations") or {}
             connect_buttons = []
             for i, (target, name) in enumerate(INTEGRATION_TARGETS):
                 b = NSButton.buttonWithTitle_target_action_(
@@ -1714,7 +2181,7 @@ def run(vault: str | None = None, show: bool = False,
 
             head = label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,
                          secondary=True)
-            if st["exists"] and not st["locked"]:
+            if st["exists"] and st["locked"] is False:
                 # The five here are a glance; the whole vault is a page.
                 dash_b = NSButton.buttonWithTitle_target_action_(
                     "Dashboard", self, "openDashboard:")
@@ -1729,6 +2196,10 @@ def run(vault: str | None = None, show: bool = False,
             elif st["locked"]:
                 views.append(label("unlock the vault to see them", 11,
                                    secondary=True))
+            elif st["locked"] is None or st.get("checking"):
+                views.append(label("reading the vault…" if st.get("checking")
+                                   else "not available until the vault can "
+                                   "be read", 11, secondary=True))
             elif not st["recent"]:
                 views.append(label(starter_note(st), 11, secondary=True,
                                    wrap=True))
@@ -1749,7 +2220,14 @@ def run(vault: str | None = None, show: bool = False,
                                                              "refresh:")
             quit_b = NSButton.buttonWithTitle_target_action_("Quit", self,
                                                             "quitApp:")
-            if st["exists"] and not st["locked"]:
+            if st["exists"] and st["locked"] is None:
+                # Not read yet, or not readable just now. Locking is safe in
+                # every state, so it stays within reach; the rest waits for
+                # an answer.
+                lock = NSButton.buttonWithTitle_target_action_("Lock", self,
+                                                               "lockNow:")
+                views.append(row(refresh, lock, _spacer(), quit_b, spacing=6))
+            elif st["exists"] and st["locked"] is False:
                 lock = NSButton.buttonWithTitle_target_action_("Lock", self,
                                                                "lockNow:")
                 change = NSButton.buttonWithTitle_target_action_(
@@ -1781,8 +2259,10 @@ def run(vault: str | None = None, show: bool = False,
             body.setFrameOrigin_((0, 0))
 
         def rebuild(self):
-            """Refresh whichever surface is on screen - popover or window."""
-            self.state = fetch_state(vault_path)
+            """Redraw whichever surface is on screen - popover or window -
+            from what is known now. Reads nothing, so it never waits; fresh
+            numbers arrive through stateArrived_."""
+            self.state = self.panel.snapshot()
             body = self.buildBody()
             h = min(body.frame().size.height, POPOVER_MAX_HEIGHT)
             if self.window is not None and self.window.isVisible():
@@ -1792,6 +2272,46 @@ def run(vault: str | None = None, show: bool = False,
                 self.popover.setContentSize_((POPOVER_WIDTH, h))
                 self._mount(self.popover.contentViewController().view(),
                             body, h)
+
+        @objc.python_method
+        def _landed(self):
+            """A background read finished. This runs on that thread, and
+            AppKit may only be touched on the main one, so hand over."""
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "stateArrived:", None, False)
+
+        def stateArrived_(self, _):
+            """Fresh numbers are in: redraw in place - but only when the
+            panel is on screen, something on it changed, and nobody is typing
+            into it. A redraw replaces the fields, and a passphrase half typed
+            must not vanish. Whatever is skipped here is drawn at the next
+            open or click, from the same state."""
+            if self.panel.snapshot() == self.state or not self._onScreen():
+                _d("fresh state landed; nothing on screen to change")
+                return
+            if self._typing():
+                _d("fresh state landed; kept for later, someone is typing")
+                return
+            _d("fresh state landed; redrawing in place:",
+               summarise(self.panel.snapshot()))
+            self.rebuild()
+
+        @objc.python_method
+        def _onScreen(self):
+            return bool((self.popover is not None and self.popover.isShown())
+                        or (self.window is not None
+                            and self.window.isVisible()))
+
+        @objc.python_method
+        def _typing(self):
+            for f in (self.pw_field, self.pw_new, self.pw_repeat,
+                      self.new_pw, self.new_repeat):
+                try:
+                    if f is not None and str(f.stringValue() or ""):
+                        return True
+                except Exception:                       # noqa: BLE001
+                    pass
+            return False
 
         # ---- getting the thing on screen -------------------------------
         # Two surfaces, and which one to use is never in doubt:
@@ -1837,6 +2357,8 @@ def run(vault: str | None = None, show: bool = False,
             self.rebuild()                            # so rebuild targets it
             self._placeWindow()
             NSApp.activateIgnoringOtherApps_(True)
+            _d("on screen from what was known:", summarise(self.state))
+            self.panel.refresh_async()                # on screen first
 
         @objc.python_method
         def showPopover(self):
@@ -1848,27 +2370,36 @@ def run(vault: str | None = None, show: bool = False,
             self.popover.showRelativeToRect_ofView_preferredEdge_(
                 btn.bounds(), btn, 1)                  # NSRectEdgeMaxY
             NSApp.activateIgnoringOtherApps_(True)
+            _d("on screen from what was known:", summarise(self.state))
+            # Only now, with the popover already open from what was known:
+            # the click never waits for this. Nothing changed on disk since
+            # the last look means nothing is read at all.
+            self.panel.refresh_async()
 
         # ---- actions ---------------------------------------------------
         def toggleHook_(self, sender):
             try:
-                set_setting(vault_path, "capture_hook",
-                            bool(sender.state()))
+                self.panel.set_settings(set_setting(
+                    vault_path, "capture_hook", bool(sender.state())))
             except Exception:                           # noqa: BLE001
                 pass
             self.rebuild()
 
         def toggleStarter_(self, sender):
-            set_setting(vault_path, "search_starter_facts", bool(sender.state()))
+            self.panel.set_settings(set_setting(
+                vault_path, "search_starter_facts", bool(sender.state())))
             self.rebuild()
 
         def toggleExpire_(self, sender):
-            set_setting(vault_path, "expire_memories", bool(sender.state()))
+            self.panel.set_settings(set_setting(
+                vault_path, "expire_memories", bool(sender.state())))
             self.rebuild()
+            self.panel.refresh_async()      # the counts depend on this one
 
         def changeAutoLock_(self, sender):
             idx = int(sender.selectedSegment())
-            set_setting(vault_path, "auto_lock_minutes", AUTO_LOCK_CHOICES[idx])
+            self.panel.set_settings(set_setting(
+                vault_path, "auto_lock_minutes", AUTO_LOCK_CHOICES[idx]))
             self.rebuild()
 
         def connectAgent_(self, sender):
@@ -1903,6 +2434,7 @@ def run(vault: str | None = None, show: bool = False,
             self.connect_busy = None
             self.connect_note = msg
             self.rebuild()
+            self.panel.refresh_async()      # the ticks: that config changed
 
         def createVault_(self, sender):
             """Say it is working, then work.
@@ -1942,10 +2474,16 @@ def run(vault: str | None = None, show: bool = False,
             for f in (self.new_pw, self.new_repeat):
                 if f is not None:
                     f.setStringValue_("")
+            if os.path.exists(vault_path):
+                self.panel.mark(exists=True, locked=None, checking=True,
+                                error=None)
+                self.panel.refresh_async(force=True)
             self.rebuild()
 
         def refresh_(self, sender):
-            self.rebuild()
+            # Everything read afresh, in the background; the panel updates in
+            # place when it lands.
+            self.panel.refresh_async(force=True)
 
         def showFirst_(self, _):
             """First launch, reopen, and second-launch handoff all land here.
@@ -1960,9 +2498,12 @@ def run(vault: str | None = None, show: bool = False,
             self.showWindow()
 
         def lockNow_(self, sender):
-            lock_vault(vault_path)
+            # With no vault view running while it happens, so that no process
+            # of ours still holds the key once the vault is locked.
+            self.panel.lock(lambda: lock_vault(vault_path))
             self.unlock_note = None
             self.rebuild()
+            self.panel.refresh_async(force=True)    # and confirm it from disk
 
         def openDashboard_(self, sender):
             if open_dashboard(vault_path) is None:
@@ -1975,6 +2516,9 @@ def run(vault: str | None = None, show: bool = False,
             ok, note = unlock_vault(vault_path, pw)
             self.pw_field.setStringValue_("")        # never leave it on screen
             self.unlock_note = None if ok else note
+            if ok:
+                self.panel.mark(locked=False, checking=True, error=None)
+                self.panel.refresh_async(force=True)
             self.rebuild()
 
         def startChangePw_(self, sender):
@@ -2000,8 +2544,10 @@ def run(vault: str | None = None, show: bool = False,
             self.changing_pw = not ok
             self.change_note = note
             self.rebuild()
+            self.panel.refresh_async()      # the new passphrase rewrote the file
 
         def quitApp_(self, sender):
+            self.panel.close()
             stop_dashboard()
             NSApp.terminate_(self)
 
@@ -2024,13 +2570,16 @@ def run(vault: str | None = None, show: bool = False,
     _dbg = env("MENUBAR_DEBUG")
     def _d(*a):
         if _dbg: print("[menubar]", *a, file=sys.stderr, flush=True)
-    _d("building controller (fetches state)…")
+    _d("building controller…")
     ctrl = Controller.alloc().init()
     _d("controller ready")
 
     if render_to:
         # app.run() normally does this; without it the text system is not up.
         app.finishLaunching()
+        ctrl.panel.refresh(force=True)          # a picture wants real numbers
+        ctrl.panel.close()
+        ctrl.state = ctrl.panel.snapshot()
         body = ctrl.buildBody()
         body.layoutSubtreeIfNeeded()
         bounds = body.bounds()
@@ -2155,6 +2704,9 @@ def run(vault: str | None = None, show: bool = False,
     ).addObserver_selector_name_object_(ctrl, "showFirst:",
                                         SHOW_NOTIFICATION, None)
 
+    # Read the vault now, in the background, so that the first click already
+    # has numbers to show.
+    ctrl.panel.refresh_async()
     if show or claim_first_run(vault_path):
         ctrl.performSelector_withObject_afterDelay_("showFirst:", None, 0.35)
     _d("entering run loop")
@@ -2164,5 +2716,5 @@ def run(vault: str | None = None, show: bool = False,
 
 
 __all__ = ["run", "self_check", "fetch_state", "read_settings", "set_setting",
-           "summarise", "auto_lock_label", "default_vault", "compartment_bin",
-           "AUTO_LOCK_CHOICES"]
+           "summarise", "lock_badge", "auto_lock_label", "default_vault",
+           "compartment_bin", "PanelState", "ViewProcess", "AUTO_LOCK_CHOICES"]
