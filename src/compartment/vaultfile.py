@@ -169,6 +169,10 @@ class LoadedVaultFile:
     #: decrypting the whole payload again.
     journal_start: int = 0
     journal_end: int = 0
+    #: (mtime in ns, size) of the file as it was read - taken before the read,
+    #: from the same open file. What an opener compares against to learn that
+    #: another process wrote while it was reading. See Vault.unlock.
+    disk_state: tuple[int, int] | None = None
 
 
 def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
@@ -226,8 +230,14 @@ def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
 
 def read_vault_file(path: str) -> LoadedVaultFile:
     with open(path, "rb") as f:
+        # Before the read, so an append that lands during it makes the file
+        # newer than this, never older. Taken after, it described bytes this
+        # reader never saw, and the opener's next save wrote over them.
+        st = os.fstat(f.fileno())
         raw = f.read()
-    return parse_vault_bytes(raw, path)
+    loaded = parse_vault_bytes(raw, path)
+    loaded.disk_state = (st.st_mtime_ns, st.st_size)
+    return loaded
 
 
 def parse_vault_bytes(raw: bytes, path: str = "vault") -> LoadedVaultFile:

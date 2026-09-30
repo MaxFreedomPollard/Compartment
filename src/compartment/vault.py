@@ -382,6 +382,23 @@ class Vault:
     def unlock(cls, path: str, passphrase: str | None = None,
                raw_key: bytes | None = None, check_model: bool = True,
                keyfile: bytes | None = None) -> "Vault":
+        # Opening compacts a replayed journal, and that save is refused if
+        # another process wrote while this one was reading (see
+        # _unlock_once). Reading again is always safe, so do that rather than
+        # hand the caller a race it can do nothing about.
+        for attempt in range(3):
+            try:
+                return cls._unlock_once(path, passphrase, raw_key,
+                                        check_model, keyfile)
+            except VaultStaleError:
+                if attempt == 2:
+                    raise
+        raise AssertionError("unreachable")
+
+    @classmethod
+    def _unlock_once(cls, path: str, passphrase: str | None,
+                     raw_key: bytes | None, check_model: bool,
+                     keyfile: bytes | None) -> "Vault":
         loaded = vaultfile.read_vault_file(path)
         if raw_key is not None:
             master = raw_key
@@ -403,6 +420,13 @@ class Vault:
         model_name = db.get_meta("model_name")
         config = VaultConfig.load(path)
         v = cls(path, loaded.header, db, master, config)
+        # What this vault holds is the file as it was READ, so that is what
+        # later saves must check against. The constructor stats the disk now,
+        # after the decrypt: an append another process made in between would
+        # look like part of what was read, and the compaction below would
+        # write over it - a stored memory silently gone.
+        if loaded.disk_state is not None:
+            v._disk_state = loaded.disk_state
         entries = vaultfile.decrypt_journal(loaded.header, loaded.journal_cts, master)
         for e in entries:
             v._replay(e)
