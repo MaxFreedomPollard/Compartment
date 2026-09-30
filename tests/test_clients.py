@@ -198,6 +198,32 @@ def test_codex_unregister_takes_only_our_table(tmp_path):
     assert 'command = "x"' in text
 
 
+def test_codex_unregister_keeps_a_comment_that_documents_the_next_table(tmp_path):
+    # A comment block sitting just above the next `[table]` documents THAT
+    # table, not ours. Removing our table must not carry the neighbour's note
+    # out with it - that is the "eats somebody's config" failure this whole
+    # module exists to avoid, on the way out instead of the way in.
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'model = "o3"\n'
+        '\n'
+        '[mcp_servers.compartment]\n'
+        'command = "compartment"\n'
+        'args = ["--vault", "/v", "serve"]\n'
+        '\n'
+        "# Bob's server, do not remove\n"
+        '[mcp_servers.other]\n'
+        'command = "x"\n'
+    )
+
+    assert clients.unregister(clients.CLIENTS["codex"], path=p) is True
+    text = p.read_text()
+    assert "[mcp_servers.compartment]" not in text     # ours is gone
+    assert "[mcp_servers.other]" in text               # theirs survives
+    assert "# Bob's server, do not remove" in text     # and its comment
+    assert 'model = "o3"' in text                      # and the preamble
+
+
 # ----------------------------------------------------------------- removal
 
 def test_unregister_removes_only_ours(tmp_path):
