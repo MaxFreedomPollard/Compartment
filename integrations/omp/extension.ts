@@ -137,9 +137,9 @@ export default function compartmentOmp(pi: ExtensionAPI) {
     name: "memory_store",
     label: "Memory Store",
     description:
-      "Store one durable fact, decision, or preference into the encrypted memory "
-      + "vault. One fact per call, dated automatically. Use for anything the user "
-      + "will need in a future session.",
+      "Store one claim into the encrypted memory vault, one per call, dated "
+      + "automatically. "
+      + "STORE anything worth referencing again in future work: names, addresses, contacts, account IDs, passwords, API keys and other credentials, lasting file locations and configuration, preferences, and every durable fact or decision reached. Not transient chatter, one-off trivia, things freely available on the internet, or the working details of a task in progress, such as run results, errors, log contents and temporary paths or settings.",
     parameters: z.object({ fact: z.string() }),
     async execute(_id, params) {
       const r = run(["store", params.fact, "--source", "omp memory_store tool"]);

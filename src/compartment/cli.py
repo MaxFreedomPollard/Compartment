@@ -20,7 +20,7 @@ import zipfile
 from pathlib import Path
 
 from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
-               claude_memory, clients, offline_guard, packs, selftest,
+               claude_memory, clients, gate, offline_guard, packs, selftest,
                session)
 from .acl import VaultConfig
 from .crypto import CryptoError
@@ -1359,11 +1359,9 @@ _CLAUDE_MD_BODY = (
     "session. Before answering anything that may depend on past work, prior "
     "decisions, the people/projects/accounts involved, or the user's "
     "preferences, recall with the compartment `memory_search` tool first rather "
-    "than guessing. The moment information worth keeping appears that is not "
-    "common public knowledge - names, addresses, contacts, passwords, API keys "
-    "and other credentials, file paths, configuration, preferences, durable "
-    "facts or decisions - save it with `memory_store` (it is encrypted at "
-    "rest). A memory is ONE claim of at most 200 characters by default - "
+    "than guessing. " + gate.STORE_RULE + " Store with `memory_store`; the "
+    "vault is encrypted at rest. A memory is ONE claim of at most 200 "
+    "characters by default - "
     "enforced - and "
     "several facts go through `memory_store_many`, one record each. Store "
     "preferences and stances with kind='opinion': opinions update instead of "

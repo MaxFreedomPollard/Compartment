@@ -1,6 +1,6 @@
 ---
 name: compartmentalize
-description: Sweep this conversation and save everything potentially worth knowing again into Compartment, the encrypted memory vault. Run it before compacting or summarizing so nothing is lost to the summary, or on its own at any point to bank the session.
+description: Sweep this conversation and save everything worth referencing again in future work into Compartment, the encrypted memory vault. Run it before compacting or summarizing so nothing is lost to the summary, or on its own at any point to bank the session.
 version: 1.0.0
 platforms: [macos, linux, windows]
 disable-model-invocation: true
@@ -14,8 +14,14 @@ metadata:
 **Save to Compartment before compacting.**
 
 Sweep the entire conversation, including any part already summarized, and store
-to Compartment everything potentially worth knowing again later that is not
-common public knowledge. This is encrypted storage, so when in doubt, store it.
+to Compartment what it holds that is worth keeping.
+
+STORE anything worth referencing again in future work: names, addresses,
+contacts, account IDs, passwords, API keys and other credentials, lasting file
+locations and configuration, preferences, and every durable fact or decision
+reached. Not transient chatter, one-off trivia, things freely available on the
+internet, or the working details of a task in progress, such as run results,
+errors, log contents and temporary paths or settings.
 
 For each item, `memory_search` first, then `memory_store`: update the existing
 memory when one already covers it, create a new one when none does.
@@ -24,9 +30,9 @@ memory when one already covers it, create a new one when none does.
 keys, tokens, account IDs, and where each one lives. URLs, hostnames, repo and
 release locations.
 
-**Then properly associate and store** any observation, decision, opinion and
-any thought that is not publicly available. Anything that would be expensive or
-impossible to work out again from scratch.
+**Then properly associate and store** every durable observation, decision,
+opinion and thought that is not publicly available: anything that would be
+expensive or impossible to work out again from scratch.
 
 **Also store the session itself - as several one-claim memories, never one
 narrative:** one for what was asked, one for what it turned into, one for
@@ -35,9 +41,9 @@ and what it did is information in its own right, sometimes more useful than
 any single detail inside it, and each of those claims is recalled on its
 own.
 
-**Skip:** common public knowledge, anything already stored unless it is an
-update with additional or changed information, and the Compartment vault
-passphrase itself.
+**Skip:** everything the STORE rule above excludes, anything already stored
+unless it is an update with additional or changed information, and the
+Compartment vault passphrase itself.
 
 Write each memory to stand alone: ONE claim of at most 200 characters by
 default - the vault enforces this and refuses lists, headings and

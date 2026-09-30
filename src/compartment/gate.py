@@ -31,6 +31,23 @@ from .crypto import CryptoError
 #: length, and stays on).
 DEFAULT_MAX_CHARS = 200
 
+#: What to store, in the one wording every surface ships: the MCP handshake,
+#: the memory_store tool, the managed CLAUDE.md block, the Hermes provider,
+#: the skill, GEMINI.md and the Oh My Pi tool. The gate above decides a
+#: memory's shape; this sentence decides what deserves one. It lives here, in
+#: a module every entry point already imports, so there is one copy to edit.
+#: The copies that cannot import it (Markdown, TypeScript, the Hermes plugin
+#: that runs inside another program) are held to it by
+#: tests/test_instructions.py.
+STORE_RULE = (
+    "STORE anything worth referencing again in future work: names, "
+    "addresses, contacts, account IDs, passwords, API keys and other "
+    "credentials, lasting file locations and configuration, preferences, and "
+    "every durable fact or decision reached. Not transient chatter, one-off "
+    "trivia, things freely available on the internet, or the working details "
+    "of a task in progress, such as run results, errors, log contents and "
+    "temporary paths or settings.")
+
 
 class MemoryShapeError(CryptoError):
     """A store refused for its shape, with the fix in the message."""

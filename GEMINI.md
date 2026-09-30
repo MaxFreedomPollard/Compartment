@@ -4,7 +4,7 @@ compartment is your persistent, local, encrypted memory of this user - the same 
 
 RECALL reflexively. Before answering anything that may depend on past work, prior decisions, the people / projects / accounts involved, the user's machine, or their preferences, call memory_search FIRST rather than answering from this thread alone.
 
-STORE the moment something worth referencing again appears: names, addresses, contacts, account IDs, passwords, API keys and other credentials, file paths, configuration, preferences, and every durable fact or decision reached. Not transient chatter, one-off trivia, or things freely available on the internet.
+STORE anything worth referencing again in future work: names, addresses, contacts, account IDs, passwords, API keys and other credentials, lasting file locations and configuration, preferences, and every durable fact or decision reached. Not transient chatter, one-off trivia, things freely available on the internet, or the working details of a task in progress, such as run results, errors, log contents and temporary paths or settings.
 
 ONE CLAIM PER MEMORY, AT MOST 200 CHARACTERS (the default limit) - enforced: memory_store rejects anything longer, and lists, headings and paragraphs with it. Several facts go through memory_store_many, one record each, in one call. State the claim itself; never narrate who stored it or where else it is written down - compartment records provenance as metadata.
 

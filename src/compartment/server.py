@@ -51,11 +51,7 @@ COMPARTMENT_INSTRUCTIONS = (
     "work, prior decisions, the people / projects / accounts involved, the "
     "user's machine, or their preferences, call memory_search FIRST rather "
     "than answering from this thread alone.\n\n"
-    "STORE the moment something worth referencing again appears: names, "
-    "addresses, contacts, account IDs, passwords, API keys and other "
-    "credentials, file paths, configuration, preferences, and every durable "
-    "fact or decision reached. Not transient chatter, one-off trivia, or "
-    "things freely available on the internet.\n\n"
+    + gate.STORE_RULE + "\n\n"
     "ONE CLAIM PER MEMORY, AT MOST 200 CHARACTERS (the default limit) - "
     "enforced: memory_store "
     "rejects anything longer, and lists, headings and paragraphs with it. "
@@ -326,11 +322,15 @@ def memory_store(text: str, source: str, namespace: str | None = None,
                  kind: Literal["fact", "opinion"] = "fact",
                  supersedes: list[str] | None = None) -> str:
     """Save ONE claim to the user's persistent, encrypted, cross-session
-    memory: anything worth recalling later that is not common public knowledge
-    - names, addresses, contacts, account IDs, passwords, API keys and other
-    credentials, file paths, configuration, preferences, and durable facts or
-    decisions. Call it the moment such information appears; do not store
-    transient chatter or one-off trivia.
+    memory.
+
+    STORE anything worth referencing again in future work: names, addresses,
+    contacts, account IDs, passwords, API keys and other credentials, lasting
+    file locations and configuration, preferences, and every durable fact or
+    decision reached. Not transient chatter, one-off trivia, things freely
+    available on the internet, or the working details of a task in progress,
+    such as run results, errors, log contents and temporary paths or
+    settings.
 
     `text` is ONE claim, at most 200 characters (the max_memory_chars
     default) - enforced, and lists, headings and paragraphs are refused with
