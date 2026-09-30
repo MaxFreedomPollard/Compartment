@@ -1,5 +1,5 @@
 name: compartment
-version: 4.10.1
+version: 4.11.0
 description: "Compartment - high-security, fully offline, encrypted vector memory. AEAD-encrypted vault, locked-by-default after restart, native Hermes provider, no API key."
 # The engine. `hermes plugins install compartment` (the plugin catalog) and
 # `hermes memory setup` install it into the Hermes environment from this
