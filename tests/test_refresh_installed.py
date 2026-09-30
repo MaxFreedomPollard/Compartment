@@ -21,12 +21,15 @@ from compartment import agent_skill, claude_hooks, cli, gate
 @pytest.fixture()
 def homes(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Path.home() reads USERPROFILE on Windows and never looks at HOME, so a
+    # HOME override alone left the refresh looking in the runner's real home.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(agent_skill, "SKILL_TARGETS", {
         "claude": (None, tmp_path / ".claude"),
         "hermes": ("HERMES_HOME", tmp_path / ".hermes"),
         "openclaw": ("OPENCLAW_HOME", tmp_path / ".openclaw"),
     })
-    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
     monkeypatch.setenv("CLAUDE_MD", str(tmp_path / ".claude" / "CLAUDE.md"))
     return tmp_path
