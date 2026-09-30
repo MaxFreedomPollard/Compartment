@@ -465,14 +465,20 @@ def unregister(client: Client, path: Path | None = None) -> bool:
         header = f"[{client.root}.{NAME}]"
         if header not in text:
             return False
-        # A TOML table runs until the next table header or the end of file.
+        # Our table is its header plus the key/value lines directly under it.
+        # A blank line or a comment ends that: in TOML a comment block sitting
+        # just above the next `[table]` documents THAT table, and dropping it
+        # with ours would quietly delete somebody else's note. So we stop
+        # dropping at the first blank or comment line (or the next header) and
+        # keep everything from there on.
         out_lines, dropping = [], False
         for line in text.splitlines(keepends=True):
             stripped = line.strip()
             if stripped == header:
                 dropping = True
                 continue
-            if dropping and stripped.startswith("["):
+            if dropping and (not stripped or stripped.startswith("#")
+                             or stripped.startswith("[")):
                 dropping = False
             if not dropping:
                 out_lines.append(line)
