@@ -654,7 +654,7 @@ Global flags, before the command: `--vault PATH`, `--caller NAME`,
 | `opinions audit` | backfill `kind` on opinion-shaped records, cluster overlapping live opinions, resolve with `--keep-newest`. `--threshold`, `--no-backfill`, `--json` |
 | `link` / `relations` / `unlink` | the relation graph, with validity windows (`--from`, `--to`, `--as-of`) |
 | `panel` (`menubar`, `tray`) | the app. `--show`, `--self-check`, `--render`, `--login` |
-| `integrate <agent>` | wire claude, hermes, openclaw or any listed client, and install `/compartmentalize`. `--list`, `--all`, `--no-import`, `--no-hooks` |
+| `integrate <agent>` | wire claude, hermes, openclaw or any listed client, and install `/compartmentalize`. `--list`, `--all`, `--no-import`, `--no-hooks`; `integrate --refresh` updates the instructions an earlier install wrote into agent files and nothing else |
 | `hook` | the Claude Code capture hook: `install --pin-vault`, `uninstall`, `status`, `capture` |
 | `import-claude` | pull in what Claude Code already wrote. `--dir`, `--namespace`, `--dry-run` |
 | `serve` | the MCP server, over stdio |
@@ -669,7 +669,7 @@ Global flags, before the command: `--vault PATH`, `--caller NAME`,
 | `pack` | `build`, `install`, `remove`, `list`, `export` signed memory packs (`--trusted-key`) |
 | `bench` | `--records`, `--longmemeval`, `--variant`, `--limit` |
 | `setup` | `download-model`, `download-longmemeval`, `airgap-bundle` |
-| `update` | upgrade in place. `--source` takes GitHub main, `--no-app` skips the restart |
+| `update` | upgrade in place, then refresh the instructions in agent files. `--source` takes GitHub main, `--no-app` skips the restart |
 | `uninstall` | remove it. The vault is kept unless you pass `--purge` |
 
 `compartment panel --login on | off | status` controls starting at login (on

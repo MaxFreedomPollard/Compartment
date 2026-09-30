@@ -437,6 +437,17 @@ def cmd_update(args) -> None:
             print("  embedding daemon stopped - the next search starts the new build")
     except Exception:                                    # noqa: BLE001
         pass
+    # The instructions earlier installs wrote into agent files are copies,
+    # still last version's. Refreshing them takes the NEW build - this process
+    # is the old one - so it is run, and says what it changed.
+    try:
+        ref = subprocess.run([shutil.which("compartment") or "compartment",
+                              "integrate", "--refresh"],
+                             capture_output=True, text=True, timeout=120)
+        if ref.returncode == 0 and ref.stdout.strip():
+            print(ref.stdout.rstrip())
+    except (OSError, subprocess.SubprocessError):
+        pass
     if not args.no_app and sys.platform in ("darwin", "win32"):
         _restart_status_bar_app(args.vault)
 
@@ -1494,6 +1505,70 @@ def _install_agent_skill(target: str) -> None:
           "conversation into the vault.")
 
 
+def _refresh_installed() -> list[str]:
+    """Bring up to date the instructions an earlier install wrote into agent
+    files: the fenced block in CLAUDE.md, the /compartmentalize skill, and the
+    Hermes provider plugin. Returns one line per thing changed.
+
+    Those are copies, and a new version does not reach them by itself: the
+    MCP handshake speaks with the installed code, while an agent that also
+    reads last version's CLAUDE.md block is told two different things.
+
+    Only what is already there is touched, and nothing else about the wiring:
+    no capture hook (re-running `integrate claude` would put one back that
+    the user had turned off), no registration, no import. An edited skill is
+    backed up before it is replaced, as `integrate` does."""
+    done: list[str] = []
+    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    try:
+        before = md.read_text(encoding="utf-8") if md.is_file() else ""
+        if _CLAUDE_MD_BEGIN in before and _CLAUDE_MD_END in before:
+            _write_managed_claude_md()
+            if md.read_text(encoding="utf-8") != before:
+                done.append(f"updated the compartment block in {md}")
+    except OSError as exc:
+        done.append(f"! could not update {md} ({exc})")
+
+    for target in agent_skill.SKILL_TARGETS:
+        if not agent_skill.is_installed(target) or agent_skill.is_current(target):
+            continue
+        try:
+            r = agent_skill.install(target)
+        except (OSError, ValueError) as exc:
+            done.append(f"! could not update the {target} skill ({exc})")
+            continue
+        line = f"updated the /compartmentalize skill at {r['path']}"
+        if r["backup"]:
+            line += f" (the previous copy is kept at {r['backup']})"
+        done.append(line)
+
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    plug_src = _data_dir() / "hermes-plugin"
+    plug_dst = hermes_home / "plugins" / "compartment"
+    if (plug_dst / "plugin.yaml").is_file():
+        try:
+            changed = False
+            for f in ("__init__.py", "plugin.yaml"):
+                src, dst = plug_src / f, plug_dst / f
+                if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+                    shutil.copy2(src, dst)
+                    changed = True
+            if changed:
+                done.append(f"updated the Hermes provider plugin in {plug_dst} "
+                            "(restart Hermes to load it)")
+        except OSError as exc:
+            done.append(f"! could not update the Hermes plugin ({exc})")
+    return done
+
+
+def _print_refresh(done: list[str]) -> None:
+    if not done:
+        print("The instructions in your agents' files are already current.")
+        return
+    for line in done:
+        print(f"  {'' if line.startswith('!') else '✓ '}{line}")
+
+
 #: The three that get the full treatment - an MCP registration, the
 #: /compartmentalize skill in their own skills directory, and for Claude the
 #: capture hook and the file-memory import. Everything in `clients.CLIENTS`
@@ -1503,6 +1578,9 @@ DEEP_TARGETS = ("claude", "hermes", "openclaw")
 
 def cmd_integrate(args) -> None:
     """One-command wiring into an agent ecosystem."""
+    if getattr(args, "refresh", False):
+        _print_refresh(_refresh_installed())
+        return
     if getattr(args, "list", False):
         _integrate_list(args)
         return
@@ -2263,6 +2341,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-hooks", action="store_true",
                    help="wire up, but install no capture hook (add it later "
                         "with `compartment hook install`)")
+    p.add_argument("--refresh", action="store_true",
+                   help="update the instructions an earlier install wrote "
+                        "into agent files (the CLAUDE.md block, the skill, "
+                        "the Hermes plugin) and nothing else")
     p.set_defaults(fn=cmd_integrate)
 
     ps = sub.add_parser("setup", help="models + air-gap bundles")
