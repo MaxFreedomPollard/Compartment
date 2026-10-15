@@ -12,6 +12,7 @@ Windows) and are never written to any filesystem. These tests hold both ends
 of that: the public values must be useless without the secret, and the secret
 must genuinely die with the boot.
 """
+import errno
 import hashlib
 import os
 import pathlib
@@ -226,6 +227,61 @@ def test_a_read_error_does_not_destroy_a_valid_credential(monkeypatch):
     assert path.is_file(), "the credential must still be there"
     monkeypatch.setattr(pathlib.Path, "read_text", real_read)
     assert session.get(VAULT) == KEY
+
+
+class _OsWith:
+    """The session module's `os`, with one function replaced."""
+
+    def __init__(self, **replaced):
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+def test_a_lookup_during_an_unlock_never_deletes_the_credential(
+        isolated_store, monkeypatch):
+    """store() truncated the credential in place and then wrote it. A get()
+    in another process that looked in between found an empty file, took it
+    for one written by an older build and deleted it; the writer finished
+    into the deleted file, and `compartment unlock` reported success with
+    nothing stored. The reader here looks at the moment the credential is
+    written."""
+    p = session.store(VAULT, KEY)
+    files = sorted(f.name for f in isolated_store.iterdir())
+    new_key = bytes(range(32, 64))
+    seen = []
+
+    def write(fd, data):
+        if not seen:
+            seen.append(session.get(VAULT))
+        return os.write(fd, data)
+
+    with monkeypatch.context() as m:
+        m.setattr(session, "os", _OsWith(write=write))
+        assert session.store(VAULT, new_key) == p
+    assert seen == [KEY], "a reader in the window must find the old credential"
+    assert session.get(VAULT) == new_key
+    assert sorted(f.name for f in isolated_store.iterdir()) == files
+
+
+def test_a_credential_write_that_fails_keeps_the_old_one(isolated_store,
+                                                         monkeypatch):
+    """A write that failed part way (a full disk) left the credential
+    truncated, and the next lookup deleted it: the vault relocked without a
+    word. The old credential has to stay, with nothing left beside it."""
+    session.store(VAULT, KEY)
+    files = sorted(f.name for f in isolated_store.iterdir())
+
+    def write(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setattr(session, "os", _OsWith(write=write))
+        with pytest.raises(OSError, match="No space left"):
+            session.store(VAULT, bytes(range(32, 64)))
+    assert session.get(VAULT) == KEY
+    assert sorted(f.name for f in isolated_store.iterdir()) == files
 
 
 def test_no_boot_clock_is_a_cryptoerror_not_a_stray_runtimeerror(monkeypatch):
