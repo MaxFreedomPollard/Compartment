@@ -1,15 +1,20 @@
 """Regression cover for ACL grant precedence, vocabulary and isolation.
 
-Four defects are pinned here:
+Five defects are pinned here:
   1. wildcard grants resolved first-match-wins in dict order
   2. non-"rw" grants ("none", typos) still permitted reads
   3. an empty caller entry fell back to the "*" entry and was promoted
   4. VaultConfig instances shared the module default's inner dicts
+  5. a save rewrote the file in place, so an open could meet half of it
 """
 import copy
+import errno
+import json
+import pathlib
 
 import pytest
 
+from compartment import acl
 from compartment.acl import DEFAULT_CONFIG, AclError, VaultConfig
 
 
@@ -207,6 +212,94 @@ def test_saved_and_reloaded_config_keeps_its_own_state(tmp_path):
     with pytest.raises(AclError):
         loaded.grant_for("scoped", "main")
     assert VaultConfig().grant_for("scoped", "main") == "rw"   # fresh default
+
+
+def _saved_config(tmp_path):
+    vault_path = str(tmp_path / "x.vault")
+    cfg = VaultConfig()
+    cfg.settings["auto_lock_minutes"] = 45
+    cfg.save(vault_path)
+    return vault_path, cfg
+
+
+def test_an_open_during_a_save_reads_the_old_settings_whole(tmp_path,
+                                                            monkeypatch):
+    """save() truncated the file and then wrote it, in place, and every
+    unlock reads this file. An open in between (the panel toggling a setting
+    while an MCP server or the CLI opens the vault) got an empty file and a
+    JSONDecodeError that no caller handles. The reader here looks at the
+    moment the save opens the file it is about to write."""
+    vault_path, cfg = _saved_config(tmp_path)
+    seen = []
+    real_open = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if "w" in mode:
+            try:
+                seen.append(
+                    VaultConfig.load(vault_path).settings["auto_lock_minutes"])
+            except ValueError as exc:
+                seen.append(f"{type(exc).__name__}: {exc}")
+        return f
+
+    cfg.settings["auto_lock_minutes"] = 46
+    with monkeypatch.context() as m:
+        m.setattr(acl, "open", opening, raising=False)
+        cfg.save(vault_path)
+    assert seen == [45]
+    assert VaultConfig.load(vault_path).settings["auto_lock_minutes"] == 46
+    # Same file, same JSON as before.
+    assert pathlib.Path(VaultConfig.path_for(vault_path)).read_text(
+        encoding="utf-8") == json.dumps(
+            {"callers": cfg.callers, "settings": cfg.settings}, indent=2)
+
+
+class _DiskFillsUp:
+    """A file that takes 40 characters and then reports the disk full, the
+    way a write ends on a disk with no room left."""
+
+    def __init__(self, f):
+        self._f, self._room = f, 40
+
+    def write(self, s):
+        if len(s) > self._room:
+            self._f.write(s[:self._room])
+            self._room = 0
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self._room -= len(s)
+        return self._f.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+def test_a_save_on_a_full_disk_leaves_the_old_settings_whole(tmp_path,
+                                                             monkeypatch):
+    """The cut-short file stayed cut short, so every later unlock, in every
+    process, failed to parse it until someone repaired the JSON by hand."""
+    vault_path, cfg = _saved_config(tmp_path)
+    path = pathlib.Path(VaultConfig.path_for(vault_path))
+    before = path.read_bytes()
+    real_open = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return _DiskFillsUp(f) if "w" in mode else f
+
+    cfg.settings["auto_lock_minutes"] = 46
+    with monkeypatch.context() as m:
+        m.setattr(acl, "open", opening, raising=False)
+        with pytest.raises(OSError, match="No space left"):
+            cfg.save(vault_path)
+    assert path.read_bytes() == before
+    assert VaultConfig.load(vault_path).settings["auto_lock_minutes"] == 45
 
 
 # -- no-regression: the shipped default and packs ----------------------------
