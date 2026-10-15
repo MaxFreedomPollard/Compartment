@@ -103,3 +103,38 @@ def test_encrypted_pack(vault):
     out = packs.install_pack(vault, blob, caller="test", passphrase="PackSecret",
                              trusted_keys=trust)
     assert out["records"] == 1
+
+
+def test_removing_a_pack_takes_its_vectors_out_of_the_index(vault):
+    """remove_pack took each record's own key out of the index, but a
+    record's vectors live under its window keys, so the pack's vectors stayed
+    in the live index after its rows were gone. The next store reused their
+    keys: a search for the removed content found the new memory, at a
+    cosine of 1.0 (and on the HNSW index the add failed on a duplicate key)."""
+    dim = int(vault.header.model["dim"])
+    rng = np.random.default_rng(12)
+
+    def unit():
+        x = rng.standard_normal(dim).astype(np.float32)
+        return x / np.linalg.norm(x)
+    for i in range(3):
+        vault.store(f"Organic memory {i} about the garden", caller="test",
+                    vec=unit())
+    before = len(vault.index)
+    ident = packs.new_identity("author")
+    pack_vecs = np.stack([unit() for _ in range(5)])
+    blob = packs.build_pack(
+        name="demo", version="1.0.0", description="", identity=ident,
+        records=[{"text": f"Pack fact {i}"} for i in range(5)],
+        vectors=pack_vecs, model=dict(vault.header.model))
+    packs.install_pack(vault, blob, caller="test",
+                       trusted_keys=[ident["pub_hex"]])
+    assert len(vault.index) == before + 5
+    packs.remove_pack(vault, "demo", caller="test")
+    assert len(vault.index) == before
+    live = {r["id"] for r in vault.db.conn.execute("SELECT id FROM records")}
+    assert set(vault._id_by_ikey.values()) <= live
+    new = vault.store("A brand new memory about the car", caller="test",
+                      vec=unit())["id"]
+    (key, score), = vault.index.search(pack_vecs[0], 1)
+    assert not (vault._id_by_ikey.get(key) == new and score > 0.99)

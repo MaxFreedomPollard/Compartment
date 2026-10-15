@@ -316,9 +316,14 @@ def remove_pack(vault, name: str, caller: str = "user", _save: bool = True) -> i
     if not rows:
         raise PackError(f"Pack {name!r} is not installed")
     for row in rows:
+        # Every embedding window, not only the record's own key, as
+        # Vault.forget does: a window left in the index keeps mapping to the
+        # deleted id, and the next store is handed its key again.
+        keys = set(vault.db.vector_keys(row["id"])) | {row["ikey"]}
         vault.db.delete(row["id"], shred=False)
-        vault.index.remove(row["ikey"])
-        vault._id_by_ikey.pop(row["ikey"], None)
+        for k in keys:
+            vault.index.remove(k)
+            vault._id_by_ikey.pop(k, None)
     vault.db.conn.execute("VACUUM")
     registry = json.loads(vault.db.get_meta("packs", "{}"))
     registry.pop(name, None)
