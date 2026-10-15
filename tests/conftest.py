@@ -120,6 +120,45 @@ def no_real_supervisors(monkeypatch, tmp_path, request):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
 
 
+@pytest.fixture(autouse=True)
+def no_real_agent_tools(monkeypatch, tmp_path):
+    """No test, and no `compartment` child a test starts, can reach the real
+    `claude`, `hermes` or `openclaw` installed on the machine running the
+    suite.
+
+    `init` wires every agent it finds, and it finds them through user_path(),
+    which asks the login shell for PATH and then appends this process's own
+    PATH and ~/.local/bin. A scratch HOME is therefore no protection at all:
+    the end-to-end test that drives the real `compartment init` ran the real
+    `hermes memory setup` on a developer's machine, under the scratch HOME.
+    Hermes installed a second runtime there and rewrote its own launcher, an
+    absolute path inside the real ~/.hermes, to point at it; when pytest
+    removed the scratch directory, Hermes no longer started.
+
+    So the login shell becomes one that fails, which leaves the shell lookup
+    empty, and PATH is cut down to the interpreter's own bin directory plus
+    the system directories, so `compartment` still resolves and nothing the
+    user installed does. The floor user_path() adds (~/.local/bin and the
+    rest) is under the scratch HOME, which holds no tools. The agents' home
+    directories are pointed into the test's own tmp_path as well. A test
+    about user_path() itself sets SHELL and PATH on top of this.
+    """
+    from compartment import menubar
+    monkeypatch.setenv("SHELL", "/usr/bin/false")
+    own_bin = str(pathlib.Path(sys.executable).resolve().parent)
+    if sys.platform == "win32":
+        profile = os.environ.get("USERPROFILE", "")
+        keep = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+                if p and not (profile and p.lower().startswith(profile.lower()))]
+        monkeypatch.setenv("PATH", os.pathsep.join([own_bin, *keep]))
+    else:
+        monkeypatch.setenv("PATH", os.pathsep.join(
+            [own_bin, "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "agents" / "hermes"))
+    monkeypatch.setenv("OPENCLAW_HOME", str(tmp_path / "agents" / "openclaw"))
+    monkeypatch.setattr(menubar, "_USER_PATH", None)   # the per-process cache
+
+
 @pytest.fixture()
 def vault(vault_path):
     v = Vault.create(vault_path, PASS, creator="test")
