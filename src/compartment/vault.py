@@ -1255,6 +1255,12 @@ class Vault:
         # and let relevance decide how many come back.
         adaptive = top_k is None
         want = MAX_RESULTS if adaptive else int(top_k)
+        if want <= 0:
+            # The survivor loop below keeps a record before it compares the
+            # count, so an empty window has to be explicit, as in recent().
+            self._audit_and_capture(caller, "search",
+                                    f"q={query[:80]!r} hits=0")
+            return {"results": [], "note": DATA_NOT_INSTRUCTIONS}
         qvec = self.embedder.embed_query(query)
         boosted, vec_score, static = {}, {}, {}
         # Filters below run after ranking, so a pool sized to top_k can be

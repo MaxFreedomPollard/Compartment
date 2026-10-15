@@ -9,6 +9,7 @@ import threading
 import pytest
 
 from compartment import audit
+from compartment.acl import AclError
 from compartment.crypto import CryptoError
 from compartment.vault import Vault, VaultLockedError, VaultStaleError
 
@@ -330,3 +331,24 @@ def test_get_and_store_on_two_threads_keep_one_audit_chain(vault, monkeypatch):
     t.join(10)
     ok, _, msg = audit.verify(vault.db.conn)
     assert ok, msg
+
+
+def test_a_search_for_no_results_returns_none(vault):
+    """The survivor loop kept a record before comparing the count with top_k,
+    so a top_k of 0, or a negative one, still handed back the best match.
+    recent() already treats an empty window as empty."""
+    for text in ("The staging database runs Postgres 16",
+                 "Production runs Postgres 15 behind pgbouncer"):
+        vault.store(text, caller="test")
+    query = "which Postgres version do we run"
+    for k in (0, -3):
+        assert vault.search(query, caller="test", top_k=k)["results"] == []
+    assert len(vault.search(query, caller="test", top_k=1)["results"]) == 1
+    # Each was audited as a search, and the access check still comes first.
+    details = [r["detail"] for r in vault.db.conn.execute(
+        "SELECT detail FROM audit WHERE op = 'search' ORDER BY seq")]
+    assert [d.rsplit("hits=", 1)[1] for d in details] == ["0", "0", "1"]
+    vault.config.callers["hermes"] = {"default_namespace": "hermes",
+                                      "grants": {"hermes": "rw"}}
+    with pytest.raises(AclError):
+        vault.search(query, caller="hermes", namespace="main", top_k=0)
