@@ -250,6 +250,18 @@ def _posix_secret(name: str, create: bool) -> bytes | None:
             if secret is not None:
                 return secret
         if time.monotonic() > deadline:
+            if state == "pending":
+                # Still unwritten after all that time: its creator died
+                # between sizing it and writing it, and it would stay this
+                # way until a restart, failing every unlock and lookup. No
+                # credential can depend on it (store() keys one only with a
+                # secret that was written), so it goes, as at a restart.
+                _posix_forget(name)
+                if not create:
+                    return None
+                secret = _posix_create(name)
+                if secret is not None:
+                    return secret
             raise CryptoError(
                 f"Timed out waiting for another process to finish creating "
                 f"this boot's secret ({name}).")

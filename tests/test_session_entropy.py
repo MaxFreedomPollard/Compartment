@@ -365,3 +365,40 @@ def test_a_platform_with_no_holder_refuses_to_store(monkeypatch):
     monkeypatch.setattr(session, "_libc", no_shm)
     with pytest.raises(CryptoError):
         session.store(VAULT, KEY)
+
+
+def _leave_a_half_made_holder():
+    """What a first unlock killed between sizing this boot's holder and
+    filling it leaves behind: an object of the right size, all zero."""
+    fd = session._shm_open(session._holder(),
+                           os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.ftruncate(fd, session.SECRET_LEN)
+    finally:
+        os.close(fd)
+    assert session._posix_read(session._holder())[0] == "pending"
+
+
+@pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")
+def test_a_half_made_holder_does_not_block_every_unlock(monkeypatch):
+    """Every later unlock took the all-zero holder for another process still
+    writing it, waited the race timeout and failed, and so did every lookup,
+    until a restart: the vault could not be unlocked at all."""
+    monkeypatch.setattr(session, "_RACE_TIMEOUT", 0.05)
+    _leave_a_half_made_holder()
+    session.store(VAULT, KEY)
+    assert session.get(VAULT) == KEY
+
+
+@pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")
+def test_a_lookup_that_meets_a_half_made_holder_answers_locked(monkeypatch):
+    """No credential can be keyed with an all-zero holder, so a lookup that
+    finds one is looking at a dead credential, as after a restart."""
+    p = session.store(VAULT, KEY)
+    session._forget_boot_secret()               # the secret it was keyed with
+    _leave_a_half_made_holder()                 # and a creator that died
+    monkeypatch.setattr(session, "_RACE_TIMEOUT", 0.05)
+    assert session.get(VAULT) is None
+    assert not p.exists()
+    session.store(VAULT, KEY)
+    assert session.get(VAULT) == KEY
