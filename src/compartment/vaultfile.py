@@ -350,19 +350,29 @@ def write_vault_file(
     # the vault's mode after the rename below, so creating it at the umask
     # default (commonly 0644) reopens the vault to every local account on
     # every save, including one the user had chmod'd to 0600.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, VAULT_MODE)
-    with os.fdopen(fd, "wb") as f:
-        f.write(MAGIC)
-        f.write(struct.pack(">H", FORMAT_VERSION))
-        f.write(struct.pack(">I", len(hjson)))
-        f.write(hjson)
-        f.write(payload_ct)
-        f.flush()
-        os.fsync(f.fileno())
-    # O_CREAT only sets the mode when it actually creates the file, so a temp
-    # left behind by an earlier run keeps its old mode. Set it either way.
-    os.chmod(tmp, VAULT_MODE)
-    _atomic_replace(tmp, path)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, VAULT_MODE)
+        with os.fdopen(fd, "wb") as f:
+            f.write(MAGIC)
+            f.write(struct.pack(">H", FORMAT_VERSION))
+            f.write(struct.pack(">I", len(hjson)))
+            f.write(hjson)
+            f.write(payload_ct)
+            f.flush()
+            os.fsync(f.fileno())
+        # O_CREAT only sets the mode when it actually creates the file, so a temp
+        # left behind by an earlier run keeps its old mode. Set it either way.
+        os.chmod(tmp, VAULT_MODE)
+        _atomic_replace(tmp, path)
+    except BaseException:
+        # The vault itself is untouched on every way this can fail, so the
+        # copy is all there is to clean up: a full sealed copy when the
+        # replace was refused, part of one on a full disk.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, master_key: bytes) -> None:

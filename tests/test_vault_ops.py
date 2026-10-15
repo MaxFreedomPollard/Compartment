@@ -1,3 +1,4 @@
+import errno
 import os
 import signal
 import sqlite3
@@ -5,10 +6,11 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 
-from compartment import audit
+from compartment import audit, vaultfile
 from compartment.acl import AclError
 from compartment.crypto import CryptoError
 from compartment.vault import Vault, VaultLockedError, VaultStaleError
@@ -251,6 +253,112 @@ def test_a_lock_whose_save_fails_still_locks(vault, vault_path):
     _assert_holds_no_plaintext(vault)
     with pytest.raises(VaultLockedError):
         vault.search("stored", caller="test")
+
+
+class _With:
+    """A module as one other module sees it, with some functions replaced."""
+
+    def __init__(self, module, **replaced):
+        self._module = module
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+def test_a_save_that_cannot_replace_the_vault_leaves_no_copy_beside_it(
+        vault, vault_path, monkeypatch):
+    """On Windows a reader, an indexer or an antivirus scan holding the
+    vault open past the replace's retries made save fail, and the full
+    sealed copy it had just written stayed beside the vault as .tmp."""
+    vault.store("A memory that has to outlive a failed save.", caller="test")
+    tries, naps = [], []
+
+    def replace(src, dst):
+        tries.append(dst)
+        raise PermissionError(13, "The process cannot access the file "
+                                  "because it is being used by another "
+                                  "process", dst)
+
+    def nap(seconds):
+        naps.append(seconds)
+        assert len(naps) <= 100, "the replace has to give up"
+
+    with monkeypatch.context() as m:
+        m.setattr(vaultfile, "os", _With(os, name="nt", replace=replace))
+        m.setattr(vaultfile, "time", _With(time, sleep=nap))
+        with pytest.raises(PermissionError):
+            vault.save()
+    assert len(tries) == 20, "the Windows retries all ran"
+    assert not os.path.exists(vault_path + ".tmp")
+    assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 1
+
+
+class _DiskFillsUp:
+    """A file that takes 1000 bytes, the header among them, and then
+    reports the disk full part way through the payload."""
+
+    def __init__(self, f):
+        self._f, self._room = f, 1000
+
+    def write(self, b):
+        if len(b) > self._room:
+            self._f.write(b[:self._room])
+            self._room = 0
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self._room -= len(b)
+        return self._f.write(b)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+def test_a_save_that_runs_out_of_disk_leaves_no_partial_copy(
+        vault, vault_path, monkeypatch):
+    """The partial copy stayed, and with it the space it had taken, until
+    the next save that worked."""
+    vault.store("A memory that has to outlive a failed save.", caller="test")
+    real_fdopen = os.fdopen
+
+    def fdopen(fd, *args, **kwargs):
+        return _DiskFillsUp(real_fdopen(fd, *args, **kwargs))
+
+    with monkeypatch.context() as m:
+        m.setattr(vaultfile, "os", _With(os, fdopen=fdopen))
+        with pytest.raises(OSError, match="No space left"):
+            vault.save()
+    assert not os.path.exists(vault_path + ".tmp")
+    assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 1
+
+
+def test_a_save_still_syncs_its_copy_before_the_rename(vault, vault_path,
+                                                       monkeypatch):
+    """What the cleanup must leave alone on the way that works: the copy is
+    synced before it is renamed over the vault, and the vault stays 0600."""
+    vault.store("A memory saved the ordinary way.", caller="test")
+    order = []
+
+    def fsync(fd):
+        order.append("fsync")
+        return os.fsync(fd)
+
+    def replace(src, dst):
+        order.append("replace")
+        return os.replace(src, dst)
+
+    with monkeypatch.context() as m:
+        m.setattr(vaultfile, "os", _With(os, fsync=fsync, replace=replace))
+        vault.save()
+    assert order == ["fsync", "replace"]
+    assert not os.path.exists(vault_path + ".tmp")
+    if os.name != "nt":
+        assert os.stat(vault_path).st_mode & 0o777 == 0o600
 
 
 class _ContendedLock:
