@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+import threading
 
 import pytest
 
@@ -249,3 +250,83 @@ def test_a_lock_whose_save_fails_still_locks(vault, vault_path):
     _assert_holds_no_plaintext(vault)
     with pytest.raises(VaultLockedError):
         vault.search("stored", caller="test")
+
+
+class _ContendedLock:
+    """A vault's operation lock that says when a second thread had to wait
+    for it, which is how the tests below order two threads without sleeping."""
+
+    def __init__(self, contended: threading.Event):
+        self._lock = threading.RLock()
+        self._contended = contended
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self._contended.set()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+def test_get_finishes_before_a_lock_takes_the_key(vault, monkeypatch):
+    """get() was the one public operation outside the vault's lock. The
+    server's auto-lock could drop the key between get() reading the row and
+    decrypting it, and the decrypt with no key was reported as tampering."""
+    rid = vault.store("The spare key is under the blue flowerpot",
+                      caller="test")["id"]
+    go = threading.Event()             # the lock is waiting, or has finished
+    vault._oplock = _ContendedLock(go)
+    row_read = threading.Event()
+    real_get_row = vault.db.get_row
+
+    def get_row(record_id):
+        row = real_get_row(record_id)
+        if threading.current_thread().name == "getter":
+            row_read.set()
+            go.wait(10)
+        return row
+    monkeypatch.setattr(vault.db, "get_row", get_row)
+    out = {}
+
+    def getter():
+        try:
+            out["text"] = vault.get(rid, caller="test")["text"]
+        except Exception as exc:                        # noqa: BLE001
+            out["error"] = f"{type(exc).__name__}: {exc}"
+    t = threading.Thread(target=getter, name="getter")
+    t.start()
+    assert row_read.wait(10)
+    vault.lock()
+    go.set()
+    t.join(10)
+    assert "flowerpot" in out.get("text", ""), out
+
+
+def test_get_and_store_on_two_threads_keep_one_audit_chain(vault, monkeypatch):
+    """get() appended its audit row without the vault's lock, and an append
+    reads the head before it inserts. A store on another thread in between
+    linked to the same head: a forked chain, saved into the vault file, that
+    every later verify reports as a break."""
+    rid = vault.store("The boiler was serviced in May", caller="test")["id"]
+    go = threading.Event()             # the store is waiting, or has finished
+    vault._oplock = _ContendedLock(go)
+    head_read = threading.Event()
+    real_entry_hash = audit._entry_hash
+
+    def entry_hash(prev, ts, caller, op, detail):
+        if threading.current_thread().name == "getter" and op == "get":
+            head_read.set()            # get() holds the head it will link to
+            go.wait(10)
+        return real_entry_hash(prev, ts, caller, op, detail)
+    monkeypatch.setattr(audit, "_entry_hash", entry_hash)
+    t = threading.Thread(target=lambda: vault.get(rid, caller="test"),
+                         name="getter")
+    t.start()
+    assert head_read.wait(10)
+    vault.store("The chimney was swept in June", caller="test")
+    go.set()
+    t.join(10)
+    ok, _, msg = audit.verify(vault.db.conn)
+    assert ok, msg

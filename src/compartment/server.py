@@ -171,11 +171,16 @@ def _autolock_loop() -> None:
     while True:
         try:
             time.sleep(30)
-            v = _state["vault"]
-            mins = _state["auto_lock_min"]
-            if v is not None and not v._locked and mins > 0:
-                if time.time() - _state["last_op"] > mins * 60:
-                    v.lock()
+            # Under the tool gate, like a tool call: a call either finishes
+            # first, and the vault is not idle any more, or starts after the
+            # lock and reopens through _vault(). Without it, a call arriving
+            # while the lock saved took the open handle and found it locked.
+            with _toolgate:
+                v = _state["vault"]
+                mins = _state["auto_lock_min"]
+                if v is not None and not v._locked and mins > 0:
+                    if time.time() - _state["last_op"] > mins * 60:
+                        v.lock()
         except Exception as exc:                        # noqa: BLE001
             # lock() saves, and a save raises VaultStaleError when another
             # process wrote the vault. Letting that escape would end this

@@ -1434,6 +1434,7 @@ class Vault:
                 "counts": {"total": total, "organic": organic,
                            "seeded": total - organic}}
 
+    @_synchronized
     def get(self, record_id: str, caller: str) -> dict:
         self._require_open()
         row = self.db.get_row(record_id)
