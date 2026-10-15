@@ -15,6 +15,10 @@ The status panel used to open the vault this way on every click, so a click
 at the moment an agent stored something could lose it. Agents and the CLI
 still open it this way. Now the state is taken as the file is read.
 """
+import os
+import struct
+import zlib
+
 import pytest
 
 from compartment import vaultfile
@@ -78,3 +82,59 @@ def test_an_open_that_raced_a_write_knows_it_is_behind(vault_path,
                      source="t")
     on_disk = _texts(Vault.unlock(vault_path, passphrase=PASS))
     assert any("Stored while the other process" in t for t in on_disk)
+
+
+def _torn_append(path, nbytes):
+    """The end of an append that died part way, `nbytes` long: a length
+    prefix that checks out and less body than it declares. The next open
+    discards it as a write that was never acknowledged."""
+    length = struct.pack(">I", nbytes)
+    head = length + struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF)
+    with open(path, "ab") as f:
+        f.write((head + b"\0" * nbytes)[:nbytes])
+
+
+def test_a_compaction_of_the_same_length_in_the_same_tick_is_noticed(
+        vault_path):
+    """The staleness check compared size and modification time only.
+    Another process's open compacts the journal into a new file; when that
+    file had the old length and, on a coarse clock (ext4, NTFS), the old
+    time, the writer still thought it was current and appended an entry
+    sealed for its old journal position, and every later open failed with
+    TamperError. Only the inode shows that the file is another one.
+
+    Equal lengths happen on their own for about one journal length in
+    4096, at lengths that depend on the SQLite build, so here the compacted
+    file is brought to the old length with the torn end of an interrupted
+    append, and the old time is given back with os.utime."""
+    writer = Vault.create(vault_path, PASS, creator="t")
+    writer.store("Memory one, journalled before the other process opened.",
+                 caller="t", source="t")
+    seen = os.stat(vault_path)
+    Vault.unlock(vault_path, passphrase=PASS)      # replays and compacts
+    gap = seen.st_size - os.path.getsize(vault_path)
+    assert gap > 0, "precondition: the compaction left the file shorter"
+    _torn_append(vault_path, gap)
+    os.utime(vault_path, ns=(seen.st_atime_ns, seen.st_mtime_ns))
+    now = os.stat(vault_path)
+    assert (now.st_size, now.st_mtime_ns) == (seen.st_size, seen.st_mtime_ns)
+    assert now.st_ino != seen.st_ino
+
+    assert writer.is_stale()
+    with pytest.raises(VaultStaleError):
+        writer.store("A write from the copy that fell behind.", caller="t",
+                     source="t")
+    on_disk = _texts(Vault.unlock(vault_path, passphrase=PASS))
+    assert any("Memory one" in t for t in on_disk)
+
+
+def test_an_append_in_the_same_tick_is_still_noticed(vault_path):
+    """The other half of the check: an append keeps the file's inode and,
+    on a coarse clock, its time, so its size is what shows it."""
+    writer = Vault.create(vault_path, PASS, creator="t")
+    seen = os.stat(vault_path)
+    other = Vault.unlock(vault_path, passphrase=PASS)   # nothing to compact
+    other.store("Stored by the other process.", caller="t", source="t")
+    os.utime(vault_path, ns=(seen.st_atime_ns, seen.st_mtime_ns))
+    assert os.stat(vault_path).st_ino == seen.st_ino
+    assert writer.is_stale()

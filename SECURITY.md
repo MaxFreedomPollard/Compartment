@@ -140,7 +140,7 @@ if you want every single open to need both factors, run `compartment unlock
 
 Several agent processes (Hermes provider, Claude via MCP, the CLI) may
 share one vault: an advisory file lock serializes every journal append and
-save, and each process detects foreign writes (mtime/size) and reloads
+save, and each process detects foreign writes (inode/size/mtime) and reloads
 before proceeding - a stale writer gets a loud VaultStaleError, never
 silent corruption. Namespace ACLs are per-caller; `--caller` identity is
 declarative (see the hostile-host limitation above).
