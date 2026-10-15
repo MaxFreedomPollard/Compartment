@@ -1,5 +1,6 @@
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -8,7 +9,7 @@ import pytest
 
 from compartment import audit
 from compartment.crypto import CryptoError
-from compartment.vault import Vault, VaultLockedError
+from compartment.vault import Vault, VaultLockedError, VaultStaleError
 
 from conftest import PASS, SRC
 
@@ -206,3 +207,45 @@ def test_writing_into_a_deleted_vault_file_is_refused(vault, vault_path):
     assert "gone" in str(exc.value).lower()
     assert not os.path.exists(vault_path), \
         "the refused write recreated the file anyway"
+
+
+def _assert_holds_no_plaintext(v):
+    """A locked vault keeps neither the decrypted database, whose full-text
+    table holds every memory in plain text, nor the vectors and the index."""
+    with pytest.raises(sqlite3.ProgrammingError):
+        v.db.conn.execute("SELECT text FROM fts")
+    assert v.index is None and v._id_by_ikey == {}
+
+
+def test_a_locked_vault_holds_no_decrypted_memories(vault, vault_path):
+    """lock() dropped the key and nothing else: the in-RAM database stayed
+    open with every memory's text in it, readable without any key, for as
+    long as the object lived. In the server that is the whole idle period
+    auto-lock exists for."""
+    r = vault.store("The VPN password hint is the dog's name", caller="test")
+    vault.search("VPN password hint", caller="test")    # audited in RAM only
+    vault.lock()
+    _assert_holds_no_plaintext(vault)
+    with pytest.raises(VaultLockedError):
+        vault.get(r["id"], caller="test")
+    # The lock still saved before it let go: the search's audit row is on disk.
+    again = Vault.unlock(vault_path, passphrase=PASS)
+    ops = [row["op"] for row in again.db.conn.execute(
+        "SELECT op FROM audit ORDER BY seq")]
+    assert ops[-1] == "search"
+
+
+def test_a_lock_whose_save_fails_still_locks(vault, vault_path):
+    """lock() saved first and dropped the key only if the save worked. Once
+    another process had written the file, every save raised VaultStaleError,
+    so the server's auto-lock retried on the same handle every 30 seconds
+    and the key stayed in RAM for as long as the server stayed idle."""
+    vault.store("stored before the server went idle", caller="test")
+    other = Vault.unlock(vault_path, raw_key=vault._master)
+    other.store("stored by another process meanwhile", caller="test")
+    with pytest.raises(VaultStaleError):
+        vault.lock()
+    assert vault._locked and vault._master is None
+    _assert_holds_no_plaintext(vault)
+    with pytest.raises(VaultLockedError):
+        vault.search("stored", caller="test")

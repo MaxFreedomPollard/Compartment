@@ -1764,10 +1764,20 @@ class Vault:
         a mutable buffer end to end, which PyNaCl will not accept (it requires
         `bytes`), so that is a wider change than this one. See SECURITY.md,
         which already states that Python cannot guarantee zeroization.
+
+        The key goes even when the save fails, and so do the decrypted
+        database (its full-text table holds every memory in plain text) and
+        the index. A handle another process has written to can never save
+        again, so a lock that waited for its save kept the key for good.
         """
-        self.save(signing_key=signing_key)
-        self._master = None
-        self._locked = True
+        try:
+            self.save(signing_key=signing_key)
+        finally:
+            self._master = None
+            self._locked = True
+            self.db.conn.close()
+            self.index = None
+            self._id_by_ikey = {}
 
     # ---------------------------------------------------------------- status
 

@@ -679,16 +679,20 @@ def memory_selftest() -> str:
 
 
 def _drop_key(v: Vault) -> None:
-    """Drop the master key from RAM and mark the vault locked.
+    """Drop the master key and the decrypted memories from RAM and mark the
+    vault locked.
 
-    What Vault.lock() does after its save succeeds, on its own: the panic path
-    needs it even when the save fails. Dropping the last reference is the whole
+    What Vault.lock() does after its save, on its own: the panic path needs it
+    even when lock() itself fails. Dropping the last reference is the whole
     of it. Scrubbing is not possible here: the key is immutable `bytes`, so
     zeroing a bytearray copy of it would leave the original untouched and put a
     second plaintext copy of the key on the heap on the way. Vault.lock() does
     the same thing for the same reason."""
     v._master = None
     v._locked = True
+    v.db.conn.close()
+    v.index = None
+    v._id_by_ikey = {}
 
 
 @mcp.tool(title="Lock the vault", annotations=ToolAnnotations(
@@ -706,11 +710,12 @@ def memory_lock() -> str:
         try:
             v.lock()
         except Exception as exc:                        # noqa: BLE001
-            # Vault.lock() saves BEFORE dropping the key, so a failed save (say
-            # VaultStaleError, another process wrote the vault) would otherwise
-            # leave the key in RAM and the vault unlocked - the exact opposite
-            # of what a panic lock is for. Losing an unflushed write is the
-            # smaller harm, and each write was already journaled to disk.
+            # Vault.lock() drops the key even when its save fails (say
+            # VaultStaleError, another process wrote the vault). A lock() that
+            # failed outright would still leave the key in RAM and the vault
+            # unlocked - the exact opposite of what a panic lock is for. Losing
+            # an unflushed write is the smaller harm, and each write was
+            # already journaled to disk.
             problems.append(f"flush failed, key dropped anyway: "
                             f"{type(exc).__name__}: {exc}")
             try:
