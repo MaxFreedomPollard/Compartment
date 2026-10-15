@@ -77,6 +77,32 @@ class VaultHeader:
 
     @staticmethod
     def from_json(d: dict) -> "VaultHeader":
+        # The header is plaintext, so a damaged or edited one has to fail
+        # here, as a corrupt header, and not as a TypeError deep inside an
+        # unlock that no caller recognises. Only the fields this build relies
+        # on are checked; unknown ones stay allowed (FORMAT.md section 3).
+        def is_int(x):
+            return isinstance(x, int) and not isinstance(x, bool)
+        problem = None
+        if not isinstance(d, dict):
+            problem = "it is not a JSON object"
+        elif not isinstance(d.get("vault_id"), str):
+            problem = "vault_id is not a string"
+        elif not is_int(d.get("payload_len")) or d["payload_len"] < 0:
+            problem = "payload_len is not a non-negative integer"
+        elif not isinstance(d.get("keyslots"), list) or \
+                not all(isinstance(s, dict) for s in d["keyslots"]):
+            problem = "keyslots is not a list of objects"
+        elif not isinstance(d.get("model"), dict) or \
+                not is_int(d["model"].get("dim")) or d["model"]["dim"] < 1:
+            problem = "model.dim is not a positive integer"
+        elif not isinstance(d.get("extra", {}), dict):
+            problem = "extra is not an object"
+        elif "wire" in d.get("extra", {}) and not is_int(d["extra"]["wire"]):
+            problem = "extra.wire is not an integer"
+        if problem:
+            raise VaultFormatError(
+                f"Vault header is corrupt (modified or damaged): {problem}")
         return VaultHeader(
             vault_id=d["vault_id"],
             created=d["created"],

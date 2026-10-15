@@ -298,28 +298,35 @@ def unwrap_master(keyslots: list[dict], secret: str,
     _pace_attempt()
     needs_keyfile = False
     for slot in keyslots:
-        if slot["type"] in ("passphrase", "recovery"):
-            try:
-                master = open_slot(slot, secret)
-            except TamperError:
-                continue
-            reset_attempt_pacing()   # the credential was right; stop pacing
-            return master
-        elif slot["type"] == "passphrase+keyfile":
-            if keyfile is None:
-                needs_keyfile = True
-                continue
-            if sha256(keyfile)[:16] != slot.get("keyfile_id"):
-                _record_failed_attempt()
-                raise CryptoError(
-                    "That is not this vault's keyfile (contents do not match "
-                    "the enrolled second factor)")
-            try:
-                master = open_slot(slot, secret, keyfile)
-            except TamperError:
-                continue
-            reset_attempt_pacing()
-            return master
+        try:
+            if slot["type"] in ("passphrase", "recovery"):
+                try:
+                    master = open_slot(slot, secret)
+                except TamperError:
+                    continue
+                reset_attempt_pacing()   # the credential was right; stop pacing
+                return master
+            elif slot["type"] == "passphrase+keyfile":
+                if keyfile is None:
+                    needs_keyfile = True
+                    continue
+                if sha256(keyfile)[:16] != slot.get("keyfile_id"):
+                    _record_failed_attempt()
+                    raise CryptoError(
+                        "That is not this vault's keyfile (contents do not match "
+                        "the enrolled second factor)")
+                try:
+                    master = open_slot(slot, secret, keyfile)
+                except TamperError:
+                    continue
+                reset_attempt_pacing()
+                return master
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # A slot missing a field or holding the wrong type is a damaged
+            # or edited header, not a crash for the caller to make sense of.
+            raise TamperError(
+                f"A keyslot in the vault header is malformed (modified or "
+                f"damaged): {type(exc).__name__}: {exc}") from exc
     if needs_keyfile:
         raise CryptoError(
             "Two-factor unlock is enabled on this vault: a keyfile is "

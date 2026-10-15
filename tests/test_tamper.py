@@ -5,7 +5,7 @@ import struct
 import numpy as np
 import pytest
 
-from compartment import packs
+from compartment import crypto, packs
 from compartment.crypto import CryptoError, TamperError
 from compartment.vault import Vault
 from compartment.vaultfile import VaultFormatError, read_vault_file
@@ -96,3 +96,74 @@ def test_pack_signature_and_content_tamper():
     forged = blob[:6] + struct.pack(">I", len(hj)) + hj + blob[10 + hlen:]
     with pytest.raises(TamperError):
         packs.read_pack(forged, trusted_keys=trust)
+
+
+def _with_header(vault_path, out, edit):
+    """A copy of the vault whose plaintext header `edit` changed in place,
+    or replaced with what it returned."""
+    raw = open(vault_path, "rb").read()
+    (hlen,) = struct.unpack(">I", raw[6:10])
+    header = json.loads(raw[10:10 + hlen])
+    replaced = edit(header)
+    hj = crypto.canonical_json(header if replaced is None else replaced)
+    open(out, "wb").write(raw[:6] + struct.pack(">I", len(hj)) + hj
+                          + raw[10 + hlen:])
+    return out
+
+
+def _without(d, key):
+    del d[key]
+
+
+MALFORMED_HEADERS = {
+    "the header is a list": lambda h: [h],
+    "vault_id is a number": lambda h: h.update(vault_id=7),
+    "payload_len is a string": lambda h: h.update(payload_len="abc"),
+    "payload_len is negative": lambda h: h.update(payload_len=-1),
+    "keyslots is a string": lambda h: h.update(keyslots="x"),
+    "a keyslot is a string": lambda h: h.update(keyslots=["x"]),
+    "a keyslot has no type": lambda h: _without(h["keyslots"][0], "type"),
+    "a keyslot has no salt": lambda h: _without(h["keyslots"][0], "salt"),
+    "a keyslot's salt is not hex": lambda h: h["keyslots"][0].update(salt="zz"),
+    "a keyslot's kdf is a string":
+        lambda h: h["keyslots"][0].update(kdf="argon2id"),
+    "model is a list": lambda h: h.update(model=[]),
+    "model has no dim": lambda h: _without(h["model"], "dim"),
+    "model.dim is a string": lambda h: h["model"].update(dim="384"),
+    "extra is a list": lambda h: h.update(extra=[]),
+    "extra.wire is a string": lambda h: h["extra"].update(wire="2"),
+}
+
+
+def test_a_malformed_header_is_reported_as_corrupt(vault, vault_path,
+                                                   tmp_path, monkeypatch):
+    """The header is plaintext. A field of the wrong type, or a missing one,
+    escaped unlock as a TypeError, KeyError or AttributeError from deep
+    inside it, which no caller recognises as a vault error: a traceback
+    instead of "the vault header is corrupt"."""
+    monkeypatch.setattr(crypto, "ATTEMPT_INTERVAL_SECONDS", 0.0)
+    vault.lock()
+    escaped = []
+    for i, (what, edit) in enumerate(MALFORMED_HEADERS.items()):
+        bad = _with_header(vault_path, str(tmp_path / f"bad{i}.vault"), edit)
+        try:
+            Vault.unlock(bad, passphrase=PASS)
+            escaped.append(f"{what}: opened")
+        except CryptoError:
+            pass
+        except Exception as exc:                        # noqa: BLE001
+            escaped.append(f"{what}: {type(exc).__name__}: {exc}")
+    assert escaped == []
+
+
+def test_unknown_header_fields_still_open(vault, vault_path, tmp_path):
+    """Additive header fields are allowed within a format version."""
+    vault.lock()
+
+    def add(h):
+        h["future_field"] = {"anything": 1}
+        h["extra"]["future_setting"] = "kept"
+        h["keyslots"][0]["future_slot_field"] = True
+    v = Vault.unlock(_with_header(vault_path, str(tmp_path / "f.vault"), add),
+                     passphrase=PASS)
+    assert v.header.extra["future_setting"] == "kept"
