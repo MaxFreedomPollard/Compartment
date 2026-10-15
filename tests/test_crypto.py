@@ -57,3 +57,36 @@ def test_record_key_crypto_shred_semantics():
 def test_wordlist_invariants():
     assert len(crypto.WORDLIST) == 256
     assert len(set(crypto.WORDLIST)) == 256
+
+
+def test_a_keyslot_kdf_out_of_range_is_refused_before_deriving(monkeypatch):
+    """A keyslot's KDF settings sit in the plaintext header, and the check
+    that exposes an edit can only run once the KDF has finished: a header
+    asking for 4 TiB of memory, or 10**9 passes, made an unlock fill memory
+    or run for days. A stand-in records each derivation instead of running
+    it, so nothing here allocates more than the test itself."""
+    asked = []
+
+    def argon2(**kwargs):
+        asked.append((kwargs["time_cost"], kwargs["memory_cost"],
+                      kwargs["parallelism"]))
+        return bytes(crypto.KEY_LEN)
+    monkeypatch.setattr(crypto, "hash_secret_raw", argon2)
+
+    def slot(**kdf):
+        return {"type": "passphrase", "kdf": {**crypto.DEFAULT_KDF, **kdf},
+                "salt": "00" * 16, "wrapped": "00" * 64}
+    for bad in ({"memory_kib": 2**32 - 1}, {"time_cost": 10**9},
+                {"time_cost": 0}, {"parallelism": 0}, {"parallelism": 17},
+                {"memory_kib": 1024 * 1024 + 1}, {"memory_kib": 31},
+                {"time_cost": "3"}, {"parallelism": True}):
+        with pytest.raises(TamperError, match="KDF parameters out of range"):
+            crypto.open_slot(slot(**bad), "pw")
+    assert asked == []
+    # The widest settings allowed, and the defaults, are derived as before;
+    # the stand-in's key then fails to open the slot, as a wrong one would.
+    for ok in ({"time_cost": 16, "parallelism": 16, "memory_kib": 1024 * 1024},
+               {}):
+        with pytest.raises(TamperError, match="Integrity check failed"):
+            crypto.open_slot(slot(**ok), "pw")
+    assert asked == [(16, 1024 * 1024, 16), (3, 65536, 4)]

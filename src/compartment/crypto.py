@@ -30,6 +30,14 @@ NONCE_LEN = 24
 # Interactive-strength Argon2id defaults, sized for an 8GB-RAM baseline machine.
 DEFAULT_KDF = {"alg": "argon2id", "time_cost": 3, "memory_kib": 65536, "parallelism": 4}
 
+# The widest Argon2id settings a keyslot may ask for. They sit in the
+# plaintext header, and the AEAD check that exposes an edit can only run once
+# the KDF has finished, so unchecked they let an edited header make an unlock
+# fill 4 TiB of memory or run for days. Only DEFAULT_KDF is ever written.
+KDF_MAX_TIME_COST = 16
+KDF_MAX_PARALLELISM = 16
+KDF_MAX_MEMORY_KIB = 1024 * 1024
+
 
 class CryptoError(Exception):
     """Loud, specific crypto failure. Never swallowed."""
@@ -190,6 +198,19 @@ def _slot_secrets(slot: dict, secret: str, keyfile: bytes | None) -> list[bytes]
             for sep in (wire.KEYFILE_SEP, *wire.KEYFILE_SEP_LEGACY)]
 
 
+def _check_slot_kdf(kdf) -> None:
+    """Refuse Argon2id settings outside the caps above, before deriving."""
+    if not isinstance(kdf, dict) or kdf.get("alg") != "argon2id":
+        return                      # derive_key refuses another algorithm
+    t, m, p = (kdf.get(k) for k in ("time_cost", "memory_kib", "parallelism"))
+    if not all(isinstance(x, int) and not isinstance(x, bool)
+               for x in (t, m, p)) \
+            or not 1 <= t <= KDF_MAX_TIME_COST \
+            or not 1 <= p <= KDF_MAX_PARALLELISM \
+            or not 8 * p <= m <= KDF_MAX_MEMORY_KIB:
+        raise TamperError("keyslot KDF parameters out of range")
+
+
 def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
     """Unwrap the master key from one slot.
 
@@ -200,6 +221,7 @@ def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
     header. Re-sealing only happens when something was actually legacy, or
     every unlock would dirty the header and force a needless vault rewrite."""
     salt, kdf = bytes.fromhex(slot["salt"]), slot["kdf"]
+    _check_slot_kdf(kdf)
     wrapped = bytes.fromhex(slot["wrapped"])
     failure: TamperError | None = None
     for i, raw in enumerate(_slot_secrets(slot, secret, keyfile)):
