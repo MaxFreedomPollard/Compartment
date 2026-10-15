@@ -775,12 +775,15 @@ class Vault:
         self.index = build_index(dim, ikeys, mat if mat.size else mat.reshape(0, dim),
                                  precision=precision)
 
-    def _journal(self, entry: dict) -> None:
+    def _journal(self, *entries: dict) -> None:
+        """Append under ONE file lock: one staleness check, one fsync, so no
+        other process can write between entries passed together."""
         def _append():
-            vaultfile.append_journal_entry(self.path, self.header,
-                                           self._journal_seq, entry, self._master)
+            vaultfile.append_journal_entries(self.path, self.header,
+                                             self._journal_seq, list(entries),
+                                             self._master)
         self._with_file_lock(_append)
-        self._journal_seq += 1
+        self._journal_seq += len(entries)
 
     def _replay(self, e: dict) -> None:
         op = e["op"]
@@ -1007,8 +1010,9 @@ class Vault:
             self._id_by_ikey[k] = rid
             self.index.add(k, vec[seq])
         arow = self._audit_and_capture(caller, "store", f"ns={ns} id={rid}")
+        entries = []
         if _journal:
-            self._journal({"op": "store", "audit": arow, "record": {
+            entries.append({"op": "store", "audit": arow, "record": {
                 "id": rid, "ns": ns, "text": text,
                 "vec": base64.b64encode(vec.tobytes()).decode(),
                 "tags": tags or [], "importance": importance,
@@ -1018,11 +1022,16 @@ class Vault:
                 "kind": kind, "affirmed": affirmed,
             }})
         # The replacement exists; now its predecessors leave the searchable
-        # surface. After the insert and its journal entry, so a crash between
-        # the two leaves both records live - visible and mendable - rather
-        # than the old one gone and the new one never written.
+        # surface. Their entries follow the insert's, so a crash between the
+        # two leaves both records live - visible and mendable - rather than
+        # the old one gone and the new one never written. All of them go in
+        # one append: a write by another process landing between them failed
+        # the tombstone with the replacement already durable, and a reopen
+        # and retry then stored the replacement twice.
         for sid in (supersedes or []):
-            self._tombstone(sid, rid, caller, _journal=_journal)
+            entries.append(self._tombstone(sid, rid, caller, _journal=False))
+        if _journal:
+            self._journal(*entries)
         out = {"id": rid, "duplicate": False, "namespace": ns,
                "kind": kind, "created": row["created"],
                "created_local": local_stamp(row["created"]),
@@ -1150,11 +1159,12 @@ class Vault:
         self.config.check(caller, row["ns"], write=True)
 
     def _tombstone(self, sid: str, by: str, caller: str,
-                   _journal: bool = True) -> None:
+                   _journal: bool = True) -> dict:
         """Retire a record in favour of its replacement. Tombstoned, never
         shredded: the row, its ciphertext and its history stay readable by
         id, but every retrieval surface - vector index, keyword index,
-        search, recent - lets go of it."""
+        search, recent - lets go of it. Returns its journal entry, for a
+        caller that journals it with others (_journal=False)."""
         row = self.db.get_row(sid)
         keys = set(self.db.vector_keys(sid)) | {row["ikey"]}
         self.db.tombstone(sid, by)
@@ -1163,9 +1173,10 @@ class Vault:
             self._id_by_ikey.pop(k, None)
         arow = self._audit_and_capture(caller, "supersede",
                                        f"id={sid} by={by}")
+        entry = {"op": "supersede", "ids": [sid], "by": by, "audit": arow}
         if _journal:
-            self._journal({"op": "supersede", "ids": [sid], "by": by,
-                           "audit": arow})
+            self._journal(entry)
+        return entry
 
     @_synchronized
     def supersede(self, record_id: str, by: str, caller: str = "user") -> dict:

@@ -340,16 +340,27 @@ def write_vault_file(
 
 
 def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, master_key: bytes) -> None:
-    ct = crypto.seal(
+    append_journal_entries(path, header, seq, [entry], master_key)
+
+
+def append_journal_entries(path: str, header: VaultHeader, seq: int,
+                           entries: list[dict], master_key: bytes) -> None:
+    """Append entries at journal positions seq, seq+1, ... with one fsync.
+
+    All are sealed before anything is written, and each is framed exactly as
+    on its own, in the order given, so a crash part-way keeps the complete
+    entries before the torn one."""
+    cts = [crypto.seal(
         master_key,
         crypto.canonical_json(entry),
-        aad=_journal_aad(header.vault_id, seq),
-    )
-    length = struct.pack(">I", len(ct))
+        aad=_journal_aad(header.vault_id, seq + i),
+    ) for i, entry in enumerate(entries)]
     with open(path, "ab") as f:
-        f.write(length)
-        f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
-        f.write(ct)
+        for ct in cts:
+            length = struct.pack(">I", len(ct))
+            f.write(length)
+            f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
+            f.write(ct)
         f.flush()
         os.fsync(f.fileno())
 

@@ -12,8 +12,8 @@ import types
 
 import pytest
 
-from compartment import server
-from compartment.vault import Vault
+from compartment import server, vaultfile
+from compartment.vault import Vault, strip_provenance
 
 
 class _Stop(BaseException):
@@ -193,3 +193,92 @@ def test_the_auto_lock_waits_for_a_tool_call_in_progress(serving, monkeypatch):
     finally:
         t.join(10)
     assert not v._locked
+
+
+def _live_texts(vault_path, key):
+    after = Vault.unlock(vault_path, raw_key=key)
+    return after, sorted(strip_provenance(r["text"]) for r in
+                         after.recent("agent", limit=50)["results"])
+
+
+def test_a_supersede_interrupted_by_another_write_is_stored_once(
+        serving, vault_path, monkeypatch):
+    """store(supersedes=[old]) journaled the replacement and its tombstone
+    under two file locks. A write by another process between them failed the
+    tombstone with the replacement already on disk, and _op's reopen and
+    retry stored the replacement a second time."""
+    v = serving
+    old = v.store("The office printer is on the second floor",
+                  caller="agent")["id"]
+    key = v._master
+    monkeypatch.setattr(Vault, "resolve_credential",
+                        staticmethod(lambda path, passphrase=None: (None, key)))
+    real_tombstone, fired = Vault._tombstone, []
+
+    def tombstone(self, *args, **kwargs):
+        if not fired:
+            fired.append(True)
+            _written_by_another_process(self, vault_path)
+        return real_tombstone(self, *args, **kwargs)
+    monkeypatch.setattr(Vault, "_tombstone", tombstone)
+    out = server._op(lambda h: h.store(
+        "The office printer moved to the third floor", caller="agent",
+        supersedes=[old]))
+    assert fired
+    # One append, record first and its tombstone after it.
+    loaded = vaultfile.read_vault_file(vault_path)
+    assert [e["op"] for e in vaultfile.decrypt_journal(
+        loaded.header, loaded.journal_cts, key)] == ["store", "supersede"]
+    after, texts = _live_texts(vault_path, key)
+    assert texts.count("The office printer moved to the third floor") == 1
+    assert after.get(old, caller="agent")["superseded_by"] == out["id"]
+
+
+def test_store_many_refuses_a_fact_its_caller_may_not_write_before_storing_any(
+        serving):
+    """Validating the batch skipped the namespace grant, which Vault.store
+    checks first, so the facts before one in a read-only namespace were
+    stored and then the call failed."""
+    with pytest.raises(server.MemoryToolError) as e:
+        server.memory_store_many.__wrapped__(
+            [{"text": "Alice leads the platform team"},
+             {"text": "Bob leads the data team", "namespace": "packs/x"}],
+            "from chat")
+    assert "facts[1]" in str(e.value) and "read-only" in str(e.value)
+    assert serving.db.count() == 0
+
+
+def test_store_many_interrupted_by_another_write_stores_the_rest_once(
+        serving, vault_path, monkeypatch):
+    """A write by another process between two facts made _op rerun the whole
+    batch. The first fact, already stored with its supersede applied, then
+    failed validation as already superseded: the call reported a failure,
+    the first fact stayed stored and the rest never were."""
+    v = serving
+    old = v.store("The office printer is on the second floor",
+                  caller="agent")["id"]
+    key = v._master
+    monkeypatch.setattr(Vault, "resolve_credential",
+                        staticmethod(lambda path, passphrase=None: (None, key)))
+    real_store, fired = Vault.store, []
+
+    def store(self, *args, **kwargs):
+        out = real_store(self, *args, **kwargs)
+        if not fired:
+            fired.append(True)
+            other = Vault.unlock(vault_path, raw_key=key)
+            real_store(other, "Another agent stored this meanwhile",
+                       caller="cli")
+        return out
+    monkeypatch.setattr(Vault, "store", store)
+    out = json.loads(server.memory_store_many.__wrapped__(
+        [{"text": "The office printer moved to the third floor",
+          "supersedes": [old]},
+         {"text": "Erin runs the Friday demo"}], "from chat"))
+    assert out["count"] == 2
+    after, texts = _live_texts(vault_path, key)
+    assert texts == ["Another agent stored this meanwhile",
+                     "Erin runs the Friday demo",
+                     "The office printer moved to the third floor"]
+    assert after.get(old, caller="agent")["superseded_by"] == \
+        out["stored"][0]["id"]

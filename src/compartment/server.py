@@ -382,23 +382,33 @@ def memory_store(text: str, source: str, namespace: str | None = None,
     return json.dumps(out)
 
 
-def _prevalidate_facts(v: Vault, facts: list) -> None:
+def _prevalidate_facts(v: Vault, facts: list, namespace: str | None = None,
+                       start: int = 0) -> None:
     """Refuse a store_many batch whole, by index, before anything is written.
 
-    Covers everything Vault.store would refuse per fact - shape, kind,
-    expiry, supersede targets - because each store journals durably the
-    moment it runs, and a batch that fails at fact 3 of 6 with two already
-    on disk gives the model a picture of the vault that is simply wrong."""
+    Covers everything Vault.store would refuse per fact - namespace grant,
+    shape, kind, expiry, supersede targets - because each store journals
+    durably the moment it runs, and a batch that fails at fact 3 of 6 with
+    two already on disk gives the model a picture of the vault that is simply
+    wrong. Facts before `start` are already stored and are not looked at."""
     limit = int(v.config.settings.get("max_memory_chars",
                                       gate.DEFAULT_MAX_CHARS))
     claimed: dict[str, int] = {}
     for i, f in enumerate(facts):
+        if i < start:
+            continue
         if not isinstance(f, dict):
             raise MemoryToolError(
                 f"facts[{i}] must be an object with a 'text' field")
         text = (f.get("text") or "")
         if not isinstance(text, str) or not text.strip():
             raise MemoryToolError(f"facts[{i}] has no 'text'")
+        try:
+            ns = (f.get("namespace") or namespace
+                  or v.config.default_namespace(_state["caller"]))
+            v.config.check(_state["caller"], ns, write=True)
+        except CryptoError as exc:
+            raise MemoryToolError(f"facts[{i}]: {exc}") from None
         reason = gate.rejection(strip_provenance(text.strip()), limit)
         if reason:
             raise MemoryToolError(f"facts[{i}]: {reason}")
@@ -472,15 +482,19 @@ def memory_store_many(facts: list[dict], source: str,
         raise MemoryToolError("facts must be a non-empty list of objects, each "
                               "with at least a 'text' field")
 
+    out: list = []
+
     def _store_all(v):
         # The WHOLE batch is validated before any fact is stored. Each store
         # journals durably as it happens, so a fact refused halfway through
         # would leave a partial batch on disk while the caller is told the
         # call failed - the worst of both. A bad entry therefore refuses the
         # batch here, by index, with nothing written.
-        _prevalidate_facts(v, facts)
-        out = []
-        for i, f in enumerate(facts):
+        # A retry after another process wrote the vault (_op) resumes at the
+        # first fact not yet stored: the ones before it are on disk, with the
+        # results they returned, and validating them again would refuse them.
+        _prevalidate_facts(v, facts, namespace, start=len(out))
+        for f in facts[len(out):]:
             text = f["text"].strip()
             out.append(v.store(
                 text, caller=_state["caller"],
