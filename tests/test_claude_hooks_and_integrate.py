@@ -376,3 +376,28 @@ def test_integrate_claude_defaults_no_hooks_to_false(monkeypatch):
 def test_bare_hook_has_a_handler_instead_of_crashing(monkeypatch):
     seen = _parsed(monkeypatch, "cmd_hook", ["hook"])
     assert seen["hook_cmd"] is None
+
+
+def test_integrate_claude_goes_on_past_a_claude_md_that_is_not_utf8(
+        home, vault_path, monkeypatch, capsys):
+    """One byte that is not UTF-8 in the user's own CLAUDE.md raised
+    UnicodeDecodeError, which the OSError handler did not catch: `integrate
+    claude` died after registering the servers, before importing the
+    existing memories and before the capture hook, and init reported
+    "could not connect Claude Code" for a registration that had happened."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    session.store(vault_path, v._master)
+    v.lock()
+    md = home.root / ".claude" / "CLAUDE.md"
+    md.write_bytes("Prefer the caf\xe9 wifi.\n".encode("cp1252"))
+    before = md.read_bytes()
+
+    _integrate(home, vault_path, monkeypatch)
+    out = capsys.readouterr().out
+    assert "could not update CLAUDE.md: not UTF-8" in out
+    assert md.read_bytes() == before                  # never rewritten
+    assert Vault.unlock(vault_path, passphrase=PASS).status()[
+        "organic_records"] == 1                        # the import ran
+    assert claude_hooks.is_installed() is True         # and the hook

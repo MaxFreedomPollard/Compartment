@@ -141,3 +141,33 @@ def test_update_refreshes_with_the_new_build(monkeypatch, capsys):
     assert ran[0] == ["pip", "install", "-U", "compartment"]
     assert any(c[-2:] == ["integrate", "--refresh"] for c in ran)
     assert "updated the compartment block" in capsys.readouterr().out
+
+
+def test_a_claude_md_that_is_not_utf8_is_left_alone_and_the_rest_refreshed(
+        homes, capsys):
+    """One byte that is not UTF-8 in the user's own CLAUDE.md (a file saved
+    as ANSI by a Windows editor) raised UnicodeDecodeError, which is not an
+    OSError: the refresh died before the skill and the Hermes plugin, and
+    `compartment update`, which prints the refresh only when it succeeds,
+    said nothing about it."""
+    md = homes / ".claude" / "CLAUDE.md"
+    md.parent.mkdir(parents=True)
+    md.write_bytes(("Prefer the caf\xe9 wifi.\n\n" + OLD_BLOCK
+                    + "\n").encode("cp1252"))
+    before = md.read_bytes()
+    skill = homes / ".claude" / "skills" / "compartmentalize" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("last version's skill", encoding="utf-8")
+    plug = homes / ".hermes" / "plugins" / "compartment"
+    plug.mkdir(parents=True)
+    (plug / "plugin.yaml").write_text("version: 4.10.1\n", encoding="utf-8")
+    (plug / "__init__.py").write_text("# last version\n", encoding="utf-8")
+
+    cli.main(["integrate", "--refresh"])
+    out = capsys.readouterr().out
+    assert f"could not update {md}: not UTF-8" in out
+    assert md.read_bytes() == before                  # never rewritten
+    assert skill.read_bytes() == agent_skill.source().read_bytes()
+    src = cli._data_dir() / "hermes-plugin"
+    for f in ("__init__.py", "plugin.yaml"):
+        assert (plug / f).read_bytes() == (src / f).read_bytes()

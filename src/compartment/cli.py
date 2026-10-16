@@ -1587,6 +1587,8 @@ def _refresh_installed() -> list[str]:
                 done.append(f"updated the compartment block in {md}")
     except OSError as exc:
         done.append(f"! could not update {md} ({exc})")
+    except UnicodeDecodeError:          # the user's file, left as it is
+        done.append(f"! could not update {md}: not UTF-8")
 
     for target in agent_skill.SKILL_TARGETS:
         if not agent_skill.is_installed(target) or agent_skill.is_current(target):
@@ -1905,6 +1907,9 @@ def _integrate_target(args) -> None:
         except OSError as exc:
             print(f"\n  ! could not update CLAUDE.md ({exc}); the MCP server "
                   "still advertises its instructions on connect")
+        except UnicodeDecodeError:      # the user's file, left as it is
+            print("\n  ! could not update CLAUDE.md: not UTF-8; the MCP "
+                  "server still advertises its instructions on connect")
         print("  The server also self-describes over the MCP handshake, so "
               "Claude treats compartment as memory with no further setup.")
         if not os.path.exists(vault):
