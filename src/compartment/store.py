@@ -639,8 +639,11 @@ class Store:
     # whether the starter-facts search filter can find a record at all. A
     # retagger that dropped one would silently reclassify thousands of memories
     # and there would be nothing left to reconstruct the truth from, so they are
-    # re-added on every write rather than trusted to survive.
-    PROTECTED_TAG_PREFIXES = ("id:",)
+    # re-added on every write rather than trusted to survive. The capture
+    # hook's "claude-file:<project>/<file>" tag is the same kind: it names the
+    # memory file a record came from, so it must not spread to a neighbour as
+    # if it were a subject, nor be pruned off the record it names.
+    PROTECTED_TAG_PREFIXES = ("id:", "claude-file:")
 
     def protected_tags(self, record_id: str) -> list[str]:
         row = self.conn.execute(

@@ -240,6 +240,31 @@ def test_an_identity_tag_is_never_propagated_to_a_neighbour(seeded_vault):
         assert not any(t.startswith("id:") for t in c.added)
 
 
+def test_a_memory_files_tag_never_travels_and_is_never_pruned(vault):
+    """The capture hook files a record under the memory file it came from,
+    "claude-file:<project>/<file>", which names a file, not a subject. As a
+    plain tag it spread to every neighbour of the file's records like a
+    category, and a pruning pass took it off a record whose neighbours did
+    not carry it."""
+    from compartment.claude_memory import file_tag
+    tag = file_tag("/home/u/.claude/projects/proj/memory/feedback_mail.md")
+    for line in ("Sending mail requires an app-specific password.",
+                 "The mailbox syncs over IMAP on port 993.",
+                 "Outgoing messages relay through SMTP on port 587.",
+                 "The inbox is reachable with a standard mail client."):
+        vault.store(line, caller="test", tags=["correspondence", tag])
+    target = vault.store("Message delivery uses a relay host with TLS.",
+                         caller="test", tags=[])["id"]
+    lone = vault.store("The kitchen tap drips when the boiler runs.",
+                       caller="test", tags=[file_tag(
+                           "/home/u/.claude/projects/proj/memory/house.md")])
+    retag.run(vault, caller="test")
+    assert "correspondence" in _tags(vault, target)      # propagation works
+    assert tag not in _tags(vault, target)
+    retag.run(vault, prune=True, caller="test")
+    assert _tags(vault, lone["id"]) == ["claude-file:proj/house.md"]
+
+
 def test_a_tag_spreads_on_meaning_alone(vault):
     """The Zoho case, and the reason the semantic channel exists.
 
