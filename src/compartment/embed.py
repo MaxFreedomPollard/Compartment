@@ -188,6 +188,16 @@ class Embedder:
     """CLS-pooled, L2-normalized sentence embeddings from a local ONNX model."""
 
     def __init__(self, model_name: str = DEFAULT_MODEL):
+        # Before the library loads, or it keeps telemetry: onnxruntime 1.31
+        # writes a device id, and for every process that loads a model an
+        # event naming the device model, CPU, OS and library versions, to a
+        # store for Microsoft's event SDK, whose HTTP uploader is in the
+        # same library; on macOS under ~/Library/Application Support/
+        # Microsoft/DeveloperTools. Its disable_telemetry_events() does not
+        # stop that; this does. A value the user set is left as it is. The
+        # embedding daemon builds its models here too, so it sets this in
+        # its own process.
+        os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
         try:
             import onnxruntime as ort      # local import: keeps CLI startup fast
         except ImportError as exc:

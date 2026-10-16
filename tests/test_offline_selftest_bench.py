@@ -1,5 +1,8 @@
 """The zero-network proof, the frozen relevance regression, and perf budgets."""
+import os
 import socket
+import subprocess
+import sys
 import urllib.request
 
 import pytest
@@ -16,6 +19,74 @@ def offline():
     offline_guard.activate()
     yield
     offline_guard.deactivate()
+
+
+#: Where onnxruntime keeps its telemetry on macOS, under the home directory.
+ORT_TELEMETRY = ("Library", "Application Support", "Microsoft",
+                 "DeveloperTools", ".onnxruntime")
+
+
+def _in_a_fresh_home(home, **extra):
+    """This environment with every home a library might write to moved to
+    `home`, and no ORT_DISABLE_TELEMETRY of its own."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ORT_DISABLE_TELEMETRY", "XDG_DATA_HOME",
+                        "XDG_CACHE_HOME")}
+    env.update(HOME=str(home), USERPROFILE=str(home),
+               APPDATA=str(home / "AppData" / "Roaming"),
+               LOCALAPPDATA=str(home / "AppData" / "Local"),
+               COMPARTMENT_EMBED_DAEMON="0", **extra)
+    return env
+
+
+def test_loading_the_model_leaves_no_onnxruntime_telemetry(tmp_path):
+    """onnxruntime 1.31 keeps a telemetry store whenever it loads a model,
+    unless ORT_DISABLE_TELEMETRY is set before the library loads: a device
+    id and a queue of events naming the device model, CPU, OS and library
+    versions, for Microsoft's event SDK, whose HTTP uploader ships in the
+    same library. Its own disable_telemetry_events() leaves the store in
+    place."""
+    home = tmp_path / "home"
+    home.mkdir()
+    code = ("from compartment.embed import Embedder; "
+            "Embedder().embed_query('where is the router passphrase')")
+    p = subprocess.run([sys.executable, "-c", code],
+                       env=_in_a_fresh_home(home), capture_output=True,
+                       text=True, timeout=120)
+    assert p.returncode == 0, p.stderr
+    assert not home.joinpath(*ORT_TELEMETRY).exists()
+    assert not list(home.rglob(".onnxruntime"))
+
+
+@pytest.mark.parametrize("users_value, seen", [(None, "1"), ("0", "0")])
+def test_telemetry_is_off_before_the_runtime_loads_unless_the_user_chose(
+        users_value, seen, tmp_path):
+    """A stand-in onnxruntime says what it would have read as it loaded.
+    Nothing real is loaded, so nothing is written anywhere, whatever value
+    the user set."""
+    fake = tmp_path / "stand-in" / "onnxruntime"
+    fake.mkdir(parents=True)
+    (fake / "__init__.py").write_text(
+        "import os\n"
+        "print('seen', os.environ.get('ORT_DISABLE_TELEMETRY'))\n"
+        "raise ImportError('a stand-in for onnxruntime')\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    path = [str(fake.parent)] + ([os.environ["PYTHONPATH"]]
+                                 if os.environ.get("PYTHONPATH") else [])
+    extra = {"PYTHONPATH": os.pathsep.join(path)}
+    if users_value is not None:
+        extra["ORT_DISABLE_TELEMETRY"] = users_value
+    code = ("from compartment.embed import Embedder\n"
+            "try:\n"
+            "    Embedder()\n"
+            "except ImportError:\n"
+            "    pass\n")
+    p = subprocess.run([sys.executable, "-c", code],
+                       env=_in_a_fresh_home(home, **extra),
+                       capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.split() == ["seen", seen], p.stdout
 
 
 def test_guard_blocks_network(offline):

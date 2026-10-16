@@ -193,3 +193,7 @@ AF_UNIX in Python and always does.
 
 Report vulnerabilities privately to the maintainer. No telemetry exists in
 this product; nothing phones home, so nothing can be recalled remotely.
+The ONNX runtime the encoder runs on keeps telemetry of its own by default
+(a device id and an event queue on disk, with an uploader in the same
+library), so Compartment sets `ORT_DISABLE_TELEMETRY=1` before loading it,
+leaving a value you set yourself as it is.
