@@ -161,6 +161,25 @@ def is_memory_file(path: str | Path) -> bool:
     return "memory" in parts and ".claude" in parts
 
 
+def _earlier_versions(v, tag: str, ns: str, text: str) -> list[str] | None:
+    """The live records in `ns` stored from the memory file `tag` names,
+    when any of them says something other than `text`: what a capture of
+    `text` replaces. None when there are none, or when all of them already
+    say it. Found by the tags each record was born with, which retagging
+    never changes."""
+    from .vault import strip_provenance
+    claim = strip_provenance(text.strip())
+    ids, changed = [], False
+    for row in v.db.conn.execute(
+            "SELECT * FROM records WHERE superseded_by IS NULL AND pack IS NULL"
+            " AND ns = ? AND instr(tags_origin, ?) > 0", (ns, json.dumps(tag))):
+        if tag in json.loads(row["tags_origin"]):
+            ids.append(row["id"])
+            changed = changed or strip_provenance(
+                v.db.decrypt_text(row, v._master)) != claim
+    return ids if changed else None
+
+
 def capture(stream=None, vault_path: str | None = None) -> dict:
     """Run by the hook. Returns a result dict; never raises, never blocks."""
     stream = stream or sys.stdin
@@ -200,13 +219,22 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
         # A config cut short, a vault file this cannot read: no reason to
         # fail the edit either.
         return {"stored": False, "reason": f"vault unavailable: {exc}"}
+    caller = "claude-code-hook"
     try:
         rec = claude_memory.parse(p)
-        out = v.store(rec["text"], caller="claude-code-hook",
-                      tags=rec["tags"], importance=rec["importance"],
+        tag = claude_memory.file_tag(p)
+        # An edited file replaces what was stored from it, so a small
+        # correction is not taken for a near-duplicate of the old text and a
+        # large one does not sit beside it. An unchanged file is the
+        # duplicate it always was.
+        replaces = _earlier_versions(v, tag, v.config.default_namespace(caller),
+                                     rec["text"])
+        out = v.store(rec["text"], caller=caller,
+                      tags=rec["tags"] + [tag], importance=rec["importance"],
                       # Captured from the conversation as it happened, which is
                       # the truthful method for anything the user said.
                       source="from chat",
+                      supersedes=replaces,
                       # Verbatim capture: a hook cannot rephrase the user's
                       # turn to satisfy the shape gate, and dropping a consent
                       # decision because it ran long would be worse than a

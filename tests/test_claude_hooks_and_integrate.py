@@ -307,6 +307,73 @@ def test_capture_is_idempotent_on_repeated_writes(home, vault_path):
     assert Vault.unlock(vault_path, passphrase=PASS).status()["organic_records"] == 1
 
 
+STAGING = """---
+name: staging-db
+description: staging database
+metadata:
+  type: project
+---
+The staging database runs Postgres {version} behind pgbouncer on port 6432.
+"""
+
+
+def test_capture_replaces_what_it_captured_from_the_same_file(home,
+                                                              vault_path):
+    """An edited memory file was stored as a new memory with nothing
+    retired. A small correction (a version number) was a near-duplicate of
+    the captured text, so it was dropped and search kept the old value; a
+    larger one was stored beside the obsolete version."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    session.store(vault_path, v._master)
+    v.lock()
+    note = home.memdir / "staging_db.md"
+
+    def capture(version):
+        note.write_text(STAGING.format(version=version), encoding="utf-8")
+        return claude_hooks.capture(io.StringIO(_payload(note)),
+                                    vault_path=vault_path)
+
+    first = capture(15)
+    assert first["stored"] is True
+    second = capture(16)
+    assert second["stored"] is True and second["id"] != first["id"], second
+    again = capture(16)                  # an unchanged file: a duplicate
+    assert again["duplicate"] is True and again["id"] == second["id"]
+
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    hits = [h["text"] for h in v2.search(
+        "Which Postgres version does staging run?", caller="t")["results"]]
+    assert any("Postgres 16" in t for t in hits), hits
+    assert not any("Postgres 15" in t for t in hits), hits
+    old = v2.get(first["id"], caller="t")            # history, by id
+    assert old["superseded_by"] == second["id"] and "Postgres 15" in old["text"]
+    assert claude_memory.file_tag(note) in v2.get(second["id"],
+                                                  caller="t")["tags"]
+    assert v2.status()["organic_records"] == 1
+
+
+def test_capture_replaces_what_the_importer_stored_from_the_same_file(
+        home, vault_path):
+    """The importer tags what it stores with the file it read, the way the
+    hook does, so an edit captured later replaces the imported record."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    note = home.memdir / "staging_db.md"
+    note.write_text(STAGING.format(version=15), encoding="utf-8")
+    imported = claude_memory.import_files(v, [note])["items"][0]["id"]
+    session.store(vault_path, v._master)
+    v.lock()
+    note.write_text(STAGING.format(version=16), encoding="utf-8")
+    res = claude_hooks.capture(io.StringIO(_payload(note)),
+                               vault_path=vault_path)
+    assert res["stored"] is True, res
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    assert v2.get(imported, caller="t")["superseded_by"] == res["id"]
+
+
 # ------------------------------------- the whole `integrate claude` path
 # Previously verified only by hand, on one machine. Now every OS in CI.
 
