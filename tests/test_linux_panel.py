@@ -212,28 +212,33 @@ def test_the_gui_check_is_honest_about_this_machine():
 
 # ------------------------------------------------------------------ cleanup
 
-def test_stopping_a_running_panel_uses_signals_not_taskkill(monkeypatch):
+def test_stopping_a_running_panel_uses_signals_not_taskkill(monkeypatch,
+                                                            tmp_path):
     """taskkill does not exist off Windows, so update and uninstall would
     have left the old panel running with its binary already gone."""
+    import signal
     monkeypatch.setattr(sys, "platform", "linux")
-    calls = []
-
-    class R:
-        stdout = ""
     monkeypatch.setattr(systray.subprocess, "run",
-                        lambda *a, **k: (calls.append(a[0]), R())[1])
-    systray.quit_running()
-    assert calls and calls[0][0] == "pgrep"
+                        lambda *a, **k: pytest.fail(f"ran {a[0]}"))
+    gone = []
+    monkeypatch.setattr(menubar, "lock_holder_pid", lambda vault: 4242)
+    monkeypatch.setattr(menubar, "_instance_lock_held",
+                        lambda vault: not gone)
+    monkeypatch.setattr(systray.os, "kill",
+                        lambda pid, sig: gone.append((pid, sig)))
+    assert systray.quit_running(str(tmp_path / "memory.vault"),
+                                timeout=5) is True
+    assert gone == [(4242, signal.SIGTERM)]
 
 
-def test_it_never_signals_itself(monkeypatch):
+def test_it_never_signals_itself(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "linux")
-
-    class R:
-        stdout = str(os.getpid())
-    monkeypatch.setattr(systray.subprocess, "run", lambda *a, **k: R())
+    vault = str(tmp_path / "memory.vault")
+    menubar._instance_lock_path(vault).write_text(f"{os.getpid()}\n",
+                                                  encoding="utf-8")
+    monkeypatch.setattr(menubar, "_instance_lock_held", lambda vault: True)
     killed = []
     monkeypatch.setattr(systray.os, "kill",
                         lambda pid, sig: killed.append(pid))
-    systray.quit_running()
+    systray.quit_running(vault)
     assert killed == [], "an uninstall that kills its own process finishes nothing"

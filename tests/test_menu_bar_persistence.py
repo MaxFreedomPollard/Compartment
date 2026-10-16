@@ -32,6 +32,8 @@ which copy of the app owns the menu bar.
 """
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 
@@ -150,27 +152,109 @@ def test_turning_it_off_is_fine_when_nothing_was_loaded(fake_home,
 
 # --- stopping the app means it stopped --------------------------------------
 
-def test_quit_running_waits_for_the_process_to_actually_go(monkeypatch):
+def test_quit_running_waits_for_the_process_to_actually_go(tmp_path,
+                                                           monkeypatch):
     """It used to report success for a signal it had sent. The caller's next
     move is to start the new build, and that must not happen while the old
     copy still holds the lock."""
-    monkeypatch.setattr(menubar, "running_pids", lambda: [4242])
+    monkeypatch.setattr(menubar, "lock_holder_pid", lambda vault: 4242)
+    monkeypatch.setattr(menubar, "_instance_lock_held", lambda vault: True)
     monkeypatch.setattr(menubar.os, "kill", lambda *a: None)
-    assert menubar.quit_running(timeout=0.3) is False
+    assert menubar.quit_running(str(tmp_path / "memory.vault"),
+                                timeout=0.3) is False
 
 
-def test_quit_running_reports_success_once_it_is_gone(monkeypatch):
-    seen = []
-    monkeypatch.setattr(menubar, "running_pids",
-                        lambda: [] if seen else (seen.append(1), [4242])[1])
-    monkeypatch.setattr(menubar.os, "kill", lambda *a: None)
-    assert menubar.quit_running(timeout=5) is True
+def test_quit_running_reports_success_once_it_is_gone(tmp_path, monkeypatch):
+    gone = []
+    monkeypatch.setattr(menubar, "lock_holder_pid", lambda vault: 4242)
+    monkeypatch.setattr(menubar, "_instance_lock_held",
+                        lambda vault: not gone)
+    monkeypatch.setattr(menubar.os, "kill", lambda pid, sig: gone.append(pid))
+    assert menubar.quit_running(str(tmp_path / "memory.vault"),
+                                timeout=5) is True
+    assert gone == [4242]
+
+
+def test_a_pid_left_by_a_copy_that_has_quit_is_not_signalled(tmp_path,
+                                                             monkeypatch):
+    """The lock file keeps the pid of the last copy that held it after that
+    copy has gone, and by then the number may belong to anything. It is
+    believed only while the lock it describes is held."""
+    vault = str(tmp_path / "memory.vault")
+    menubar._instance_lock_path(vault).write_text("4242\n", encoding="utf-8")
+    monkeypatch.setattr(menubar.os, "kill", lambda *a: pytest.fail(
+        "signalled a pid that nobody holds the lock for"))
+    assert menubar.quit_running(vault) is False
 
 
 def test_running_pids_never_counts_this_process(monkeypatch):
     monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: type(
         "R", (), {"stdout": f"{os.getpid()}\n77\n"})())
     assert menubar.running_pids() == [77]
+
+
+#: Stands in for the status bar app: takes the vault's lock, as the app
+#: does first, and waits. Run as `<python> <bin>/compartment --vault V
+#: menubar`, which is how the app's console script runs.
+APP_STAND_IN = """
+import sys, time
+sys.path.insert(0, {src!r})
+from compartment import menubar
+vault = sys.argv[sys.argv.index("--vault") + 1]
+handle, only = menubar.acquire_instance_lock(vault)
+print("HELD" if only else "STOOD-DOWN", flush=True)
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("pgrep"),
+                    reason="pgrep, tail and POSIX signals")
+def test_only_the_app_itself_is_counted_and_stopped(tmp_path, monkeypatch):
+    """`pgrep -f "compartment.*menubar"` matched any command line naming
+    compartment and later menubar: an editor, a pager or `tail -f` open on
+    src/compartment/menubar.py, and on Linux systray.py too. quit_running
+    sent each of them SIGTERM, and the come-up checks took one for the app.
+    """
+    src = tmp_path / "src" / "compartment"
+    src.mkdir(parents=True)
+    exe = tmp_path / "bin" / "compartment"
+    exe.parent.mkdir()
+    exe.write_text(APP_STAND_IN.format(
+        src=str(Path(menubar.__file__).resolve().parents[1])),
+        encoding="utf-8")
+    vault = str(tmp_path / "memory.vault")
+    real_kill = os.kill            # the cleanup below must get past the guard
+    procs = []
+    try:
+        for name in ("menubar.py", "systray.py"):     # what an editor shows
+            (src / name).write_text("", encoding="utf-8")
+            procs.append(subprocess.Popen(["tail", "-f", str(src / name)],
+                                          stdout=subprocess.DEVNULL))
+        decoys = {p.pid for p in procs}
+        app = subprocess.Popen([sys.executable, str(exe), "--vault", vault,
+                                "menubar"], stdout=subprocess.PIPE, text=True)
+        procs.append(app)
+        assert app.stdout.readline().strip() == "HELD"
+        refused = []
+
+        def only_the_stand_in(pid, sig):
+            if pid != app.pid:
+                refused.append((pid, sig))            # signal nothing else
+                return None
+            return real_kill(pid, sig)
+        monkeypatch.setattr(menubar.os, "kill", only_the_stand_in)
+        for counted in (menubar.running_pids(), systray.running_pids()):
+            assert app.pid in counted
+            assert not decoys & set(counted), "an open file counted as the app"
+        assert menubar.quit_running(vault, timeout=10) is True
+        assert app.wait(timeout=10) != 0              # SIGTERM, not an exit
+        assert refused == []
+        assert all(p.poll() is None for p in procs if p.pid in decoys)
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                real_kill(p.pid, signal.SIGKILL)
+            p.wait(timeout=10)
 
 
 # --- which copy owns the menu bar -------------------------------------------

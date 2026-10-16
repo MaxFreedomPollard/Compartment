@@ -513,7 +513,7 @@ def _restart_status_bar_app(vault: str) -> None:
         pass
     try:
         app = _tray_app()
-        app.quit_running()
+        app.quit_running(vault)
     except Exception:                                    # noqa: BLE001
         pass
     _start_status_bar_app(vault)
@@ -533,7 +533,7 @@ def cmd_uninstall(args) -> None:
         if linux:
             print("  applications menu entry: removed")
         try:
-            print("  app stopped" if app.quit_running()
+            print("  app stopped" if app.quit_running(args.vault)
                   else "  app: nothing was running")
         except Exception:                                # noqa: BLE001
             pass

@@ -1693,20 +1693,59 @@ def relaunch_detached(vault: str, show: bool = False,
     return not only
 
 
+#: The status bar app's own command line, as pgrep sees it: the CLI (its
+#: console script, or `-m compartment.cli`), the vault if one is named, then
+#: the subcommand. A match anywhere in the arguments also found an editor, a
+#: pager or a test run open on src/compartment/menubar.py or systray.py.
+APP_COMMAND = (r"(compartment|compartment\.cli)( --vault [^ ]+)? "
+               r"(menubar|panel|tray)( |$)")
+
+
 def running_pids() -> list[int]:
-    """Every other status bar copy on this machine."""
+    """Every other status bar copy of this user's on this machine."""
+    uid = getattr(os, "getuid", None)
     try:
-        out = subprocess.run(["pgrep", "-f", "compartment.*menubar"],
-                             capture_output=True, text=True, timeout=15).stdout
+        out = subprocess.run(
+            ["pgrep", *(["-u", str(uid())] if uid else []), "-f",
+             APP_COMMAND],
+            capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
         return []
     me = os.getpid()
     return [int(x) for x in out.split() if x.isdigit() and int(x) != me]
 
 
-def quit_running(timeout: float = 10.0) -> bool:
-    """Stop a running status bar app, so an update or uninstall does not leave
-    the old build sitting in the menu bar with its binary already gone.
+def _instance_lock_held(vault: str) -> bool:
+    """Whether a copy holds this vault's lock right now. Asked with a shared
+    lock that is dropped again at once, which the app's own exclusive lock
+    refuses. A lock file that is not there, or cannot be opened, is held by
+    nobody. POSIX only; Windows is systray's to stop."""
+    try:
+        fh = open(_instance_lock_path(vault), "rb")    # noqa: SIM115
+    except (OSError, ValueError):
+        return False
+    with fh:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except ImportError:
+            return False
+        except OSError as exc:
+            return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK,
+                                 errno.EWOULDBLOCK)
+    return False
+
+
+def quit_running(vault: str | None = None, timeout: float = 10.0) -> bool:
+    """Stop the status bar app running for this vault, so an update or
+    uninstall does not leave the old build sitting in the menu bar with its
+    binary already gone.
+
+    Only the one process the vault's lock names is signalled, as
+    evict_unsupervised does, and only while that lock is held: the pid stays
+    in the file after its copy has gone, and by then may be anybody's. It
+    used to signal every pgrep match, which took an editor or a pager open
+    on menubar.py down with the app.
 
     Waits for the process to actually go. Sending a signal is not the same
     as being obeyed, and the caller's next move - starting the new build -
@@ -1715,20 +1754,20 @@ def quit_running(timeout: float = 10.0) -> bool:
     the app had restarted while looking at the build it replaced.
     """
     import signal
-    pids = running_pids()
-    if not pids:
+    vault = vault or default_vault()
+    pid = lock_holder_pid(vault) if _instance_lock_held(vault) else None
+    if pid is None:
         return False
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not running_pids():
+        if not _instance_lock_held(vault):
             return True
         time.sleep(0.1)
-    return not running_pids()
+    return not _instance_lock_held(vault)
 
 
 def restart_agent() -> bool:

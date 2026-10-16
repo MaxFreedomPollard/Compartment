@@ -33,7 +33,8 @@ from pathlib import Path
 
 from .home import env, home
 
-from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
+from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
+                      RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, create_vault,
                       default_vault, integrate, lock_vault,
@@ -41,6 +42,7 @@ from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
                       release_instance_lock, self_check,
                       set_setting, starter_note, summarise, unlock_vault,
                       PanelState)
+from .menubar import quit_running as _stop_lock_holder
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -1355,9 +1357,13 @@ def running_pids() -> list[int]:
             if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) != me:
                 pids.append(int(parts[1]))
         return pids
+    # The app's own command line and this user's processes, as on macOS:
+    # see menubar.APP_COMMAND.
+    uid = getattr(os, "getuid", None)
     try:
         out = subprocess.run(
-            ["pgrep", "-f", "compartment.*(panel|tray|menubar)"],
+            ["pgrep", *(["-u", str(uid())] if uid else []), "-f",
+             APP_COMMAND],
             capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
         return []
@@ -1373,8 +1379,9 @@ def running_pids() -> list[int]:
     return pids
 
 
-def quit_running(timeout: float = 10.0) -> bool:
-    """Stop a running panel before an update or uninstall replaces it.
+def quit_running(vault: str | None = None, timeout: float = 10.0) -> bool:
+    """Stop the panel running for this vault before an update or uninstall
+    replaces it.
 
     Reports whether the app actually went, not whether a signal was sent.
     The caller's next move is to start the replacement, and it must not do
@@ -1392,21 +1399,9 @@ def quit_running(timeout: float = 10.0) -> bool:
         # stop anything - it is nothing to stop. Anything else that is not
         # zero means the copy is still there.
         return r.returncode == 0
-    import signal
-    pids = running_pids()
-    if not pids:
-        return False
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not running_pids():
-            return True
-        time.sleep(0.1)
-    return not running_pids()
+    # Only the process this vault's lock names, as on macOS: signalling
+    # every pgrep match took an editor or a pager open on systray.py with it.
+    return _stop_lock_holder(vault, timeout)
 
 
 __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
