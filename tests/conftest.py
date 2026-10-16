@@ -1,5 +1,7 @@
+import contextlib
 import os
 import pathlib
+import re
 import sys
 
 import pytest
@@ -33,6 +35,36 @@ def real_claude_desktop_config_path():
 
 def seed_pack_bytes() -> bytes:
     return (SRC / "compartment" / "data" / "starter.mpack").read_bytes()
+
+
+@contextlib.contextmanager
+def statements_run(conn):
+    """Every SQL statement `conn` executes inside the block, as SQLite traces
+    it: with its parameters filled in, and fts5's own internal statements
+    marked with a leading "--"."""
+    ran = []
+    conn.set_trace_callback(ran.append)
+    try:
+        yield ran
+    finally:
+        conn.set_trace_callback(None)
+
+
+def table_walks(conn, statements) -> list[str]:
+    """The statements SQLite plans as a walk over every row of the records
+    table or the full-text table, from its own EXPLAIN QUERY PLAN. A walk of
+    a plain table is a SCAN; fts5 narrows a scan only by rowid or MATCH, so
+    one with no usable constraint shows nothing after the colon."""
+    walks = []
+    for sql in statements:
+        if not sql.lstrip().upper().startswith(("SELECT", "DELETE", "UPDATE")):
+            continue
+        for row in conn.execute("EXPLAIN QUERY PLAN " + sql):
+            detail = row[3]
+            if (re.match(r"SCAN (TABLE )?records\b", detail) or re.fullmatch(
+                    r"SCAN (TABLE )?fts VIRTUAL TABLE INDEX \d+:", detail)):
+                walks.append(f"{sql}  [{detail}]")
+    return walks
 
 
 @pytest.fixture()

@@ -1493,11 +1493,12 @@ class Vault:
             out["warning"] = QUARANTINE_WARNING
         return out
 
-    def _restore_children_live(self, record_id: str) -> list[str]:
+    def _restore_children_live(self, record_id: str,
+                               children: list[str] | None = None) -> list[str]:
         """restore_children plus the RAM-index half: the revived records'
         vectors go back into the live index so they answer searches again
         without waiting for the next rebuild."""
-        restored = self.db.restore_children(record_id, self._master)
+        restored = self.db.restore_children(record_id, self._master, children)
         for rid in restored:
             for k, v in self.db.vectors_of(rid):
                 self._id_by_ikey[k] = rid
@@ -1626,13 +1627,16 @@ class Vault:
         ids = self._expired_today()
         if not ids:
             return {"enabled": True, "removed": 0, "ids": []}
+        # What each one superseded, read once rather than once per record:
+        # the sweep only clears superseded_by, so the lists stay true.
+        children = self.db.superseded_children()
         for rid in ids:
             row = self.db.get_row(rid)
             if row is None:
                 continue
             # An expiring replacement releases what it superseded, exactly as
             # forget() does - the sweep must not orphan history either.
-            self._restore_children_live(rid)
+            self._restore_children_live(rid, children.get(rid, []))
             # Rule 7: through the same delete every other removal uses, so a
             # window left in the index cannot keep answering searches for
             # text that is gone.

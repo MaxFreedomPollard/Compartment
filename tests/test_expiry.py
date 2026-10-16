@@ -17,9 +17,13 @@ import json
 
 import pytest
 
+from compartment import audit
 from compartment.crypto import CryptoError
+from compartment.store import Store
 from compartment.vault import (Vault, expiry_date, strip_provenance,
                                with_provenance)
+
+from conftest import statements_run, table_walks
 
 PASS = "CorrectHorse"
 TODAY = datetime.date(2026, 8, 20)
@@ -510,3 +514,70 @@ def test_a_long_sweep_says_its_audit_line_is_capped(v):
     assert "n=25" in detail and "+5 more" in detail
     # and the journal is not capped
     assert len(out["ids"]) == 25
+
+
+def test_a_sweep_walks_the_vault_once_however_many_memories_expire(v):
+    """Each expired memory cost two walks over every row: the full-text
+    delete by an unindexed id, and the lookup for what it had superseded.
+    A sweep of 1,000 at 20,000 records held the vault lock for over 6 s.
+    Now one read finds every tombstone's replacement, however many expire;
+    the other read a sweep may need, where the full-text rows are, happens
+    once per open, at its first removal."""
+    keep = _store(v, "Max's home airport is JFK.")
+    old = _store(v, "The spare tyre is in the boot.")
+    v.supersede(old["id"], keep["id"], caller="t")     # a tombstone to read
+    for i in range(12):
+        _store(v, f"Transient fact number {i}, about item {i}.",
+               expires=_day(-1), _expiry_strict=False)
+    with statements_run(v.db.conn) as ran:
+        assert v.expire(caller="t")["removed"] == 12
+    walks = table_walks(v.db.conn, ran)
+    assert len(walks) <= 2, walks
+
+
+def test_a_sweep_leaves_the_image_the_per_memory_sweep_left(vault_path):
+    """The sweep reads every tombstone's replacement once and deletes
+    full-text rows by rowid, where it ran both lookups for each expired
+    memory. The image it leaves must be the one those statements left,
+    byte for byte, predecessors brought back by an expiring replacement
+    included."""
+    v = Vault.create(vault_path, PASS, creator="t")
+    soon = [_store(v, f"Short-lived fact number {i}, about item {i}.",
+                   expires="2w") for i in range(6)]
+    keep = _store(v, "Max's home airport is JFK.")
+    freed = _store(v, "The lobby door code was 1111.")
+    v.supersede(freed["id"], soon[1]["id"], caller="t")
+    kept = _store(v, "The bike lock combination used to be 2222.")
+    v.supersede(kept["id"], keep["id"], caller="t")
+    also = _store(v, "The garage opener battery was replaced in May.")
+    v.supersede(also["id"], soon[4]["id"], caller="t")
+    v.lock()
+    w = Vault.unlock(vault_path, passphrase=PASS)
+    w.db.conn.executemany(
+        "UPDATE records SET expires = '2020-01-01' WHERE id = ?",
+        [(s["id"],) for s in soon])
+    twin = Store(w.db.serialize())
+    assert twin.serialize() == w.db.serialize()
+    out = w.expire(caller="t")
+    assert out["removed"] == 6
+    for rid in out["ids"]:                      # the sweep as it was
+        for r in twin.conn.execute(
+                "SELECT id FROM records WHERE superseded_by = ?",
+                (rid,)).fetchall():
+            twin.conn.execute(
+                "UPDATE records SET superseded_by = NULL WHERE id = ?",
+                (r["id"],))
+            twin.conn.execute(
+                "INSERT INTO fts (id, text) VALUES (?, ?)",
+                (r["id"], twin.decrypt_text(twin.get_row(r["id"]), w._master)))
+        twin.conn.execute("DELETE FROM records WHERE id = ?", (rid,))
+        twin.conn.execute("DELETE FROM fts WHERE id = ?", (rid,))
+        twin.conn.execute("DELETE FROM vecs WHERE id = ?", (rid,))
+    last = w.db.conn.execute(
+        "SELECT * FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
+    audit.append(twin.conn, last["caller"], last["op"], last["detail"],
+                 ts=last["ts"])
+    assert w.db.serialize() == twin.serialize()
+    assert not w.get(freed["id"], caller="t").get("superseded_by")
+    assert not w.get(also["id"], caller="t").get("superseded_by")
+    assert w.get(kept["id"], caller="t")["superseded_by"] == keep["id"]

@@ -140,6 +140,15 @@ class Store:
         self._recency_cache: tuple[np.ndarray, np.ndarray,
                                    dict[str, int]] | None = None
         self._recency_subsets: dict[frozenset[str], np.ndarray] = {}
+        # Each record's full-text rowids, read on the first removal and kept
+        # current by every write to the table. fts5 keeps `id` UNINDEXED, so
+        # deleting WHERE id = ? read every row to find one. VACUUM keeps
+        # them: the table's own storage keys on INTEGER PRIMARY KEY.
+        self._fts_rowids: dict[str, list[int]] | None = None
+        # How many records are superseded, counted on first need and kept by
+        # every write that moves superseded_by, which has no index: with none
+        # superseded, restore_children has nothing to look for.
+        self._superseded_n: int | None = None
         if image is not None:
             self.conn.deserialize(image)
             # idempotent schema upgrade: vaults sealed by older versions gain
@@ -275,8 +284,11 @@ class Store:
         # A record born superseded (a restore of history) never joins the
         # searchable surface: no FTS row, exactly as tombstone() leaves one.
         if superseded_by is None:
-            self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
-                              (rid, text))
+            cur = self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
+                                    (rid, text))
+            self._fts_added(rid, cur.lastrowid)
+        elif self._superseded_n is not None:
+            self._superseded_n += 1
         self._invalidate_df()
         self._invalidate_recency()
         return rid
@@ -287,10 +299,18 @@ class Store:
         its FTS row goes, so the keyword channel can never surface it. The
         caller removes its windows from the RAM index; all_vectors() keeps
         them out of every future rebuild."""
+        was = None
+        if self._superseded_n is not None:
+            was = self.conn.execute(
+                "SELECT superseded_by FROM records WHERE id = ?",
+                (record_id,)).fetchone()
         cur = self.conn.execute(
             "UPDATE records SET superseded_by = ? WHERE id = ?",
             (by, record_id))
-        self.conn.execute("DELETE FROM fts WHERE id = ?", (record_id,))
+        self._fts_delete(record_id)
+        if was is not None:
+            self._superseded_n += ((by is not None)
+                                   - (was["superseded_by"] is not None))
         self._invalidate_df()
         self._invalidate_recency()
         return cur.rowcount > 0
@@ -304,7 +324,8 @@ class Store:
         self._invalidate_recency()
         return cur.rowcount > 0
 
-    def restore_children(self, record_id: str, master_key: bytes) -> list[str]:
+    def restore_children(self, record_id: str, master_key: bytes,
+                         children: list[str] | None = None) -> list[str]:
         """Bring back to life every record superseded by `record_id`.
 
         Called before that record is deleted. Without this, deleting (or
@@ -314,20 +335,28 @@ class Store:
         replace them properly. Deleting the correction means the original
         stands again. The FTS rows are re-added here; the caller restores
         the RAM index entries, and all_vectors() includes the records again
-        on any later rebuild."""
-        rows = self.conn.execute(
-            "SELECT id FROM records WHERE superseded_by = ?",
-            (record_id,)).fetchall()
+        on any later rebuild.
+
+        `children` is what superseded_children() listed under `record_id`,
+        for a caller removing many records; without it this looks them up."""
+        if children is None:
+            if self._superseded_total() == 0:
+                return []
+            children = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM records WHERE superseded_by = ?",
+                (record_id,)).fetchall()]
         restored = []
-        for r in rows:
-            rid = r["id"]
+        for rid in children:
             self.conn.execute(
                 "UPDATE records SET superseded_by = NULL WHERE id = ?", (rid,))
             row = self.get_row(rid)
-            self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
-                              (rid, self.decrypt_text(row, master_key)))
+            cur = self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
+                                    (rid, self.decrypt_text(row, master_key)))
+            self._fts_added(rid, cur.lastrowid)
             restored.append(rid)
         if restored:
+            if self._superseded_n is not None:
+                self._superseded_n -= len(restored)
             self._invalidate_df()
             self._invalidate_recency()
         return restored
@@ -357,6 +386,50 @@ class Store:
         return self.conn.execute(
             "SELECT COUNT(*) c FROM records WHERE superseded_by IS NOT NULL"
         ).fetchone()["c"]
+
+    def _superseded_total(self) -> int:
+        if self._superseded_n is None:
+            self._superseded_n = self.superseded_count()
+        return self._superseded_n
+
+    def superseded_children(self) -> dict[str, list[str]]:
+        """Every superseded record's id, under the id of the record that
+        replaced it, in the order restore_children finds them: one read for
+        a caller about to remove many records, where restore_children would
+        read once per record."""
+        if self._superseded_n == 0:
+            return {}
+        out: dict[str, list[str]] = {}
+        n = 0
+        for r in self.conn.execute(
+                "SELECT id, superseded_by FROM records"
+                " WHERE superseded_by IS NOT NULL"):
+            out.setdefault(r["superseded_by"], []).append(r["id"])
+            n += 1
+        self._superseded_n = n
+        return out
+
+    def _fts_rows(self) -> dict[str, list[int]]:
+        if self._fts_rowids is None:
+            rows: dict[str, list[int]] = {}
+            for rowid, rid in self.conn.execute("SELECT rowid, id FROM fts"):
+                rows.setdefault(rid, []).append(rowid)
+            self._fts_rowids = rows
+        return self._fts_rowids
+
+    def _fts_added(self, record_id: str, rowid: int) -> None:
+        if self._fts_rowids is not None:
+            self._fts_rowids.setdefault(record_id, []).append(rowid)
+
+    def _fts_delete(self, record_id: str) -> None:
+        """DELETE FROM fts WHERE id = ?, found by rowid. All of a record's
+        rows go in one statement, as they did: two statements would leave a
+        different image."""
+        rowids = self._fts_rows().pop(record_id, None)
+        if rowids:
+            self.conn.execute(
+                "DELETE FROM fts WHERE rowid IN ("
+                + ",".join("?" * len(rowids)) + ")", rowids)
 
     def _invalidate_df(self) -> None:
         """Drop cached document frequencies. Called wherever FTS content
@@ -496,12 +569,19 @@ class Store:
         """Delete a record. shred=True also VACUUMs so the content (including
         FTS tokens and freed pages) is gone from the next serialized image,
         and the per-record key is destroyed with the row."""
+        was = None
+        if self._superseded_n:                # was this one of them?
+            was = self.conn.execute(
+                "SELECT superseded_by FROM records WHERE id = ?",
+                (record_id,)).fetchone()
         cur = self.conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
-        self.conn.execute("DELETE FROM fts WHERE id = ?", (record_id,))
+        self._fts_delete(record_id)
         # Every embedding window goes with it. A window left behind would keep
         # answering searches for text the vault no longer holds, which is the
         # one thing forget() must never do.
         self.conn.execute("DELETE FROM vecs WHERE id = ?", (record_id,))
+        if was is not None and was["superseded_by"] is not None:
+            self._superseded_n -= 1
         self._invalidate_df()
         self._invalidate_recency()
         if cur.rowcount == 0:

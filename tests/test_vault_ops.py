@@ -7,15 +7,18 @@ import sys
 import textwrap
 import threading
 import time
+import types
 
+import numpy as np
 import pytest
 
-from compartment import audit, vaultfile
+from compartment import audit, crypto, store as store_mod, vaultfile
 from compartment.acl import AclError
 from compartment.crypto import CryptoError
+from compartment.store import Store
 from compartment.vault import Vault, VaultLockedError, VaultStaleError
 
-from conftest import PASS, SRC
+from conftest import PASS, SRC, statements_run, table_walks
 
 
 def test_store_search_get_forget(vault):
@@ -236,6 +239,148 @@ def test_document_frequencies_are_refreshed_after_a_delete(vault):
     assert vault.db.doc_frequency("quokkas") == 1
     vault.forget(r["id"], caller="test")
     assert vault.db.doc_frequency("quokkas") == 0
+
+
+def test_forgetting_a_memory_does_not_walk_the_whole_vault(vault):
+    """forget() deleted the full-text row with WHERE id = ?, and fts5 keeps
+    id UNINDEXED, so SQLite read every row of the table to find it; then it
+    looked for the records this one had superseded by superseded_by, which
+    has no index: a second walk. At 20,000 records the two were about 6 ms
+    of every forget and of every expired memory, under the vault lock. The
+    first removal after an open reads where the rows are, once; after that
+    a removal walks nothing."""
+    ids = [vault.store(text, caller="test")["id"] for text in (
+        "The shed key hangs by the back door",
+        "The boiler was serviced in March",
+        "The library card renews every spring")]
+    vault.forget(ids[0], caller="test")
+    with statements_run(vault.db.conn) as ran:
+        vault.forget(ids[1], caller="test")
+    assert table_walks(vault.db.conn, ran) == []
+
+
+def _old_delete(db, rid, shred=False):
+    """Store.delete as it was: the full-text row found by its id."""
+    cur = db.conn.execute("DELETE FROM records WHERE id = ?", (rid,))
+    db.conn.execute("DELETE FROM fts WHERE id = ?", (rid,))
+    db.conn.execute("DELETE FROM vecs WHERE id = ?", (rid,))
+    if cur.rowcount and shred:
+        db.conn.execute("VACUUM")
+
+
+def _old_tombstone(db, rid, by):
+    db.conn.execute("UPDATE records SET superseded_by = ? WHERE id = ?",
+                    (by, rid))
+    db.conn.execute("DELETE FROM fts WHERE id = ?", (rid,))
+
+
+def _old_restore_children(db, rid, key):
+    for r in db.conn.execute("SELECT id FROM records WHERE superseded_by = ?",
+                             (rid,)).fetchall():
+        db.conn.execute("UPDATE records SET superseded_by = NULL WHERE id = ?",
+                        (r["id"],))
+        db.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
+                        (r["id"], db.decrypt_text(db.get_row(r["id"]), key)))
+
+
+@pytest.mark.parametrize("opened", [False, True],
+                         ids=["created here", "opened from an image"])
+def test_removals_leave_the_image_a_delete_by_id_left(opened, monkeypatch):
+    """A removal now finds a record's full-text rows by rowid, from a map
+    kept in RAM, and skips the superseded_by lookup when nothing is
+    superseded. The serialized image is the vault's payload, so it must
+    come out byte for byte as the old statements left it, after each kind
+    of removal: a plain one, a record with two full-text rows (an older
+    vault's leftover), tombstones and their restore, a record with no
+    full-text row, rows written after the map was read, a shred and its
+    VACUUM, and an id that does not exist. A store created in this process
+    and one opened from an image are both checked, because SQLite writes
+    the first page's header of the two differently."""
+    monkeypatch.setattr(crypto, "secrets",
+                        types.SimpleNamespace(token_bytes=lambda n: bytes(n)))
+    monkeypatch.setattr(store_mod, "time",
+                        types.SimpleNamespace(time=lambda: 1.7e9))
+    key = bytes(32)
+    words = ("garden", "router", "kitchen", "lease", "port", "invoice")
+
+    def insert(db, rid, i, **kw):
+        db.insert(record_id=rid, ns="main",
+                  text=f"Note {i} about the {words[i % 6]} and port {i % 7}",
+                  vec=np.full(8, i, np.float32), tags=[], importance=0.5,
+                  quarantined=False, pack=None, prov={}, master_key=key,
+                  created=1.7e9 + i, **kw)
+
+    def build():
+        db = Store()
+        for i in range(300):
+            insert(db, f"r{i:03d}", i)
+        db.conn.execute("INSERT INTO fts (id, text) VALUES "
+                        "('r007', 'a stray second row about the garden')")
+        return db
+
+    if opened:
+        image = build().serialize()
+        new, old = Store(image), Store(image)
+    else:
+        new, old = build(), build()
+    assert new.serialize() == old.serialize()
+
+    steps = [
+        ("a plain delete",
+         lambda db: db.delete("r010", shred=False),
+         lambda db: _old_delete(db, "r010")),
+        ("a record with two full-text rows",
+         lambda db: db.delete("r007", shred=False),
+         lambda db: _old_delete(db, "r007")),
+        ("a tombstone", lambda db: db.tombstone("r020", "r021"),
+         lambda db: _old_tombstone(db, "r020", "r021")),
+        ("a second tombstone by the same record",
+         lambda db: db.tombstone("r022", "r021"),
+         lambda db: _old_tombstone(db, "r022", "r021")),
+        ("bringing back what a record replaced",
+         lambda db: db.restore_children("r021", key),
+         lambda db: _old_restore_children(db, "r021", key)),
+        ("a record whose full-text row came back after the map was read",
+         lambda db: db.delete("r020", shred=False),
+         lambda db: _old_delete(db, "r020")),
+        ("a tombstone and its delete, with no full-text row left",
+         lambda db: (db.tombstone("r030", "r031"),
+                     db.delete("r030", shred=False)),
+         lambda db: (_old_tombstone(db, "r030", "r031"),
+                     _old_delete(db, "r030"))),
+        ("a record inserted after the map was read",
+         lambda db: (insert(db, "r900", 900), db.delete("r900", shred=False)),
+         lambda db: (insert(db, "r900", 900), _old_delete(db, "r900"))),
+        ("a record born superseded, brought back, then deleted",
+         lambda db: (insert(db, "r901", 901, superseded_by="r040"),
+                     db.restore_children("r040", key),
+                     db.delete("r901", shred=False)),
+         lambda db: (insert(db, "r901", 901, superseded_by="r040"),
+                     _old_restore_children(db, "r040", key),
+                     _old_delete(db, "r901"))),
+        ("a shred, its VACUUM, and a delete after it",
+         lambda db: (db.delete("r050", shred=True),
+                     db.delete("r051", shred=False)),
+         lambda db: (_old_delete(db, "r050", shred=True),
+                     _old_delete(db, "r051"))),
+        ("an id that does not exist",
+         lambda db: db.delete("nope", shred=False),
+         lambda db: _old_delete(db, "nope")),
+        ("the last row loaded", lambda db: db.delete("r299", shred=False),
+         lambda db: _old_delete(db, "r299")),
+    ]
+    for label, now, before in steps:
+        now(new)
+        before(old)
+        assert new.serialize() == old.serialize(), label
+    rows = "SELECT rowid, id FROM fts ORDER BY rowid"
+    assert (list(map(tuple, new.conn.execute(rows)))
+            == list(map(tuple, old.conn.execute(rows))))
+    old._df_cache.clear()
+    for query in ("garden", "router port", "note about the lease"):
+        assert new.fts_search(query, 50) == old.fts_search(query, 50)
+        assert new.doc_frequency(query.split()[0]) == \
+            old.doc_frequency(query.split()[0])
 
 
 def test_writing_into_a_deleted_vault_file_is_refused(vault, vault_path):
