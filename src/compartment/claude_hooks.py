@@ -196,6 +196,10 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
         # A locked vault is the user's choice, not an error worth shouting
         # about mid-edit; the next import-claude sweeps up whatever was missed.
         return {"stored": False, "reason": "vault locked"}
+    except Exception as exc:                            # noqa: BLE001
+        # A config cut short, a vault file this cannot read: no reason to
+        # fail the edit either.
+        return {"stored": False, "reason": f"vault unavailable: {exc}"}
     try:
         rec = claude_memory.parse(p)
         out = v.store(rec["text"], caller="claude-code-hook",

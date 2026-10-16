@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import types
 
 import pytest
@@ -266,6 +267,30 @@ def test_capture_with_locked_vault_does_not_break_the_edit(home, vault_path):
     res = claude_hooks.capture(io.StringIO(_payload(home.memfile)),
                                vault_path=vault_path)
     assert res == {"stored": False, "reason": "vault locked"}
+
+
+def test_capture_with_an_unreadable_vault_config_does_not_break_the_edit(
+        home, vault_path, monkeypatch):
+    """A config cut short (a save stopped by a full disk) raised
+    json.JSONDecodeError out of the unlock, which is not a CryptoError, so
+    capture() raised and `compartment hook capture` exited 1 with a
+    traceback after the user's edit."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    session.store(vault_path, v._master)
+    v.lock()
+    with open(vault_path + ".config.json", "w", encoding="utf-8") as f:
+        f.write('{\n  "callers": {\n    "*": {')
+    res = claude_hooks.capture(io.StringIO(_payload(home.memfile)),
+                               vault_path=vault_path)
+    assert res["stored"] is False
+    assert res["reason"].startswith("vault unavailable: "), res
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_payload(home.memfile)))
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["--vault", vault_path, "hook", "capture"])
+    assert exited.value.code == 0
 
 
 def test_capture_is_idempotent_on_repeated_writes(home, vault_path):
