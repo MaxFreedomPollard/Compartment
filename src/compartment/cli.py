@@ -643,8 +643,6 @@ def cmd_status(args) -> None:
         _die(f"no vault at {args.vault} (run `compartment init`)")
     try:
         pw, key = Vault.resolve_credential(args.vault)
-        v = Vault.unlock(args.vault, passphrase=pw, raw_key=key)
-        _print(v.status())
     except CryptoError:
         loaded = read_vault_file(args.vault)
         _print({"vault": args.vault, "locked": True,
@@ -652,6 +650,17 @@ def cmd_status(args) -> None:
                 "created": loaded.header.created,
                 "signed": loaded.header.manifest is not None,
                 "size_bytes": os.path.getsize(args.vault)})
+        return
+    try:
+        kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
+        v = Vault.unlock(args.vault, passphrase=pw, raw_key=key, keyfile=kf)
+    except CryptoError as exc:
+        # A credential that does not open the vault is not a locked vault.
+        # A model pin mismatch, a two-factor keyfile, a damaged file: each
+        # names its own remedy, and "locked" would send the user to unlock.
+        _print({"vault": args.vault, "locked": False, "error": str(exc)})
+        return
+    _print(v.status())
 
 
 def cmd_store(args) -> None:

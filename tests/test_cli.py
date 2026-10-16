@@ -128,3 +128,51 @@ def test_a_person_at_a_terminal_is_still_asked(vault_path, monkeypatch,
     monkeypatch.setattr(sys, "stdin", Terminal(""))
     cli.main(["--vault", vault_path, "search", "anything", "--json"])
     assert "results" in json.loads(capsys.readouterr().out)
+
+
+def _status(vault_path, capsys):
+    capsys.readouterr()
+    cli.main(["--vault", vault_path, "status"])
+    return json.loads(capsys.readouterr().out)
+
+
+def test_status_opens_a_two_factor_vault_as_every_other_command_does(
+        vault_path, tmp_path, passphrase_in_env, capsys):
+    """status unlocked with no keyfile, so a two-factor vault opened by
+    COMPARTMENT_PASSPHRASE showed as locked while `search`, which passes
+    the keyfile the vault recorded, opened it."""
+    import secrets
+    v = Vault.create(vault_path, PASS, creator="test")
+    keyfile = tmp_path / "compartment-2fa.key"
+    keyfile.write_bytes(secrets.token_bytes(32))
+    v.twofa_enable(PASS, keyfile.read_bytes())
+    v.config.settings["keyfile_path"] = str(keyfile)
+    v.config.save(vault_path)
+    v.lock()
+    doc = _status(vault_path, capsys)
+    assert doc["locked"] is False and "records" in doc, doc
+
+
+def test_status_says_why_a_credential_does_not_open_the_vault(
+        vault_path, monkeypatch, capsys):
+    """Every failure to open became {"locked": true} with no message, which
+    sends the user to `compartment unlock`. A credential that does not open
+    the vault, a model pin mismatch or a damaged file each name their own
+    remedy."""
+    Vault.create(vault_path, PASS, creator="test").lock()
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "not the passphrase")
+    doc = _status(vault_path, capsys)
+    assert doc["locked"] is False, doc
+    assert "Wrong passphrase" in doc["error"], doc
+
+
+def test_status_of_a_vault_with_no_credential_is_locked(vault_path,
+                                                        monkeypatch, capsys):
+    Vault.create(vault_path, PASS, creator="test").lock()
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    for name in ("COMPARTMENT_PASSPHRASE", "ENGRAM_PASSPHRASE"):
+        monkeypatch.delenv(name, raising=False)
+    doc = _status(vault_path, capsys)
+    assert doc["locked"] is True and doc["vault_id"] and "error" not in doc
