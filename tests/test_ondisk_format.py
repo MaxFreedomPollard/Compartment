@@ -34,6 +34,8 @@ import pytest
 from compartment import crypto, store, vaultfile, wire
 from compartment.vault import strip_provenance  # noqa: E402
 
+from conftest import assert_guards_in_force
+
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "compartment"
 
 # Every legacy spelling, and the wire.py attribute it has to stay in. Deleting
@@ -85,19 +87,24 @@ def test_wire_is_the_only_place_the_labels_live():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def legacy_wire(monkeypatch):
-    """Make the writing side emit exactly what a pre-2.2 build emitted."""
-    for attr, value in LEGACY:
-        monkeypatch.setattr(wire, attr.removesuffix("_LEGACY"), value)
-    monkeypatch.setattr(wire, "WIRE_FORMAT", 1)
-    return wire
+def legacy_wire():
+    """Make the writing side emit exactly what a pre-2.2 build emitted.
+
+    On a MonkeyPatch of its own, which a test undoes to get back to current
+    code. Undoing the shared monkeypatch instead undid the suite's own
+    guards with it (see conftest.assert_guards_in_force)."""
+    with pytest.MonkeyPatch.context() as mp:
+        for attr, value in LEGACY:
+            mp.setattr(wire, attr.removesuffix("_LEGACY"), value)
+        mp.setattr(wire, "WIRE_FORMAT", 1)
+        yield mp
 
 
-def test_a_legacy_keyslot_still_opens_and_migrates_itself(legacy_wire, monkeypatch):
+def test_a_legacy_keyslot_still_opens_and_migrates_itself(legacy_wire, tmp_path):
     master = crypto.new_key()
     slot = crypto.make_passphrase_slot(master, "correct horse")
     assert b"engram-keyslot" == wire.KEYSLOT          # the fixture is honest
-    monkeypatch.undo()                                 # back to current code
+    legacy_wire.undo()                                 # back to current code
 
     assert crypto.open_slot(slot, "correct horse") == master
     # and it rewrote itself on the way through, so the next open is direct
@@ -105,15 +112,16 @@ def test_a_legacy_keyslot_still_opens_and_migrates_itself(legacy_wire, monkeypat
         crypto.derive_key(b"correct horse", bytes.fromhex(slot["salt"]),
                           slot["kdf"]),
         bytes.fromhex(slot["wrapped"]), aad=wire.KEYSLOT) == master
+    assert_guards_in_force(tmp_path)
 
 
-def test_a_legacy_record_still_reads_and_migrates(legacy_wire, monkeypatch):
+def test_a_legacy_record_still_reads_and_migrates(legacy_wire, tmp_path):
     master = crypto.new_key()
     db = store.Store()
     rid = db.insert(record_id=None, ns="main", text="a legacy memory",
                     vec=_vec(), tags=[], importance=0.5, quarantined=False,
                     pack=None, prov={}, master_key=master)
-    monkeypatch.undo()
+    legacy_wire.undo()
 
     assert db.decrypt_text(db.get_row(rid), master) == "a legacy memory"
     assert db.migrate_wire(master) == 1
@@ -122,10 +130,11 @@ def test_a_legacy_record_still_reads_and_migrates(legacy_wire, monkeypatch):
     # now genuinely current: the legacy label is no longer what opens it
     rk = crypto.unseal(master, row["key_wrapped"], aad=wire.record_key(rid)[0])
     assert crypto.unseal(rk, row["ct"], aad=wire.record_body(rid)[0])
+    assert_guards_in_force(tmp_path)
 
 
 def test_a_legacy_vault_opens_migrates_and_keeps_every_memory(
-        legacy_wire, monkeypatch, vault_path):
+        legacy_wire, vault_path, tmp_path):
     """End to end, through the real Vault, on a real file."""
     from compartment.vault import Vault
 
@@ -135,7 +144,7 @@ def test_a_legacy_vault_opens_migrates_and_keeps_every_memory(
     v.save()
     v.lock()
     assert v.header.extra["wire"] == 1
-    monkeypatch.undo()
+    legacy_wire.undo()
 
     reopened = Vault.unlock(vault_path, passphrase="CorrectHorse")
     assert reopened.header.extra["wire"] == wire.WIRE_FORMAT
@@ -166,6 +175,7 @@ def test_a_legacy_vault_opens_migrates_and_keeps_every_memory(
         crypto.derive_key(b"CorrectHorse", bytes.fromhex(slot["salt"]),
                           slot["kdf"]),
         bytes.fromhex(slot["wrapped"]), aad=wire.KEYSLOT)
+    assert_guards_in_force(tmp_path)
 
 
 def test_a_legacy_session_credential_is_accepted_and_rewritten(
@@ -176,14 +186,14 @@ def test_a_legacy_session_credential_is_accepted_and_rewritten(
     master = crypto.new_key()
     vault = str(tmp_path / "x.vault")
     session.store(vault, master)
-    monkeypatch.undo()
-    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "session"))
+    legacy_wire.undo()
 
     assert session.get(vault) == master          # opened despite the old token
     assert session.get(vault) == master          # and again, now rewritten
+    assert_guards_in_force(tmp_path)
 
 
-def test_a_legacy_encrypted_pack_still_opens(legacy_wire, monkeypatch, tmp_path):
+def test_a_legacy_encrypted_pack_still_opens(legacy_wire, tmp_path):
     from compartment import packs
     import numpy as np
 
@@ -195,11 +205,12 @@ def test_a_legacy_encrypted_pack_still_opens(legacy_wire, monkeypatch, tmp_path)
         vectors=np.zeros((1, 8), dtype=np.float32),
         model={"name": "m", "sha256": "x", "dim": 8},
         identity=identity, passphrase="packpass")
-    monkeypatch.undo()
+    legacy_wire.undo()
 
     header, records, _ = packs.read_pack(blob, passphrase="packpass",
                                          trusted_keys=[identity["pub_hex"]])
     assert records[0]["text"] == "packed memory"
+    assert_guards_in_force(tmp_path)
 
 
 def test_a_vault_written_now_round_trips():

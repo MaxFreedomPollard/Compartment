@@ -226,6 +226,33 @@ def no_real_agent_tools(monkeypatch, tmp_path):
     monkeypatch.setattr(menubar, "_USER_PATH", None)   # the per-process cache
 
 
+def assert_guards_in_force(tmp_path) -> None:
+    """Fail unless the guards above still hold for this test.
+
+    monkeypatch.undo() on the shared fixture undoes them along with the
+    test's own patches, for the rest of the test and for its teardown: the
+    session store goes back to whatever the outer environment names, which
+    with nothing set is the real ~/.compartment/session, and PATH and SHELL
+    go back to ones that reach the real agent tools. A test with patches of
+    its own to undo keeps them on a MonkeyPatch of its own, and ends with
+    this."""
+    store = os.environ.get("COMPARTMENT_SESSION_DIR", "")
+    assert store and pathlib.Path(store).is_relative_to(tmp_path), (
+        f"COMPARTMENT_SESSION_DIR is {store!r}, not under this test's "
+        f"tmp_path")
+    own_bin = str(pathlib.Path(sys.executable).resolve().parent)
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    assert path[0] == own_bin and (sys.platform == "win32" or set(path) <= {
+        own_bin, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}), (
+        f"PATH is {os.environ.get('PATH')!r}, not cut down")
+    assert os.environ.get("SHELL") == "/usr/bin/false", (
+        f"SHELL is {os.environ.get('SHELL')!r}")
+    for name in ("HERMES_HOME", "OPENCLAW_HOME"):
+        assert pathlib.Path(os.environ.get(name, "/")).is_relative_to(
+            tmp_path), f"{name} is {os.environ.get(name)!r}"
+    assert _claude_desktop.config_path().is_relative_to(tmp_path)
+
+
 @pytest.fixture()
 def vault(vault_path):
     v = Vault.create(vault_path, PASS, creator="test")

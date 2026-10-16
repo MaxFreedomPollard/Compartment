@@ -24,7 +24,7 @@ import pytest
 from compartment import vaultfile
 from compartment.vault import Vault, VaultStaleError
 
-from conftest import PASS
+from conftest import PASS, assert_guards_in_force
 
 
 def _texts(v):
@@ -48,30 +48,30 @@ def _append_during_the_open(monkeypatch, writer, text):
     return fired
 
 
-def test_a_memory_stored_during_an_open_is_not_lost(vault_path, monkeypatch):
+def test_a_memory_stored_during_an_open_is_not_lost(vault_path, tmp_path):
     writer = Vault.create(vault_path, PASS, creator="t")
     # a journal entry, so the opener compacts - the save that overwrote
     writer.store("Memory one, journalled before the open.", caller="t",
                  source="t")
-    fired = _append_during_the_open(monkeypatch, writer,
-                                    "Memory two, stored during the open.")
-    opener = Vault.unlock(vault_path, passphrase=PASS)
-    assert fired
-    monkeypatch.undo()
+    with pytest.MonkeyPatch.context() as mp:
+        fired = _append_during_the_open(mp, writer,
+                                        "Memory two, stored during the open.")
+        opener = Vault.unlock(vault_path, passphrase=PASS)
+        assert fired
     assert any("Memory two" in t for t in _texts(opener))
     on_disk = _texts(Vault.unlock(vault_path, passphrase=PASS))
     assert any("Memory one" in t for t in on_disk)
     assert any("Memory two" in t for t in on_disk)
+    assert_guards_in_force(tmp_path)
 
 
-def test_an_open_that_raced_a_write_knows_it_is_behind(vault_path,
-                                                       monkeypatch):
+def test_an_open_that_raced_a_write_knows_it_is_behind(vault_path, tmp_path):
     writer = Vault.create(vault_path, PASS, creator="t")
     writer.save()                        # empty journal: the open won't save
-    _append_during_the_open(monkeypatch, writer,
-                            "Stored while the other process was opening.")
-    opener = Vault.unlock(vault_path, passphrase=PASS)
-    monkeypatch.undo()
+    with pytest.MonkeyPatch.context() as mp:
+        _append_during_the_open(mp, writer,
+                                "Stored while the other process was opening.")
+        opener = Vault.unlock(vault_path, passphrase=PASS)
     # It holds the file as it was read, and knows the file has moved on - so
     # an MCP server reloads before its next call instead of acting on it.
     assert opener.is_stale()
@@ -82,6 +82,7 @@ def test_an_open_that_raced_a_write_knows_it_is_behind(vault_path,
                      source="t")
     on_disk = _texts(Vault.unlock(vault_path, passphrase=PASS))
     assert any("Stored while the other process" in t for t in on_disk)
+    assert_guards_in_force(tmp_path)
 
 
 def _torn_append(path, nbytes):
