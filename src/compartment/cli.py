@@ -1965,6 +1965,8 @@ def _integrate_target(args) -> None:
                 existed = cfg_path.is_file()
                 cfg = (json.loads(cfg_path.read_text(encoding="utf-8"))
                        if existed else {})
+                if not isinstance(cfg, dict):      # null, a list: not a config
+                    raise ValueError("not a JSON object")
                 cfg.setdefault("mcpServers", {})["compartment"] = entry
                 # A byte-exact backup first, then the file replaced whole.
                 backup = clients.write_config(cfg_path,
@@ -1974,7 +1976,7 @@ def _integrate_target(args) -> None:
                       + (f" (backup: {backup.name})" if backup else ""))
                 print("  restart to load:  openclaw gateway restart")
                 print("  verify:           openclaw mcp list")
-            except (json.JSONDecodeError, OSError) as exc:
+            except (ValueError, OSError) as exc:
                 print(f"  could not edit {cfg_path} automatically ({exc});")
         if not wrote:
             print("  add this under \"mcpServers\" in ~/.openclaw/openclaw.json, "

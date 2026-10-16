@@ -631,6 +631,26 @@ def test_an_openclaw_write_cut_short_leaves_its_config_whole_with_a_backup(
     assert backup.read_bytes() == before
 
 
+@pytest.mark.parametrize("raw", ["null\n", "[]\n"])
+def test_an_openclaw_config_that_is_json_but_not_an_object_is_refused(
+        raw, tmp_path, monkeypatch, capsys):
+    """`integrate openclaw` parsed `null` or `[]` and then called
+    .setdefault on it, so it died with AttributeError, where the other
+    readers leave such a file alone and the user gets the block to paste."""
+    home = tmp_path / "openclaw-home"
+    home.mkdir()
+    monkeypatch.setenv("OPENCLAW_HOME", str(home))
+    cfg = home / "openclaw.json"
+    cfg.write_text(raw, encoding="utf-8")
+    cli._integrate_target(types.SimpleNamespace(target="openclaw",
+                                                vault=VAULT))
+    out = capsys.readouterr().out
+    assert "could not edit" in out and "not a JSON object" in out
+    assert '"compartment": {' in out                  # the block to paste
+    assert cfg.read_text(encoding="utf-8") == raw     # untouched
+    assert not cfg.with_name(cfg.name + clients.BACKUP_SUFFIX).exists()
+
+
 def test_two_writes_of_one_config_at_once_each_leave_it_whole(tmp_path,
                                                              monkeypatch):
     """write_config wrote <file>.tmp, one name for every writer, so two at
