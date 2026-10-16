@@ -414,6 +414,27 @@ def test_a_socket_path_too_deep_for_af_unix_moves_to_the_temp_dir(monkeypatch, t
     assert p.name.startswith("compartment-") and p.suffix == ".sock"
 
 
+def test_a_daemon_that_cannot_listen_is_not_waited_for(monkeypatch, tmp_path):
+    """With the session directory and the temp directory both too deep for
+    an AF_UNIX path, the daemon a client starts cannot bind and exits at
+    once, and the client went on polling for its 15 s, at every process
+    start and every reopen of a vault, before using a model of its own."""
+    monkeypatch.setenv("COMPARTMENT_EMBED_DAEMON", "1")
+    monkeypatch.setenv("COMPARTMENT_EMBED_IDLE", "1")
+    monkeypatch.delenv("COMPARTMENT_EMBED_SOCKET", raising=False)
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / ("deep" * 40)))
+    deep_tmp = tmp_path / ("tmp" * 40)
+    deep_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(deep_tmp))
+    monkeypatch.setattr(tempfile, "tempdir", str(deep_tmp))
+    t0 = time.monotonic()
+    e = get_embedder()
+    took = time.monotonic() - t0
+    assert isinstance(e, Embedder)
+    assert took < 5
+    assert list(deep_tmp.iterdir()) == []       # nothing for a socket that cannot be
+
+
 def test_the_peer_credential_is_this_user():
     a, b = socket.socketpair(socket.AF_UNIX)
     try:

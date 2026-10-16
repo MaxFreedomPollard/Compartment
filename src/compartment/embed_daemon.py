@@ -147,7 +147,9 @@ def socket_path() -> Path:
     session directory beside the unlock credential, the one private
     directory Compartment already keeps. A home directory deep enough to push
     that past the AF_UNIX limit gets a per-user file in the temp directory,
-    named after the home so two homes never share one.
+    named after the home so two homes never share one. When that is too long
+    as well no daemon can listen for this home, and the session path comes
+    back, so nothing is left in the shared temp directory for it.
     """
     explicit = env("EMBED_SOCKET")
     if explicit:
@@ -158,7 +160,8 @@ def socket_path() -> Path:
         return p
     tag = base64.urlsafe_b64encode(
         str(Path.home()).encode("utf-8")).decode("ascii").rstrip("=")[-12:]
-    return Path(tempfile.gettempdir()) / f"compartment-{os.getuid()}-{tag}.sock"
+    q = Path(tempfile.gettempdir()) / f"compartment-{os.getuid()}-{tag}.sock"
+    return q if _fits(q) else p
 
 
 def _fits(p: Path) -> bool:
@@ -525,7 +528,7 @@ def _connect(path: Path, timeout: float = 5.0) -> socket.socket | None:
     return s
 
 
-def _spawn(path: Path, idle: int) -> None:
+def _spawn(path: Path, idle: int) -> subprocess.Popen:
     """Start the daemon detached: its own session, so neither the MCP
     client's process-group cleanup nor a closing terminal takes it down,
     and no inherited stdio, because stdout of an MCP server IS the
@@ -545,9 +548,10 @@ def _spawn(path: Path, idle: int) -> None:
     # environment, where the package seals it.
     if offline_guard.is_active():
         env_["COMPARTMENT_ASSERT_OFFLINE"] = "1"
-    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True,
-                     close_fds=True, cwd=str(Path.home()), env=env_)
+    return subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            close_fds=True, cwd=str(Path.home()), env=env_)
 
 
 def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
@@ -579,7 +583,7 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
         if s is not None:
             return s
         try:
-            _spawn(path, idle)
+            child = _spawn(path, idle)
         except OSError:
             return None
         while time.monotonic() < deadline:
@@ -587,6 +591,10 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
             s = _connect(path)
             if s is not None:
                 return s
+            if child.poll() is not None:
+                # It exited without listening: it could not bind the
+                # socket, or another daemon holds the lock.
+                return None
         return None
     finally:
         try:
