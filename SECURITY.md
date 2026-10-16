@@ -181,7 +181,9 @@ running as the same user is already inside the trust boundary - it can read
 the session credential and open the vault directly - so the socket gives
 that user nothing they did not have. It is not a network listener:
 `--assert-offline` allows AF_UNIX and forbids everything else, exactly as
-before.
+before. The one AF_INET exception is the loopback pair that
+`socket.socketpair` is on Windows, which asyncio's event loop needs, and it
+is allowed only while that call runs.
 
 `COMPARTMENT_EMBED_DAEMON=0`, or `embed_daemon: false` in the vault's
 settings, keeps the model inside each process instead. Windows has no

@@ -9,8 +9,11 @@ and hold the local paths open.
 Nothing here connects to anything. Every network assertion is that the call
 RAISED, which happens before any packet could be sent.
 """
+import inspect
+import json
 import os
 import socket
+import subprocess
 import sys
 
 import pytest
@@ -133,6 +136,7 @@ def test_deactivate_leaves_nothing_behind():
     assert not offline_guard.is_active()
     assert socket.socket.__new__ is offline_guard._original_socket_new
     assert _socket.socket is offline_guard._real_raw_socket
+    assert socket.socketpair is offline_guard._original_socketpair
     assert socket.getaddrinfo is offline_guard._original_resolvers["getaddrinfo"]
     # AF_INET is buildable again, without connecting it to anything.
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -153,6 +157,133 @@ def test_env_activated_guard_cannot_be_switched_off_in_process():
     assert offline_guard.is_active()
     with pytest.raises(offline_guard.OfflineViolation):
         socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+
+def _windows_socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM,
+                        proto=0):
+    """socket.socketpair where _socket has none, which is Windows: CPython
+    3.11's own fallback from Lib/socket.py, two AF_INET sockets joined
+    through a listener on loopback. Only ever run in a child, installed in
+    place of socket.socketpair before compartment is imported, as it is
+    there."""
+    if family == socket.AF_INET:
+        host = "127.0.0.1"
+    elif family == socket.AF_INET6:
+        host = "::1"
+    else:
+        raise ValueError("Only AF_INET and AF_INET6 socket address families "
+                         "are supported")
+    if type != socket.SOCK_STREAM:
+        raise ValueError("Only SOCK_STREAM socket type is supported")
+    if proto != 0:
+        raise ValueError("Only protocol zero is supported")
+    lsock = socket.socket(family, type, proto)
+    try:
+        lsock.bind((host, 0))
+        lsock.listen()
+        addr, port = lsock.getsockname()[:2]
+        csock = socket.socket(family, type, proto)
+        try:
+            csock.setblocking(False)
+            try:
+                csock.connect((addr, port))
+            except (BlockingIOError, InterruptedError):
+                pass
+            csock.setblocking(True)
+            ssock, _ = lsock.accept()
+        except BaseException:
+            csock.close()
+            raise
+    finally:
+        lsock.close()
+    return (ssock, csock)
+
+
+#: Under the guard, with the pair built as on Windows: an event loop, an
+#: AF_INET socket from another thread while a pair is being made, and one
+#: from this thread once it is made.
+_EVENT_LOOP = """
+import asyncio, json, socket, threading
+{fallback}
+during = []
+
+def pair_while_another_thread_tries(*args, **kwargs):
+    t = threading.Thread(target=lambda: during.append(inet()))
+    t.start()
+    t.join()
+    return _windows_socketpair(*args, **kwargs)
+socket.socketpair = pair_while_another_thread_tries
+from compartment import offline_guard
+offline_guard.activate()
+
+def inet():
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
+    except offline_guard.OfflineViolation:
+        return "refused"
+    return "created"
+asyncio.new_event_loop().close()
+print(json.dumps({{"during": during, "after": inet()}}))
+"""
+
+
+def _child(code, env):
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       stdin=subprocess.DEVNULL, env=env, timeout=120)
+    return (p.returncode, p.stdout.decode("utf-8", "replace"),
+            p.stderr.decode("utf-8", "replace"))
+
+
+def test_the_pair_an_event_loop_is_built_from_is_let_through():
+    """On Windows asyncio builds every event loop's self-pipe with
+    socket.socketpair, which there is two AF_INET sockets on loopback, and
+    the guard refused them. Nothing else gets one: not another thread while
+    the pair is being made, and not this one once it is made."""
+    code = _EVENT_LOOP.format(fallback=inspect.getsource(_windows_socketpair))
+    rc, out, err = _child(code, dict(os.environ))
+    assert rc == 0, err
+    assert json.loads(out) == {"during": ["refused"], "after": "refused"}
+
+
+#: `compartment serve` with the pair built as on Windows, then whether an
+#: AF_INET socket is still refused once it has stopped. The keychain is
+#: never asked: it is not this test's to touch.
+_SERVE = """
+import json, socket, sys
+{fallback}
+socket.socketpair = _windows_socketpair
+from compartment import cli, offline_guard, vault
+vault.keychain_get = lambda path: None
+try:
+    cli.main([*{flag!r}, "--vault", {vault!r}, "serve"])
+finally:
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
+        after = "created"
+    except offline_guard.OfflineViolation:
+        after = "refused"
+    print(json.dumps({{"after": after}}), file=sys.stderr)
+"""
+
+
+@pytest.mark.parametrize("how", ["--assert-offline",
+                                 "COMPARTMENT_ASSERT_OFFLINE=1"])
+def test_serve_starts_under_the_guard_where_socketpair_is_inet(how, tmp_path):
+    """mcp's stdio transport runs on an asyncio event loop, so with the
+    guard on, by the flag or by the environment, `compartment serve` exited
+    1 on Windows before reading a request. This one's stdin is empty, so it
+    stops at once."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("COMPARTMENT_ASSERT_OFFLINE", "ENGRAM_ASSERT_OFFLINE",
+                        "COMPARTMENT_PASSPHRASE", "ENGRAM_PASSPHRASE")}
+    flag = ["--assert-offline"] if how.startswith("--") else []
+    if not flag:
+        env["COMPARTMENT_ASSERT_OFFLINE"] = "1"
+    code = _SERVE.format(fallback=inspect.getsource(_windows_socketpair),
+                         flag=flag, vault=str(tmp_path / "v.vault"))
+    rc, out, err = _child(code, env)
+    assert rc == 0 and "OfflineViolation" not in err, err
+    assert json.loads(err.strip().splitlines()[-1]) == {"after": "refused"}
 
 
 def test_guard_is_off_at_module_scope_unless_the_env_asked_for_it():
