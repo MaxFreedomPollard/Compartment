@@ -282,3 +282,51 @@ def test_store_many_interrupted_by_another_write_stores_the_rest_once(
                      "The office printer moved to the third floor"]
     assert after.get(old, caller="agent")["superseded_by"] == \
         out["stored"][0]["id"]
+
+
+def _through_the_sdk(monkeypatch, name, arguments):
+    """A tool call as the MCP SDK makes one, from its tool manager down.
+
+    The SDK's own wrapping decides what a failure says to the model: the
+    text of the exception it raises here is the text of the isError result
+    the client receives. Still no event loop: the body runs inline instead
+    of on a worker thread, so the whole call is one step of the coroutine."""
+    async def inline(fn, *args):
+        return fn(*args)
+    monkeypatch.setattr(server, "anyio", types.SimpleNamespace(
+        to_thread=types.SimpleNamespace(run_sync=inline)))
+    call = server.mcp.call_tool(name, arguments)
+    try:
+        call.send(None)
+    except StopIteration as done:
+        return done.value
+    finally:
+        call.close()
+    raise AssertionError(f"{name} waited for an event loop")
+
+
+def test_a_refused_tool_call_tells_the_model_why(serving, monkeypatch):
+    """mcp 2.x passes a failure's text to the model only for its own
+    ToolError. Anything else arrives as "Error executing tool <name>" and
+    the reason stays in the server's log, and MemoryToolError was a
+    RuntimeError, so the gate's refusal never reached the model that had
+    to split the memory."""
+    with pytest.raises(Exception) as e:
+        _through_the_sdk(monkeypatch, "memory_store",
+                         {"text": "x " * 150, "source": "from chat"})
+    assert "characters refused" in str(e.value), str(e.value)
+    assert serving.db.count() == 0
+
+
+def test_a_locked_vault_tells_the_model_what_to_run(vault_path, monkeypatch):
+    from compartment import vault as vault_module
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    for name in ("COMPARTMENT_PASSPHRASE", "ENGRAM_PASSPHRASE"):
+        monkeypatch.delenv(name, raising=False)
+    Vault.create(vault_path, "CorrectHorse", creator="test").lock()
+    for key, value in (("vault", None), ("path", vault_path),
+                       ("caller", "agent")):
+        monkeypatch.setitem(server._state, key, value)
+    with pytest.raises(Exception) as e:
+        _through_the_sdk(monkeypatch, "memory_search", {"query": "anything"})
+    assert "compartment unlock" in str(e.value), str(e.value)

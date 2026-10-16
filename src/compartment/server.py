@@ -29,8 +29,10 @@ try:
     # rename. Import whichever this environment has, so a single wheel runs
     # under both majors and a distro that only carries one is not stranded.
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:                                     # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer
+    from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__, gate, offline_guard, selftest
@@ -250,10 +252,12 @@ def _retag_loop() -> None:
             _state["last_retag"] = time.time()
 
 
-class MemoryToolError(RuntimeError):
+class MemoryToolError(ToolError, RuntimeError):
     """A tool call that failed. Raising rather than returning is what marks the
     result isError at the protocol level: a failure must not be indistinguishable
-    from a success."""
+    from a success. The SDK's ToolError is what carries the reason to the
+    model: mcp 2.x reports any other exception as "Error executing tool
+    <name>" alone."""
 
 
 def _fail(exc: Exception) -> MemoryToolError:
