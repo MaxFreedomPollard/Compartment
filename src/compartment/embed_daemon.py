@@ -79,9 +79,11 @@ DEFAULT_IDLE = 300
 
 SOCKET_NAME = "embed.sock"
 
-#: One request line. A `store_many` of a few hundred long records is well
-#: under a megabyte; this is a sanity bound against garbage on the socket,
-#: not a limit anyone should meet.
+#: One line on the socket, a request or a reply: the daemon reads requests
+#: and the client reads replies under this bound. A `store_many` of a few
+#: hundred long records is well under a megabyte, and embed_passages goes in
+#: parts of _PASSAGES_PER_CALL texts, a 16 MiB reply; this is a sanity bound
+#: against garbage on the socket, not a limit anyone should meet.
 _MAX_LINE = 64 * 1024 * 1024
 
 #: Texts per embed_passages round trip. A reply carries 2 KB a text (384

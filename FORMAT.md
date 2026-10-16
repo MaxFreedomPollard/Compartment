@@ -64,6 +64,11 @@ vault written before 2.2.
 `AEAD_seal(key, msg, aad)` = 24-byte random nonce ‖
 XChaCha20-Poly1305-IETF(msg, aad, nonce, key).
 
+A reader refuses an argon2id keyslot whose parameters are outside
+`time_cost` 1 to 16, `parallelism` 1 to 16 and `memory_kib` 8 times
+`parallelism` to 1,048,576 before it derives anything, and Compartment only
+ever writes the default shown above.
+
 Slot secrets:
 - `passphrase` - the user's passphrase, UTF-8. Since 1.8.0 this is the
   only slot `init`/`rekey` create; no credential is ever auto-generated.

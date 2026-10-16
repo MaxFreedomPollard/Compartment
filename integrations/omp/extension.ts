@@ -18,8 +18,8 @@
  *     independent of the MCP wiring (works even without mcp.json entry).
  *
  * All calls go through the `compartment` CLI: offline, no new dependencies,
- * ~12ms hybrid search. Failures are silent - memory must never break the
- * agent loop.
+ * ~12ms hybrid search. Failures never break the agent loop: a recall that
+ * fails adds nothing, and a flush that fails logs one line.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { spawnSync } from "node:child_process";

@@ -564,8 +564,9 @@ Registers the MCP server with the Claude Code CLI (user scope, all
 projects), imports the memories Claude Code has already written to its
 memory files (copy-only and repeatable; `--no-import` skips it), installs the
 capture hook (`--no-hooks` skips it), installs the `/compartmentalize` skill,
-writes a managed block into `CLAUDE.md`, and prints the Claude Desktop config
-block. The server also describes itself in the MCP handshake, telling the
+writes a managed block into `CLAUDE.md`, and, when Claude Desktop is
+installed, registers the server in Claude Desktop's config file, backed up
+first. The server also describes itself in the MCP handshake, telling the
 model to recall before answering and to store durable facts, credentials,
 names and decisions, so Claude uses Compartment as its memory without any
 manual instruction.

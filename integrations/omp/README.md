@@ -16,7 +16,9 @@ path that the Claude Code integration gets from its hooks.
 | Compaction guard | recalled memory injected into compaction context | yes |
 
 All vault access goes through the `compartment` CLI (offline, no new
-dependencies). Failures are silent - memory never breaks the agent loop.
+dependencies). Failures never break the agent loop: a recall that fails adds
+nothing, and a flush that fails logs one line saying how many turns were not
+stored.
 
 ## Install
 
@@ -60,5 +62,5 @@ The extension works with or without the MCP entry; both share the same vault.
   state or user instructions.
 - User-turn collection deduplicates by text; flushes are capped (20 turns,
   4000 chars) per store call.
-- Vault locked? The CLI exits non-zero and the extension stays silent -
-  nothing blocks the session.
+- Vault locked? The CLI exits non-zero: recall adds nothing, a flush logs
+  one line saying the turns were not stored, and nothing blocks the session.
