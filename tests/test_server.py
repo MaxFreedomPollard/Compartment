@@ -203,6 +203,57 @@ def test_the_auto_lock_waits_for_a_tool_call_in_progress(serving, monkeypatch):
     assert not v._locked
 
 
+def _retag_thread():
+    def run():
+        try:
+            server._retag_loop()
+        except _Stop:
+            pass
+    return threading.Thread(target=run, name="retag", daemon=True)
+
+
+def test_a_shred_while_the_retag_pass_lists_its_targets_completes(
+        serving, monkeypatch):
+    """The background retag pass listed its targets outside the tool gate,
+    stepping a SELECT on the connection every tool call uses, and SQLite
+    refuses a VACUUM while a statement is open: a memory_forget(shred=true)
+    landing then failed after deleting the row, with nothing audited or
+    journaled, and a retry found no record left to shred."""
+    from compartment import vault as vault_module
+    v = serving
+    ids = [v.store(f"Memory number {i} about the office.", caller="agent")["id"]
+           for i in range(3)]
+    listing, go = threading.Event(), threading.Event()
+    real_is_seeded = vault_module.is_seeded
+
+    def is_seeded(tags):               # retag.targets asks it row by row
+        if threading.current_thread().name == "retag" and not listing.is_set():
+            listing.set()
+            go.wait(10)                # the shred arrives mid-listing
+        return real_is_seeded(tags)
+    monkeypatch.setattr(vault_module, "is_seeded", is_seeded)
+    # A call that has to wait at the gate lets the listing finish.
+    monkeypatch.setattr(server, "_toolgate", _WaitedGate(go))
+    monkeypatch.setitem(server._state, "last_retag", 0.0)
+    _fake_sleeps(monkeypatch, passes=1)
+    t = _retag_thread()
+    t.start()
+    try:
+        assert listing.wait(10)
+        try:
+            with server._toolgate:     # memory_forget, as the server runs it
+                v.forget(ids[1], caller="agent", shred=True)
+        finally:
+            go.set()
+    finally:
+        t.join(10)
+    assert v.db.get_row(ids[1]) is None
+    assert ids[1] not in v._id_by_ikey.values()
+    assert v.db.conn.execute(
+        "SELECT count(*) FROM audit WHERE op = 'forget' AND detail LIKE ?",
+        (f"%{ids[1]}%",)).fetchone()[0] == 1
+
+
 def _live_texts(vault_path, key):
     after = Vault.unlock(vault_path, raw_key=key)
     return after, sorted(strip_provenance(r["text"]) for r in

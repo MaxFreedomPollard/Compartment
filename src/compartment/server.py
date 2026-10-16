@@ -326,8 +326,11 @@ def _retag_loop() -> None:
             # takes about a second and a half per thousand records, and it
             # holds the same lock every memory tool takes, so doing it in one
             # piece would stall every search an agent made for the duration.
-            # Chunked, the longest any call can wait is one slice.
-            ids = retag.targets(v)
+            # Chunked, the longest any call can wait is one slice. The listing
+            # takes the gate too: it steps a SELECT on the connection every
+            # tool call uses, and a shred's VACUUM fails while one is open.
+            with _toolgate:
+                ids = retag.targets(v)
             changed = added = removed = 0
             for i in range(0, len(ids), RETAG_CHUNK):
                 with _toolgate:
