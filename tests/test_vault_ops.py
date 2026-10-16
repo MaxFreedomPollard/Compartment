@@ -47,6 +47,48 @@ def test_journal_replay_after_abandon(vault, vault_path):
     assert ok, msg
 
 
+def test_an_open_builds_the_search_index_once(vault, vault_path, monkeypatch):
+    """Opening built the vector index twice: in the constructor, from the
+    payload as it was read, and again after the journal replay. Nothing in
+    between reads the index, so the first build was thrown away unused; at
+    20,000 records and above (HNSW) it was about half of every open, paid by
+    each process on each reopen."""
+    vault.store("The router admin page is on port 8080", caller="test")
+    vault.save()
+    vault.store("The spare charger is in the hall drawer", caller="test")
+    builds = []
+    real = Vault._rebuild_index
+
+    def counted(self):
+        builds.append(self)
+        real(self)
+    monkeypatch.setattr(Vault, "_rebuild_index", counted)
+    Vault.unlock(vault_path, passphrase=PASS)
+    assert len(builds) == 1
+
+
+def test_the_index_an_open_builds_holds_what_the_journal_replayed(
+        vault, vault_path):
+    """The one build an open keeps is the one after the replay, so a memory
+    that lives only in the journal is in the index, and the index is what a
+    fresh rebuild of the opened vault gives."""
+    vault.store("The router admin page is on port 8080", caller="test")
+    vault.save()
+    late = vault.store("The spare charger is in the hall drawer",
+                       caller="test")                       # journal only
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    assert set(v2.db.vector_keys(late["id"])) <= set(v2._id_by_ikey)
+    query = "where is the spare charger"
+    first = [(h["id"], h["score"])
+             for h in v2.search(query, caller="test")["results"]]
+    keys, rows = dict(v2._id_by_ikey), len(v2.index)
+    v2._rebuild_index()
+    assert (v2._id_by_ikey, len(v2.index)) == (keys, rows)
+    again = [(h["id"], h["score"])
+             for h in v2.search(query, caller="test")["results"]]
+    assert again == first and first[0][0] == late["id"]
+
+
 def test_kill9_crash_recovery(tmp_path):
     """Real kill -9 mid-run: acknowledged writes survive, vault reopens clean."""
     vp = str(tmp_path / "crash.vault")

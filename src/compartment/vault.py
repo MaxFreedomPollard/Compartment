@@ -422,7 +422,10 @@ class Vault:
         # model pin check (I3: refuse to run degraded)
         model_name = db.get_meta("model_name")
         config = VaultConfig.load(path)
-        v = cls(path, loaded.header, db, master, config)
+        # No index yet: the one search uses is built once, after the journal
+        # replay below. Nothing in between reads it, and a build from the
+        # payload alone was thrown away unused.
+        v = cls(path, loaded.header, db, master, config, build_index=False)
         # What this vault holds is the file as it was READ, so that is what
         # later saves must check against. The constructor stats the disk now,
         # after the decrypt: an append another process made in between would
