@@ -1516,7 +1516,10 @@ def _install_capture_hook(vault: str, skip: bool = False) -> None:
               "with `compartment hook install`.")
         return
     try:
-        out = claude_hooks.install(vault=vault)
+        # The same executable the MCP registration names, not whatever
+        # `compartment` happens to be on this process's PATH.
+        out = claude_hooks.install(compartment_bin=clients.executable(),
+                                   vault=vault)
     except ValueError as exc:            # malformed settings.json - never guess
         print(f"\n  ! {exc}")
         print("    fix the file, then run `compartment hook install`")

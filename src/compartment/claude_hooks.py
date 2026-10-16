@@ -20,7 +20,6 @@ from __future__ import annotations
 from .home import env, home
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -44,8 +43,12 @@ def _entry(command: str) -> dict:
 
 
 def hook_command(compartment_bin: str | None = None, vault: str | None = None) -> str:
-    """The exact shell command the hook runs."""
-    exe = compartment_bin or shutil.which("compartment") or "compartment"
+    """The exact shell command the hook runs.
+
+    The compartment beside this interpreter, as every MCP registration
+    names it: a bare name only works where `compartment` is on the PATH
+    Claude Code's shell gets, and the .app install puts it on none."""
+    exe = compartment_bin or clients.executable()
     if " " in exe:
         exe = f'"{exe}"'
     vault_part = f' --vault "{vault}"' if vault else ""

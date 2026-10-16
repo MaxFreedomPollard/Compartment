@@ -5,11 +5,14 @@ verified by hand on one machine, so nothing caught a platform-specific break.
 """
 import io
 import json
+import os
+import shutil
+import subprocess
 import types
 
 import pytest
 
-from compartment import claude_hooks, claude_memory, cli
+from compartment import claude_hooks, claude_memory, cli, clients
 
 PASS = "CorrectHorse"
 
@@ -145,6 +148,49 @@ def test_uninstall_when_absent_is_false(home):
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text("{}", encoding="utf-8")
     assert claude_hooks.uninstall() is False
+
+
+def _installed_command(settings):
+    groups = json.loads(settings.read_text(encoding="utf-8"))["hooks"][
+        claude_hooks.EVENT]
+    return [h["command"] for g in groups for h in g["hooks"]
+            if claude_hooks.is_ours(h["command"])][0]
+
+
+def test_the_capture_hook_names_a_compartment_that_exists(
+        home, vault_path, monkeypatch, tmp_path):
+    """The hook was written as a bare `compartment ... hook capture`
+    whenever `compartment` was not on the PATH of the process installing
+    it (the .app install puts it on none; an unactivated venv; a login
+    item), while the MCP registration from the same run named the resolved
+    executable. Claude Code's shell then answered "command not found" after
+    every Write and Edit of any file, and nothing was ever captured."""
+    nothing = tmp_path / "empty-bin"
+    nothing.mkdir()
+    monkeypatch.setenv("PATH", str(nothing))
+    assert shutil.which("compartment") is None
+    exe = clients.executable()
+    assert os.path.isabs(exe)
+
+    cli._install_capture_hook(vault_path)          # init, integrate claude
+    cmd = _installed_command(home.settings)
+    assert cmd == claude_hooks.hook_command(exe, vault_path)
+    assert claude_hooks.hook_command(vault=vault_path) == cmd   # hook install
+    assert f'--vault "{vault_path}"' in cmd
+
+    if os.name != "nt":                 # run it the way Claude Code does
+        edit = json.dumps({"tool_name": "Edit",
+                           "tool_input": {"file_path": str(tmp_path / "a.py")}})
+        ran = subprocess.run(["/bin/sh", "-c", cmd], input=edit, text=True,
+                             capture_output=True, timeout=60)
+        assert ran.returncode == 0, ran.stderr
+
+    # A resolved path with a space in it is still quoted for the shell.
+    monkeypatch.setattr(clients, "executable",
+                        lambda: "/Applications/My Tools/compartment")
+    assert claude_hooks.hook_command(vault="/v/m.vault") == (
+        '"/Applications/My Tools/compartment" --vault "/v/m.vault" '
+        "hook capture")
 
 
 # ------------------------------------------------------------ file filter
