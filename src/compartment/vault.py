@@ -2025,8 +2025,21 @@ class Vault:
                      namespace: str | None = None) -> int:
         self._require_open()
         records = [json.loads(l) for l in text.splitlines() if l.strip()]
-        texts = [r["text"] for r in records]
-        vecs = self.embedder.embed_passages(texts) if texts else []
+        # What store() embeds: the claim without its provenance clause, every
+        # window of it. All of them go in one batched call, and each record
+        # is handed its own block of rows. A claim of at most CHUNK_WINDOW
+        # characters is one window, as in rebuild_windows, without a call.
+        windows = []
+        for r in records:
+            claim = strip_provenance(r["text"].strip())
+            windows.append(self.embedder.chunk(claim)
+                           if len(claim) > CHUNK_WINDOW else [claim])
+        flat = [w for ws in windows for w in ws]
+        rows = self.embedder.embed_passages(flat) if flat else []
+        vecs, at = [], 0
+        for ws in windows:
+            vecs.append(rows[at:at + len(ws)])
+            at += len(ws)
         n = 0
         skipped = 0
         stale = 0

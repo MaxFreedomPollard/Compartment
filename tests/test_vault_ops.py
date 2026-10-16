@@ -155,6 +155,50 @@ def test_export_import_roundtrip(vault, tmp_path):
     assert hit.get("quarantined") is True
 
 
+_FACTS = ("The office router admin page is at 192.168.8.1.",
+          "The guest wifi password rotates every Monday.",
+          "Backups run nightly at 02:00 to the NAS in the hall closet.",
+          "The staging database is Postgres 15 on port 5433.",
+          "Max prefers Fastmail for custom domains.",
+          "The printer on the second floor needs the HP Universal driver.",
+          "Invoices are due on the 5th of each month.",
+          "The VPN uses WireGuard with the config in ~/vpn/wg0.conf.",
+          "The CI runners are self-hosted on two Mac minis.",
+          "The domain compartment.dev renews on 14 March.",
+          "The team standup is at 09:30 on weekdays.",
+          "Docker Desktop is limited to 6 GB of RAM on the laptop.")
+
+
+def test_importing_a_vaults_own_export_stores_nothing_new(vault):
+    """An import embedded each exported text with its provenance clause,
+    which store() leaves out, and the clause moved the vector below the
+    duplicate threshold: re-importing a vault's own export stored most of
+    its lines a second time."""
+    for fact in _FACTS:
+        vault.store(fact, caller="test", source="web search",
+                    discovered="2026-09-01")
+    assert vault.import_jsonl(vault.export_jsonl(), caller="test") == 0
+    assert vault.db.count() == len(_FACTS)
+
+
+def test_an_imported_long_memory_keeps_every_window(vault, tmp_path):
+    """An import embedded the first 512 tokens of each record, so a long
+    memory came back with one window and its later parts could no longer be
+    found by meaning."""
+    long_text = " ".join(
+        f"Paragraph {i}: the migration plan moves service {i} from the old "
+        f"cluster to the new one after its health checks pass for a full day."
+        for i in range(40)) + (" The final step is that the payroll exporter "
+                               "writes its CSV to the finance share.")
+    rid = vault.store(long_text, caller="test", source="the incident log",
+                      _gate=False)["id"]
+    windows = vault.db.vector_counts()[rid]
+    assert windows >= 3
+    v2 = Vault.create(str(tmp_path / "second.vault"), PASS)
+    assert v2.import_jsonl(vault.export_jsonl(), caller="test") == 1
+    assert list(v2.db.vector_counts().values()) == [windows]
+
+
 def test_rekey(vault, vault_path):
     """rekey swaps in the USER'S new passphrase - nothing auto-generated,
     no recovery credential of any kind is created."""
