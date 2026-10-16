@@ -38,7 +38,9 @@ except ImportError:                                     # mcp 1.x
 from mcp.types import ToolAnnotations
 
 from . import __version__, audit, gate, offline_guard, selftest
+from .acl import VaultConfig
 from .crypto import CryptoError, TamperError
+from .platforms import file_signature
 from .vault import (DATA_NOT_INSTRUCTIONS, Vault, VaultLockedError,
                     VaultStaleError, expiry_date, strip_provenance)
 
@@ -108,7 +110,46 @@ except TypeError:                                       # mcp 1.x
 _state: dict = {"vault": None, "path": None, "caller": "unknown",
                 "last_op": time.time(), "auto_lock_min": 30,
                 "retag_hours": 6, "retag_prune": False,
-                "last_retag": time.time()}
+                "last_retag": time.time(), "settings_sig": None}
+
+
+def _read_settings() -> None:
+    """auto_lock_minutes, retag_interval_hours and retag_prune from the
+    vault config, when the file has changed since the last look.
+
+    Called whenever a vault is opened and by both loops before they use
+    them, so a server that started locked (every server started after a
+    restart) and a change made in the panel while a server runs both take
+    effect. A config that cannot be read keeps the values in use: it may
+    be half written at this instant, and the next look reads it again."""
+    try:
+        sig = file_signature(VaultConfig.path_for(_state["path"]))
+        if sig == _state["settings_sig"]:
+            return
+        settings = VaultConfig.load(_state["path"]).settings
+    except Exception:                                   # noqa: BLE001
+        return
+    _state["settings_sig"] = sig
+    try:
+        _state["auto_lock_min"] = int(settings.get("auto_lock_minutes", 30))
+    except (TypeError, ValueError):
+        # a hand-edited config can put anything in there, and an int()
+        # that raises here would kill `compartment serve` before it ever
+        # reaches mcp.run(). Fall back to the documented default.
+        print("compartment: auto_lock_minutes in the vault config is not a "
+              "number; using the default of 30 minutes",
+              file=sys.stderr, flush=True)
+        _state["auto_lock_min"] = 30
+    try:
+        _state["retag_hours"] = float(settings.get("retag_interval_hours", 6))
+        _state["retag_prune"] = bool(settings.get("retag_prune", False))
+    except (TypeError, ValueError):
+        # Same reasoning as auto_lock_minutes above: a hand-edited config
+        # must not be able to kill `compartment serve` before it starts.
+        print("compartment: retag_interval_hours in the vault config is "
+              "not a number; using the default of 6 hours",
+              file=sys.stderr, flush=True)
+        _state["retag_hours"] = 6
 
 
 def _vault() -> Vault:
@@ -150,6 +191,7 @@ def _vault() -> Vault:
             # it unchanged instead of masking it.
             raise
         _state["vault"] = v
+        _read_settings()
     _state["last_op"] = time.time()
     return v
 
@@ -175,6 +217,7 @@ def _autolock_loop() -> None:
     while True:
         try:
             time.sleep(30)
+            _read_settings()
             # Under the tool gate, like a tool call: a call either finishes
             # first, and the vault is not idle any more, or starts after the
             # lock and reopens through _vault(). Without it, a call arriving
@@ -190,9 +233,12 @@ def _autolock_loop() -> None:
             # process wrote the vault. Letting that escape would end this
             # daemon thread and with it auto-lock for the rest of the process,
             # silently. Report it and keep looping. stdout is the MCP
-            # transport, so this has to go to stderr.
-            print(f"compartment: auto-lock failed, will retry: "
-                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            # transport, so this has to go to stderr. lock() drops the key
+            # whether or not its save worked, so the vault is locked; what
+            # the failed save loses is the audit rows only RAM held.
+            print(f"compartment: auto-locked the vault, but its unflushed "
+                  f"audit rows were not saved: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
 
 
 def _retag_loop() -> None:
@@ -210,12 +256,13 @@ def _retag_loop() -> None:
     future pass, silently."""
     from . import retag
     while True:
-        hours = _state["retag_hours"]
         # A short poll rather than one long sleep: the interval is read from
         # vault config, and a sleeping thread would ignore a change to it for
         # as long as the OLD interval, which is the one case where the setting
         # looks broken.
         time.sleep(300)
+        _read_settings()
+        hours = _state["retag_hours"]
         if not hours or hours <= 0:
             continue
         if time.time() - _state["last_retag"] < hours * 3600:
@@ -853,28 +900,7 @@ def main(argv: list[str] | None = None) -> None:
         kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
         _state["vault"] = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
                                        keyfile=kf)
-        try:
-            _state["auto_lock_min"] = int(
-                _state["vault"].config.settings.get("auto_lock_minutes", 30))
-        except (TypeError, ValueError):
-            # a hand-edited config can put anything in there, and an int()
-            # that raises here would kill `compartment serve` before it ever
-            # reaches mcp.run(). Fall back to the documented default.
-            print("compartment: auto_lock_minutes in the vault config is not a "
-                  "number; using the default of 30 minutes",
-                  file=sys.stderr, flush=True)
-            _state["auto_lock_min"] = 30
-        try:
-            settings = _state["vault"].config.settings
-            _state["retag_hours"] = float(settings.get("retag_interval_hours", 6))
-            _state["retag_prune"] = bool(settings.get("retag_prune", False))
-        except (TypeError, ValueError):
-            # Same reasoning as auto_lock_minutes above: a hand-edited config
-            # must not be able to kill `compartment serve` before it starts.
-            print("compartment: retag_interval_hours in the vault config is "
-                  "not a number; using the default of 6 hours",
-                  file=sys.stderr, flush=True)
-            _state["retag_hours"] = 6
+        _read_settings()
     except CryptoError:
         _state["vault"] = None  # start locked; tools will say so
     threading.Thread(target=_autolock_loop, daemon=True).start()

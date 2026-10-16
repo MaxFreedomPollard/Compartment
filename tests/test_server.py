@@ -57,7 +57,8 @@ def serving(monkeypatch, vault, vault_path):
     """The server's state with this vault open and idle past its auto-lock."""
     for key, value in (("vault", vault), ("path", vault_path),
                        ("caller", "agent"), ("auto_lock_min", 30),
-                       ("last_op", time.time() - 31 * 60)):
+                       ("last_op", time.time() - 31 * 60),
+                       ("settings_sig", None)):
         monkeypatch.setitem(server._state, key, value)
     return vault
 
@@ -86,8 +87,8 @@ def test_auto_lock_drops_the_key_after_another_process_wrote(
     assert v._locked and v._master is None
     _assert_holds_no_plaintext(v)
     err = capsys.readouterr().err
-    assert err.count("auto-lock failed") == 1, err
-    assert "VaultStaleError" in err
+    assert err.count("auto-locked the vault") == 1, err
+    assert "audit rows were not saved" in err and "VaultStaleError" in err
 
 
 def test_the_panic_lock_still_reports_a_flush_it_could_not_make(
@@ -341,15 +342,19 @@ def own_state(monkeypatch):
     monkeypatch.setattr(server, "_state", dict(server._state))
 
 
-def _serve(monkeypatch, vault_path, session):
+def _serve(monkeypatch, vault_path, session, passphrase="CorrectHorse"):
     """server.main() with `session` in place of the stdio transport, its two
     background loops not started, and the passphrase in the environment as
-    the only credential (no keychain lookup). main() handles SIGTERM for
-    the whole process, so the handler it found is put back."""
+    the only credential (no keychain lookup; None for no credential at
+    all). main() handles SIGTERM for the whole process, so the handler it
+    found is put back."""
     from compartment import vault as vault_module
     monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
     monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
-    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    if passphrase is None:
+        monkeypatch.delenv("COMPARTMENT_PASSPHRASE", raising=False)
+    else:
+        monkeypatch.setenv("COMPARTMENT_PASSPHRASE", passphrase)
     monkeypatch.setattr(server, "_autolock_loop", lambda: None)
     monkeypatch.setattr(server, "_retag_loop", lambda: None)
     monkeypatch.setattr(server.mcp, "run", lambda *a, **k: session())
@@ -403,3 +408,74 @@ def test_a_server_stopped_with_sigterm_saves_them_too(
         signal.raise_signal(signal.SIGTERM)
     _serve(monkeypatch, vault_path, session)
     assert ended == [(os.getpid(), signal.SIGTERM, signal.SIG_DFL, "search")]
+
+
+def _set(vault_path, **settings):
+    from compartment.acl import VaultConfig
+    cfg = VaultConfig.load(vault_path)
+    cfg.settings.update(settings)
+    cfg.save(vault_path)
+
+
+def test_a_server_started_locked_takes_its_settings_from_the_vault(
+        vault, vault_path, own_state, monkeypatch):
+    """main() read auto_lock_minutes and the retag settings only when the
+    vault opened at startup, and a server starts locked after every
+    restart: it kept the defaults, so a 5-minute auto-lock was 30 minutes
+    and a retag pass the settings turned off ran every 6 hours."""
+    from compartment import retag
+    autolock, retag_loop = server._autolock_loop, server._retag_loop
+    _set(vault_path, auto_lock_minutes=5, retag_interval_hours=0)
+    key = vault._master
+    vault.lock()
+
+    def session():                     # `compartment unlock`, then a call
+        assert server._state["vault"] is None          # it started locked
+        monkeypatch.setattr(Vault, "resolve_credential", staticmethod(
+            lambda path, passphrase=None: (None, key)))
+        _call(server.memory_search, "anything")
+    _serve(monkeypatch, vault_path, session, passphrase=None)
+    v = server._state["vault"]
+    passes = []
+    monkeypatch.setattr(retag, "targets", lambda h: passes.append(1) or [])
+    server._state["last_retag"] = 0
+    _fake_sleeps(monkeypatch, passes=1)
+    with pytest.raises(_Stop):
+        retag_loop()
+    assert passes == [], "the retag pass ran with retag_interval_hours 0"
+    server._state["last_op"] = time.time() - 6 * 60
+    _fake_sleeps(monkeypatch, passes=1)
+    with pytest.raises(_Stop):
+        autolock()
+    assert v._locked, "six idle minutes did not lock a 5-minute auto-lock"
+
+
+def test_a_running_server_takes_a_settings_change(serving, vault_path,
+                                                  monkeypatch):
+    """The panel's Auto-lock menu writes the config while servers run."""
+    _set(vault_path, auto_lock_minutes=30)
+    monkeypatch.setitem(server._state, "last_op", time.time() - 6 * 60)
+    _run_autolock(monkeypatch, passes=1)
+    assert not serving._locked
+    _set(vault_path, auto_lock_minutes=5)
+    _run_autolock(monkeypatch, passes=1)
+    assert serving._locked
+
+
+def test_a_config_cut_short_keeps_the_settings_in_use(serving, vault_path,
+                                                      monkeypatch):
+    """A config read in the middle of a write must not reset the settings
+    or end a loop: the next look reads it again."""
+    from compartment.acl import VaultConfig
+    _set(vault_path, auto_lock_minutes=5)
+    server._read_settings()
+    assert server._state["auto_lock_min"] == 5
+    whole = VaultConfig.load(vault_path)
+    with open(vault_path + ".config.json", "w", encoding="utf-8") as f:
+        f.write('{"settings": {"auto_lock_minutes"')
+    server._read_settings()
+    assert server._state["auto_lock_min"] == 5
+    whole.settings["auto_lock_minutes"] = 15
+    whole.save(vault_path)
+    server._read_settings()
+    assert server._state["auto_lock_min"] == 15
