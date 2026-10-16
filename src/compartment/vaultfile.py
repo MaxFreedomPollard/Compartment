@@ -88,6 +88,8 @@ class VaultHeader:
             problem = "it is not a JSON object"
         elif not isinstance(d.get("vault_id"), str):
             problem = "vault_id is not a string"
+        elif "created" not in d:
+            problem = "created is missing"
         elif not is_int(d.get("payload_len")) or d["payload_len"] < 0:
             problem = "payload_len is not a non-negative integer"
         elif not isinstance(d.get("keyslots"), list) or \

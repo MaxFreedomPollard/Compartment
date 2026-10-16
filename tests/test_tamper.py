@@ -8,7 +8,7 @@ import pytest
 from compartment import crypto, packs
 from compartment.crypto import CryptoError, TamperError
 from compartment.vault import Vault
-from compartment.vaultfile import VaultFormatError, read_vault_file
+from compartment.vaultfile import VaultFormatError, VaultHeader, read_vault_file
 
 from conftest import PASS
 
@@ -156,6 +156,19 @@ def test_a_malformed_header_is_reported_as_corrupt(vault, vault_path,
         except Exception as exc:                        # noqa: BLE001
             escaped.append(f"{what}: {type(exc).__name__}: {exc}")
     assert escaped == []
+
+
+@pytest.mark.parametrize("key", ["vault_id", "created", "keyslots",
+                                 "payload_len", "model"])
+def test_a_header_missing_a_field_is_reported_as_corrupt(key):
+    """from_json read `created` without checking that it was there, so a
+    header without it raised a bare KeyError from the parser, where every
+    other field the header needs is reported as the header being corrupt."""
+    d = {"vault_id": "v", "created": "2026-01-01T00:00:00+00:00",
+         "keyslots": [], "payload_len": 0, "model": {"dim": 384}}
+    del d[key]
+    with pytest.raises(VaultFormatError, match=f"corrupt.*{key}"):
+        VaultHeader.from_json(d)
 
 
 def test_unknown_header_fields_still_open(vault, vault_path, tmp_path):
