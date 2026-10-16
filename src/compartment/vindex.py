@@ -31,19 +31,31 @@ class BruteForceIndex(VectorIndex):
     def __init__(self, dim: int):
         self.dim = dim
         self._keys: list[int] = []
-        self._mat = np.zeros((0, dim), dtype=np.float32)
+        # The rows live in a buffer with spare capacity and _mat is its
+        # filled part, so an add writes one row. Copying the whole matrix on
+        # every add made a store O(n) and a bulk insert O(n^2). The rows and
+        # their order are the ones np.vstack produced, so search reads the
+        # same matrix it always did.
+        self._buf = np.zeros((0, dim), dtype=np.float32)
+        self._mat = self._buf
 
     @classmethod
     def build(cls, dim: int, ikeys: list[int], mat: np.ndarray) -> "BruteForceIndex":
         idx = cls(dim)
         if len(ikeys):
             idx._keys = list(ikeys)
-            idx._mat = np.ascontiguousarray(mat, dtype=np.float32)
+            idx._mat = idx._buf = np.ascontiguousarray(mat, dtype=np.float32)
         return idx
 
     def add(self, ikey: int, vec: np.ndarray) -> None:
+        n = len(self._keys)
+        if n == len(self._buf):                  # full: double the capacity
+            grown = np.empty((max(2 * n, 16), self.dim), dtype=np.float32)
+            grown[:n] = self._mat
+            self._buf = grown
+        self._buf[n] = vec
         self._keys.append(ikey)
-        self._mat = np.vstack([self._mat, vec.astype(np.float32)[None, :]])
+        self._mat = self._buf[:n + 1]
 
     def remove(self, ikey: int) -> None:
         try:
@@ -51,7 +63,8 @@ class BruteForceIndex(VectorIndex):
         except ValueError:
             return
         self._keys.pop(i)
-        self._mat = np.delete(self._mat, i, axis=0)
+        # np.delete returns a new matrix, which becomes the buffer.
+        self._mat = self._buf = np.delete(self._mat, i, axis=0)
 
     def search(self, vec: np.ndarray, k: int) -> list[tuple[int, float]]:
         if not self._keys:
