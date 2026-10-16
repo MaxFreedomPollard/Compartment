@@ -136,8 +136,12 @@ class Client:
 
         The config file itself often does not exist until the user adds their
         first server, so the directory it would live in is the real signal.
+        A bare filename (LibreChat, Open WebUI) has no directory of its own:
+        its parent is wherever the command runs, so only the file counts.
         """
         p = self.config_path()
+        if not p.is_absolute():
+            return p.exists()
         return p.exists() or p.parent.is_dir()
 
 

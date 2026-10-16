@@ -416,6 +416,27 @@ def test_a_config_that_is_json_but_not_an_object_is_refused(raw, tmp_path,
     assert clients.unregister(c, path=cursor) is False
 
 
+def test_a_client_known_by_a_bare_filename_is_not_found_everywhere(
+        tmp_path, monkeypatch, capsys):
+    """LibreChat and Open WebUI are named by a file relative to wherever the
+    command runs, and the parent of a bare filename is ".", which always
+    exists: `integrate --list` called both installed on every machine, and
+    `--all` printed their blocks on every run."""
+    _clients_live_in(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["integrate", "--list"])
+    assert f"{len(clients.CLIENTS)} clients known, 0 installed here" in (
+        capsys.readouterr().out)
+
+    # Where the file is, the client is found, and it stays in the table:
+    # `integrate librechat` still prints the block to paste.
+    (tmp_path / "librechat.yaml").write_text("version: 1\n", encoding="utf-8")
+    assert clients.CLIENTS["librechat"].present() is True
+    assert clients.CLIENTS["open-webui"].present() is False
+    cli.main(["--vault", VAULT, "integrate", "librechat"])
+    assert '"mcpServers"' in capsys.readouterr().out
+
+
 def test_one_client_that_fails_does_not_stop_integrate_all(tmp_path,
                                                           monkeypatch,
                                                           capsys):
