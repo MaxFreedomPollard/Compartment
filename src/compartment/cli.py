@@ -69,10 +69,31 @@ def _maybe_keyfile(args) -> bytes | None:
     return Vault.load_keyfile_hint(args.vault)
 
 
+#: What a command says instead of asking for the vault's passphrase where
+#: nobody can type it.
+LOCKED_NOT_INTERACTIVE = ("vault is locked: run `compartment unlock`, or set "
+                          "COMPARTMENT_PASSPHRASE")
+
+
+def _can_prompt() -> bool:
+    """Whether a person can answer a passphrase prompt: stdin is a terminal.
+
+    getpass otherwise reads stdin, where nobody types: on an open pipe it
+    waits for good, on a closed one it dies with EOFError, and a program
+    that has a terminal and runs this with stdin piped would have the
+    prompt, and the keys typed at it, taken from its user's terminal."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _open_vault(args) -> Vault:
     try:
         pw, key = Vault.resolve_credential(args.vault)
     except CryptoError:
+        if not _can_prompt():
+            _die(LOCKED_NOT_INTERACTIVE)
         pw = getpass.getpass(f"Passphrase for {args.vault}: ")
         key = None
     kf = None if key is not None else _maybe_keyfile(args)
@@ -1028,6 +1049,8 @@ def cmd_rekey(args) -> None:
         if not pw:
             _die("no passphrase on stdin")
     else:
+        if not _can_prompt():
+            _die("--new-passphrase-stdin required when not interactive")
         pw = getpass.getpass("NEW passphrase (you choose it - nothing is "
                              "generated for you): ")
         if pw != getpass.getpass("Repeat NEW passphrase: "):
@@ -1106,6 +1129,8 @@ def cmd_reindex(args) -> None:
         try:
             pw, key = Vault.resolve_credential(args.vault)
         except CryptoError:
+            if not _can_prompt():
+                _die(LOCKED_NOT_INTERACTIVE)
             pw = getpass.getpass(f"Passphrase for {args.vault}: ")
             key = None
         v = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
@@ -1314,6 +1339,9 @@ def cmd_pack_build(args) -> None:
     vectors = emb.embed_passages([r["text"] for r in records])
     pw = None
     if args.encrypt:
+        if not _can_prompt():
+            _die("--encrypt asks for the pack passphrase, which needs a "
+                 "terminal")
         pw = getpass.getpass("Pack passphrase: ")
     blob = packs.build_pack(
         name=args.name, version=args.version, description=args.description,
@@ -1328,6 +1356,9 @@ def cmd_pack_build(args) -> None:
 
 def cmd_pack_install(args) -> None:
     v = _open_vault(args)
+    if args.encrypted and not _can_prompt():
+        _die("--encrypted asks for the pack passphrase, which needs a "
+             "terminal")
     pw = getpass.getpass("Pack passphrase: ") if args.encrypted else None
     out = packs.install_pack(v, Path(args.file).read_bytes(), caller=args.caller,
                              passphrase=pw, allow_reembed=args.re_embed,
