@@ -258,6 +258,62 @@ def test_only_the_app_itself_is_counted_and_stopped(tmp_path, monkeypatch):
             p.wait(timeout=10)
 
 
+#: Says it is up and waits: stands in for any process whose command line
+#: is the point, the app or something that only looks like it.
+WAITS = "import time; print('UP', flush=True); time.sleep(60)\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("pgrep"),
+                    reason="pgrep and tail")
+def test_a_copy_for_a_vault_in_a_folder_with_a_space_is_counted(tmp_path):
+    """The pattern took the vault for one word, `--vault [^ ]+`, so a copy
+    running for a vault in a folder such as "My Vaults" was never matched,
+    and the come-up checks never saw the new copy start. A server for the
+    same vault, a command whose text names a panel, and an editor or a
+    pager open on menubar.py or systray.py in such a folder, are still not
+    the app."""
+    folder = tmp_path / "My Vaults"
+    (folder / "src" / "compartment").mkdir(parents=True)
+    vault = str(folder / "memory.vault")
+    exe = tmp_path / "bin" / "compartment"         # the console script
+    exe.parent.mkdir()
+    exe.write_text(WAITS, encoding="utf-8")
+    other = tmp_path / "other.py"                  # the -m form's arguments
+    other.write_text(WAITS, encoding="utf-8")
+    apps = [[sys.executable, str(exe), "--vault", vault, "menubar"],
+            [sys.executable, str(exe), "--vault", vault, "tray", "--show"],
+            [sys.executable, str(other), "-m", "compartment.cli", "--vault",
+             vault, "panel"]]
+    look_alike = [[sys.executable, str(exe), "--vault", vault, "serve"],
+                  [sys.executable, str(exe), "--vault", vault, "dash"],
+                  [sys.executable, str(exe), "store",
+                   "Move the settings panel to the left"]]
+    procs = []
+    try:
+        for argv in apps + look_alike:
+            procs.append(subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                          text=True))
+        for name in ("menubar.py", "systray.py"):     # what an editor shows
+            path = folder / "src" / "compartment" / name
+            path.write_text("", encoding="utf-8")
+            procs.append(subprocess.Popen(["tail", "-f", str(path)],
+                                          stdout=subprocess.DEVNULL))
+        for p in procs[:len(apps) + len(look_alike)]:
+            assert p.stdout.readline().strip() == "UP"
+        app_pids = {p.pid for p in procs[:len(apps)]}
+        decoys = {p.pid for p in procs[len(apps):]}
+        for counted in (menubar.running_pids(), systray.running_pids()):
+            assert app_pids <= set(counted), "a copy of the app missed"
+            assert not decoys & set(counted), "something else counted"
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait(timeout=10)
+            if p.stdout:
+                p.stdout.close()
+
+
 # --- which copy owns the menu bar -------------------------------------------
 
 def test_only_the_launchd_copy_counts_as_supervised(monkeypatch):
@@ -282,8 +338,8 @@ def test_the_lock_names_the_process_holding_it(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32",
-                    reason="no pid is recorded on Windows; see "
-                           "_record_lock_holder")
+                    reason="not yet run on Windows, which keeps the pid in "
+                           "a file of its own beside the lock; see _pid_file")
 def test_the_holder_pid_is_read_back(tmp_path, monkeypatch):
     vault = str(tmp_path / "memory.vault")
     mine = os.getpid()

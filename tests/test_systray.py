@@ -127,6 +127,19 @@ def test_both_panels_ask_before_drawing_the_switches():
         systray.panel_rows)
 
 
+def test_the_macos_hook_switch_says_when_it_could_not_be_saved():
+    """toggleHook_ passed over any error from installing or removing the
+    capture hook, so the switch moved and nothing said why, where every
+    other switch, on both panels, reports it through change_setting. The
+    macOS front end cannot be drawn in CI, so this reads it."""
+    import inspect
+    from compartment import menubar
+    src = inspect.getsource(menubar.run)
+    hook = src.split("def toggleHook_(", 1)[1].split("\n        def ", 1)[0]
+    assert 'self.panel.change_setting("capture_hook"' in hook
+    assert "except" not in hook
+
+
 def test_missing_vault_and_errors_are_shown_not_raised():
     rows = systray.panel_rows(_state(exists=False, recent=[],
                                      error="no vault yet - run: compartment init"))

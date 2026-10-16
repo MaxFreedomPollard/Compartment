@@ -1764,10 +1764,11 @@ def relaunch_detached(vault: str, show: bool = False,
 
 
 #: The status bar app's own command line, as pgrep sees it: the CLI (its
-#: console script, or `-m compartment.cli`), the vault if one is named, then
-#: the subcommand. A match anywhere in the arguments also found an editor, a
-#: pager or a test run open on src/compartment/menubar.py or systray.py.
-APP_COMMAND = (r"(compartment|compartment\.cli)( --vault [^ ]+)? "
+#: console script, or `-m compartment.cli`), the vault if one is named,
+#: which may hold spaces, then the subcommand. A match anywhere in the
+#: arguments also found an editor, a pager or a test run open on
+#: src/compartment/menubar.py or systray.py.
+APP_COMMAND = (r"(compartment|compartment\.cli)( --vault .+)? "
                r"(menubar|panel|tray)( |$)")
 
 
@@ -2546,11 +2547,7 @@ def run(vault: str | None = None, show: bool = False,
 
         # ---- actions ---------------------------------------------------
         def toggleHook_(self, sender):
-            try:
-                self.panel.set_settings(set_setting(
-                    vault_path, "capture_hook", bool(sender.state())))
-            except Exception:                           # noqa: BLE001
-                pass
+            self.panel.change_setting("capture_hook", bool(sender.state()))
             self.rebuild()
 
         def toggleStarter_(self, sender):
