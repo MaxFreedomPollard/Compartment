@@ -153,4 +153,4 @@ def test_the_suite_never_writes_the_real_claude_desktop_config(
     from compartment import claude_desktop
     here = claude_desktop.config_path()
     assert here != real_claude_desktop_config_path()
-    assert "pytest" in str(here)
+    assert here.is_relative_to(tmp_path)
