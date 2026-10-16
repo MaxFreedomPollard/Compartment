@@ -11,6 +11,8 @@ import os
 import shutil
 import signal
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -128,6 +130,26 @@ def test_the_daemon_exits_when_nobody_is_connected(daemon_env):
     assert _wait_until(lambda: not daemon_env.exists(), 5)
 
 
+def test_a_client_arriving_as_an_idle_daemon_exits_starts_the_next_one(
+        daemon_env, monkeypatch):
+    """An idle daemon takes its socket file away first, so that a client
+    arriving in its last moments starts a fresh one. It kept its lock until
+    its accept loop next woke, up to a second later, so the fresh one found
+    the lock held and exited, and that client waited out its 15 s and
+    loaded a model of its own."""
+    monkeypatch.setenv("COMPARTMENT_EMBED_IDLE", "1")
+    first = RemoteEmbedder.connect()
+    pid = first.daemon_pid
+    first.close()
+    time.sleep(0.5)
+    # Any connection restarts the accept loop's one-second wait, which
+    # puts its wakeups out of step with the idle check's.
+    embed_daemon.status(daemon_env)
+    assert _wait_until(lambda: not daemon_env.exists(), 10)
+    late = RemoteEmbedder.connect()
+    assert late is not None and late.shared and late.daemon_pid != pid
+
+
 def test_a_client_survives_the_daemon_being_killed(daemon_env):
     r = RemoteEmbedder.connect()
     first = r.daemon_pid
@@ -224,6 +246,60 @@ def test_a_newer_client_replaces_an_older_daemon(daemon_env, monkeypatch):
     # daemon has been told to go.
     assert RemoteEmbedder.connect() is None
     assert _wait_until(lambda: embed_daemon.status(daemon_env).get("pid") != pid, 10)
+
+
+#: The daemon an older install left running: the shipped one, reporting an
+#: older version, and going as earlier releases go when told to: its socket
+#: file at once, its lock only when the process exits, which was up to a
+#: second later. Here it is always a second.
+_OLDER_DAEMON = """
+import os, sys, time
+from compartment import embed_daemon
+embed_daemon.__version__ = "4.0.0"
+
+def shutdown(self):
+    if not self._stop.is_set():
+        self.told = time.monotonic()
+        self._stop.set()
+    try:
+        if os.stat(self.path).st_ino == self._inode:
+            os.unlink(self.path)
+    except OSError:
+        pass
+    self._listener.close()
+
+def cleanup(self):
+    time.sleep(max(0.0, self.told + 1.0 - time.monotonic()))
+
+embed_daemon._Daemon._shutdown = shutdown
+embed_daemon._Daemon._cleanup = cleanup
+sys.exit(embed_daemon.main(sys.argv[1:]))
+"""
+
+
+def test_a_newer_client_takes_over_from_an_older_daemon_at_once(daemon_env):
+    """Every upgrade meets the daemon the older install left running. The
+    newer client told it to go and started its own as soon as its socket
+    file went; the old one still held its lock, so the new one exited, and
+    the client waited out its 15 s and loaded a model of its own."""
+    env = dict(os.environ, PYTHONPATH=str(
+        Path(embed_daemon.__file__).resolve().parents[1]))
+    old = subprocess.Popen(
+        [sys.executable, "-c", _OLDER_DAEMON, "--socket", str(daemon_env),
+         "--idle", "60"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True, env=env)
+    try:
+        assert _wait_until(
+            lambda: embed_daemon.status(daemon_env).get("version") == "4.0.0")
+        t0 = time.monotonic()
+        r = RemoteEmbedder.connect()
+        assert r is not None and r.shared and r.daemon_pid != old.pid
+        assert time.monotonic() - t0 < 10
+        assert old.wait(10) == 0
+    finally:
+        if old.poll() is None:
+            old.kill()
+            old.wait()
 
 
 # ------------------------------------------------------- the offline guard --

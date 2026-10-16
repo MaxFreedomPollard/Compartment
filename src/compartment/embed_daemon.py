@@ -305,30 +305,22 @@ class _Daemon:
         return True
 
     def _cleanup(self) -> None:
-        try:
-            if self._listener is not None:
-                self._listener.close()
-        except OSError:
-            pass
-        # Only remove the socket if it is still ours: a replacement daemon
-        # may already be listening on a new file at the same path.
-        try:
-            if self._inode is not None and os.stat(self.path).st_ino == self._inode:
-                self.path.unlink()
-        except OSError:
-            pass
-        if self._lock_fd is not None:
-            try:
-                os.ftruncate(self._lock_fd, 0)
-                os.close(self._lock_fd)         # releases the flock
-            except OSError:
-                pass
+        self._shutdown()
 
     def _shutdown(self) -> None:
         """Stop accepting: the socket file goes first, so a client that
         arrives during the last milliseconds finds nothing and starts a
-        fresh daemon rather than connecting to one that is leaving."""
+        fresh daemon rather than connecting to one that is leaving, and the
+        lock straight after it, so that the fresh daemon can take over at
+        once. Only the first call does anything: once the lock is let go a
+        replacement may be listening on a new file at the same path, whose
+        inode can be the one this daemon's file had, and nothing here may
+        touch it."""
         self._stop.set()
+        with self._state:
+            fd, self._lock_fd = self._lock_fd, None
+        if fd is None:
+            return
         try:
             if self._inode is not None and os.stat(self.path).st_ino == self._inode:
                 self.path.unlink()
@@ -339,6 +331,11 @@ class _Daemon:
                 self._listener.close()
             except OSError:
                 pass
+        try:
+            os.ftruncate(fd, 0)
+            os.close(fd)                    # releases the flock
+        except OSError:
+            pass
 
     def _watch(self) -> None:
         """Exit when idle, and when the socket file is no longer ours: a
@@ -702,12 +699,17 @@ class RemoteEmbedder:
         except (OSError, ValueError):
             pass
         self._drop()
+        # Gone means its socket no longer answers and its lock is free. A
+        # daemon of an earlier release keeps the lock for up to a second
+        # after its socket file goes, and one started before then finds it
+        # held and exits.
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             probe = _connect(self._path, timeout=0.5)
-            if probe is None:
+            if probe is not None:
+                probe.close()
+            elif _locked_pid(self._path) is None:
                 return
-            probe.close()
             time.sleep(0.05)
 
     def _drop(self) -> None:
