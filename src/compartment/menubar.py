@@ -965,6 +965,14 @@ def create_vault(vault: str, passphrase: str, repeat: str) -> tuple[bool, str]:
             input=passphrase + "\n", capture_output=True, text=True,
             timeout=900, encoding="utf-8", errors="replace",
             env={**os.environ, "PATH": user_path()})
+    except subprocess.TimeoutExpired as exc:
+        if os.path.exists(vault):
+            # init writes the vault in its first seconds. What ran out of
+            # time is a later step, connecting the agents installed here,
+            # which waits on their own programs.
+            return True, ("Vault created. Connecting the agents installed "
+                          "here did not finish; connect them from this panel.")
+        return False, str(exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     out = " ".join(((p.stdout or "") + (p.stderr or "")).split())

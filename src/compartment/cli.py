@@ -445,6 +445,8 @@ def cmd_update(args) -> None:
     print(f"Compartment {__version__} - updating ({kind} install)")
     print("  " + " ".join(cmd))
     try:
+        # The one call that keeps the terminal: its output is the user's to
+        # see, and pip may have to ask for a private index's credentials.
         res = subprocess.run(cmd, timeout=1800)
     except (OSError, subprocess.SubprocessError) as exc:
         _die(f"update failed to run: {exc}")
@@ -454,7 +456,7 @@ def cmd_update(args) -> None:
     try:
         out = subprocess.run([shutil.which("compartment") or "compartment",
                               "--version"], capture_output=True, text=True,
-                             timeout=120)
+                             stdin=subprocess.DEVNULL, timeout=120)
         ver = (out.stdout or "").strip() or "?"
     except (OSError, subprocess.SubprocessError):
         pass
@@ -476,7 +478,8 @@ def cmd_update(args) -> None:
     try:
         ref = subprocess.run([shutil.which("compartment") or "compartment",
                               "integrate", "--refresh"],
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=120)
         if ref.returncode == 0 and ref.stdout.strip():
             print(ref.stdout.rstrip())
     except (OSError, subprocess.SubprocessError):
@@ -560,7 +563,8 @@ def cmd_uninstall(args) -> None:
     for name in (NAME, LEGACY_NAME):
         try:
             r = subprocess.run(["claude", "mcp", "remove", name],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, timeout=120)
             if r.returncode == 0:
                 print(f"  MCP registration removed: {name}")
         except (OSError, subprocess.SubprocessError):
@@ -1728,6 +1732,17 @@ def _integrate_client(client, args, brief: bool = False) -> None:
               "create one")
 
 
+#: How long `integrate` waits for another program's CLI it runs (Hermes's,
+#: Claude Code's) before printing the command to finish by hand. Each is a
+#: small step for that program; one busy updating itself is no reason to
+#: hold an install for as long as that takes.
+AGENT_TOOL_TIMEOUT = 120
+#: The `import compartment` check in Hermes's own interpreter.
+HERMES_IMPORT_TIMEOUT = 30
+#: pip installing compartment into Hermes's own environment.
+HERMES_PIP_TIMEOUT = 300
+
+
 def _integrate_target(args) -> None:
     import shutil
     import subprocess as sp
@@ -1745,21 +1760,52 @@ def _integrate_target(args) -> None:
         # compartment must be importable from Hermes's own venv
         hermes_py = hermes_home / "hermes-agent" / "venv" / "bin" / "python"
         if hermes_py.exists():
-            r = sp.run([str(hermes_py), "-c", "import compartment"], capture_output=True)
-            if r.returncode != 0:
-                print("  installing compartment into the Hermes venv…")
-                sp.run([str(hermes_py), "-m", "pip", "install", "-q",
-                        "compartment"], check=False)
+            # No stdin for any program run here: a question one of them asks
+            # must fail, not wait on the user's keyboard, and a failure or a
+            # timeout prints the command that finishes the step by hand.
+            by_hand = (f"  install it by hand with:  {hermes_py} -m pip "
+                       "install compartment")
+            try:
+                r = sp.run([str(hermes_py), "-c", "import compartment"],
+                           capture_output=True, stdin=sp.DEVNULL,
+                           timeout=HERMES_IMPORT_TIMEOUT)
+            except sp.TimeoutExpired:
+                print(f"  the Hermes venv did not answer within "
+                      f"{HERMES_IMPORT_TIMEOUT} s;")
+                print(by_hand)
+            else:
+                if r.returncode != 0:
+                    print("  installing compartment into the Hermes venv…")
+                    try:
+                        failed = sp.run(
+                            [str(hermes_py), "-m", "pip", "install", "-q",
+                             "compartment"], check=False, stdin=sp.DEVNULL,
+                            timeout=HERMES_PIP_TIMEOUT).returncode != 0
+                    except sp.TimeoutExpired:
+                        print(f"  pip did not finish within "
+                              f"{HERMES_PIP_TIMEOUT} s;")
+                        failed = True
+                    if failed:
+                        print(by_hand)
         if not os.path.exists(vault):
             print(f"! no vault at {vault} - run `compartment init` first, then re-run "
                   "this command")
             return
         hermes = shutil.which("hermes")
+        finish = "  finish selection with:  hermes memory setup compartment"
         if hermes:
             print("  selecting compartment in Hermes…")
-            sp.run([hermes, "memory", "setup", "compartment"], check=False)
+            try:
+                failed = sp.run([hermes, "memory", "setup", "compartment"],
+                                check=False, stdin=sp.DEVNULL,
+                                timeout=AGENT_TOOL_TIMEOUT).returncode != 0
+            except sp.TimeoutExpired:
+                print(f"  Hermes did not finish within {AGENT_TOOL_TIMEOUT} s;")
+                failed = True
+            if failed:
+                print(finish)
         else:
-            print("  finish selection with:  hermes memory setup compartment")
+            print(finish)
         print("Done. Verify with:  hermes memory status")
 
     elif target == "openclaw":
@@ -1805,17 +1851,26 @@ def _integrate_target(args) -> None:
         # inherit anyway.
         compartment_bin = clients.executable()
         claude = shutil.which("claude")
+        by_hand = (f"    claude mcp add --scope user compartment -- "
+                   f"{compartment_bin} --vault {vault} --caller claude-code "
+                   "serve")
         if claude:
             print("  registering the Compartment MCP server with Claude Code…")
-            r = sp.run([claude, "mcp", "add", "--scope", "user", "compartment", "--",
-                        compartment_bin, "--vault", vault, "--caller", "claude-code",
-                        "serve"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-            print((r.stdout or r.stderr).strip() or "  registered.")
+            try:
+                r = sp.run([claude, "mcp", "add", "--scope", "user",
+                            "compartment", "--", compartment_bin, "--vault",
+                            vault, "--caller", "claude-code", "serve"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", stdin=sp.DEVNULL,
+                           timeout=AGENT_TOOL_TIMEOUT)
+                print((r.stdout or r.stderr).strip() or "  registered.")
+            except sp.TimeoutExpired:
+                print(f"  Claude Code did not finish within "
+                      f"{AGENT_TOOL_TIMEOUT} s; register manually with:")
+                print(by_hand)
         else:
             print("  Claude Code CLI not found; register manually with:")
-            print(f"    claude mcp add --scope user compartment -- {compartment_bin} "
-                  f"--vault {vault} --caller claude-code serve")
+            print(by_hand)
         # Claude Desktop is a separate program with a separate config file, so
         # wiring Claude Code leaves it connected to nothing. This used to print
         # the block and leave the pasting to the user, which is not connecting

@@ -187,6 +187,32 @@ def test_a_creation_that_cannot_run_the_cli_says_so(tmp_path, monkeypatch):
     assert ok is False and "could not run the CLI" in msg
 
 
+def test_a_creation_that_ran_out_of_time_after_making_the_vault_says_so(
+        tmp_path, monkeypatch):
+    """init writes the vault and stores its session in its first seconds,
+    then connects the agents installed here, which waits on their own
+    programs. When that ran past the 900 s cap, the panel said "could not
+    create the vault" about a vault that existed and was open."""
+    vault = tmp_path / "v.vault"
+
+    def slow(args, **kw):
+        vault.write_bytes(b"made")
+        raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+    monkeypatch.setattr(subprocess, "run", slow)
+    ok, msg = menubar.create_vault(str(vault), PASS, PASS)
+    assert ok is True, msg
+    assert "Vault created" in msg and "did not finish" in msg
+
+
+def test_a_creation_that_ran_out_of_time_with_no_vault_still_fails(
+        tmp_path, monkeypatch):
+    def slow(args, **kw):
+        raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+    monkeypatch.setattr(subprocess, "run", slow)
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), PASS, PASS)
+    assert ok is False and "timed out" in msg
+
+
 def test_stderr_noise_cannot_hide_the_vault_status(monkeypatch):
     """A CLI child that answers on stdout while a library warns on stderr is
     still an answer. onnxruntime's device discovery does exactly that on
