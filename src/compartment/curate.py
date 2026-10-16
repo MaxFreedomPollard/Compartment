@@ -29,6 +29,7 @@ import numpy as np
 
 from . import gate
 from .crypto import CryptoError
+from .retag import BLOCK
 from .vault import (OPINION_UPDATE_THRESHOLD, Vault, is_seeded, local_stamp,
                     strip_provenance)
 
@@ -255,7 +256,9 @@ def opinion_clusters(v: Vault, threshold: float | None = None,
         # Vectorized pair-finding: the naive Python double loop walked
         # eighteen million pairs on a six-thousand-opinion vault. numpy
         # finds the above-threshold pairs; union-find only walks those.
-        pairs = np.argwhere(np.triu(mat @ mat.T >= thr, k=1))
+        # A block of rows at a time, as retag does: the whole matrix and
+        # its two boolean copies grew with the square of the opinions. The
+        # pairs come out in the same order, so the clusters are the same.
         parent = list(range(len(rows)))
 
         def find(i):
@@ -264,8 +267,11 @@ def opinion_clusters(v: Vault, threshold: float | None = None,
                 i = parent[i]
             return i
 
-        for i, j in pairs:
-            parent[find(int(i))] = find(int(j))
+        for start in range(0, len(rows), BLOCK):
+            ii, jj = np.nonzero(mat[start:start + BLOCK] @ mat.T >= thr)
+            above = jj > ii + start
+            for i, j in zip((ii[above] + start).tolist(), jj[above].tolist()):
+                parent[find(i)] = find(j)
         groups: dict[int, list] = {}
         for i, row in enumerate(rows):
             groups.setdefault(find(i), []).append(row)
