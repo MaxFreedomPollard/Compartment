@@ -3,8 +3,10 @@ prints, and what it does when nobody is there to answer."""
 import io
 import json
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -214,3 +216,66 @@ def test_reads_work_on_a_vault_they_cannot_write(read_only_dir, tmp_path,
     assert any("Postgres 16" in r["text"] for r in found["results"])
     assert "Postgres 16" in exported.read_text(encoding="utf-8")
     assert open(vault_path, "rb").read() == before
+
+
+OMP_EXTENSION = (Path(__file__).resolve().parents[1] / "integrations" / "omp"
+                 / "extension.ts")
+TURNS = [
+    "Please move the nightly backup job from 02:00 to 03:30 so it stops "
+    "colliding with the index rebuild on the NAS.",
+    "Also the staging deploy key should be rotated every 90 days; put a "
+    "reminder in the runbook when you touch it, and note that the old key "
+    "stays valid for a week after rotation so the CI runners pick up the new "
+    "one without a failed deploy in between.",
+]
+
+
+def _omp_flush_argv(text, tag):
+    """The `compartment` arguments the omp extension's flush builds for
+    `text`, read out of extension.ts: its run([...]) list, with the string
+    constants it names filled in and its one expression being the text."""
+    src = OMP_EXTENSION.read_text(encoding="utf-8")
+    body = re.search(r"const flush = \(tag: string\) => \{(.*?)\n  \};",
+                     src, re.S).group(1)
+    assert ".join(" not in body, "flush stores the turns joined as one memory"
+    consts = dict(re.findall(r'const (\w+) = "([^"]*)";', src))
+    listed = re.search(r"run\(\[(.*?)\]\)", body, re.S).group(1)
+    argv = []
+    for m in re.finditer(r'"(?P<lit>[^"]*)"|(?P<expr>[A-Za-z_][\w.]*'
+                         r'(?:\([^)]*\))?)', listed):
+        expr = m.group("expr")
+        argv.append(m.group("lit") if expr is None else
+                    tag if expr == "tag" else consts.get(expr, text))
+    return argv
+
+
+def test_the_omp_extension_flush_stores_each_user_turn(vault_path,
+                                                       passphrase_in_env):
+    """omp's flush joined up to 20 user turns into one `compartment store`
+    without --raw, so anything over 200 characters (two turns of ordinary
+    length, or one long one) was refused by the shape gate, and the
+    extension ignored the exit status: its automatic capture stored nothing.
+    The command lines here are the ones extension.ts builds."""
+    Vault.create(vault_path, PASS, creator="test").lock()
+    for turn in TURNS:
+        argv = _omp_flush_argv(turn, "session")
+        assert "--raw" in argv and turn in argv
+        cli.main(["--vault", vault_path, *argv])
+
+    v = Vault.unlock(vault_path, passphrase=PASS)
+    rows = v.db.conn.execute(
+        "SELECT id, tags, importance, source FROM records "
+        "WHERE pack IS NULL ORDER BY created").fetchall()
+    assert [json.loads(r["tags"]) for r in rows] == [["session"], ["session"]]
+    assert {r["importance"] for r in rows} == {0.7}
+    assert {r["source"] for r in rows} == {"omp extension: user turns"}
+    texts = [v.get(r["id"], caller="test")["text"] for r in rows]
+    assert all(t.startswith(turn) for t, turn in zip(texts, TURNS)), texts
+
+    # Without --raw the same two turns, joined as flush used to send them,
+    # are what the shape gate refuses.
+    joined = [a for a in _omp_flush_argv("\n".join(TURNS), "session")
+              if a != "--raw"]
+    with pytest.raises(SystemExit) as refused:
+        cli.main(["--vault", vault_path, *joined])
+    assert refused.value.code == 1

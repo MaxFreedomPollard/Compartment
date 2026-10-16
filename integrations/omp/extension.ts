@@ -71,9 +71,21 @@ export default function compartmentOmp(pi: ExtensionAPI) {
 
   const flush = (tag: string) => {
     if (!pending.length) return;
-    const text = pending.splice(0, MAX_PENDING).join("\n").slice(0, MAX_FACT_CHARS);
-    run(["store", text, "--tag", tag, "--importance", IMPORTANCE_SESSION,
-         "--source", "omp extension: user turns"]);
+    // One verbatim record per turn (--raw), as the Hermes provider and the
+    // Claude Code hook capture: a user turn is not a one-claim memory, and
+    // the shape gate refuses anything over 200 characters.
+    let failed = 0;
+    let why = "";
+    for (const turn of pending.splice(0, MAX_PENDING)) {
+      const r = run(["store", turn.slice(0, MAX_FACT_CHARS), "--raw", "--tag", tag,
+                     "--importance", IMPORTANCE_SESSION,
+                     "--source", "omp extension: user turns"]);
+      if (r.status !== 0) {
+        failed += 1;
+        why = (r.stderr || "").trim() || `exit status ${r.status}`;
+      }
+    }
+    if (failed) console.error(`compartment: ${failed} user turn(s) not stored: ${why}`);
   };
 
   // --- Read path: recall project memory at session start -----------------
