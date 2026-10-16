@@ -23,6 +23,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -449,7 +450,7 @@ class Vault:
                       "write at the end of the journal were discarded. The "
                       "write was never acknowledged, so nothing confirmed was "
                       "lost. This is the expected result of a crash or power "
-                      "loss during a store.")
+                      "loss during a store.", file=sys.stderr, flush=True)
             v.save()  # compact replayed journal into the payload
         if check_model:
             # The pin is a hash of a file, so hashing the file is the whole

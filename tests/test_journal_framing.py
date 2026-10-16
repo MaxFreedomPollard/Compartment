@@ -6,6 +6,7 @@ length leaves a prefix that fails its own checksum. The reader used to have to
 guess between the two, and guessing "crash" meant silently discarding every
 acknowledged entry after the damage, then compacting the loss away.
 """
+import json
 import struct
 import zlib
 
@@ -49,6 +50,30 @@ def test_a_torn_final_write_is_discarded_and_the_rest_survives(vault_path):
 
     v = Vault.unlock(vault_path, passphrase=PASS)
     assert v.status()["organic_records"] == 6, "acknowledged writes survive"
+
+
+def test_the_torn_write_notice_stays_out_of_what_a_command_prints(
+        vault_path, monkeypatch, capsys):
+    """The notice went to stdout: in front of the JSON every command prints,
+    and into the MCP server's JSON-RPC stream. Every other notice in the
+    package goes to stderr."""
+    from compartment import cli
+    from compartment import vault as vault_module
+    _vault_with_journal(vault_path, 2)
+    with open(vault_path, "ab") as f:            # a crash mid append, as above
+        payload = b"\x00" * 500
+        length = struct.pack(">I", len(payload))
+        f.write(length)
+        f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
+        f.write(payload[:200])
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", PASS)
+    capsys.readouterr()
+    cli.main(["--vault", vault_path, "status"])
+    out, err = capsys.readouterr()
+    assert json.loads(out)["organic_records"] == 2
+    assert "unfinished write" in err
 
 
 def test_a_corrupt_length_prefix_refuses_to_open(vault_path):
