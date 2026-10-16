@@ -22,7 +22,8 @@ import numpy as np
 import pytest
 
 from compartment import cli, embed_daemon, offline_guard
-from compartment.embed import DEFAULT_MODEL, Embedder, get_embedder, model_info
+from compartment.embed import (DEFAULT_MODEL, Embedder, ModelError,
+                               get_embedder, model_info)
 from compartment.embed_daemon import RemoteEmbedder
 from compartment.vault import Vault
 
@@ -475,3 +476,40 @@ def test_the_vault_setting_can_turn_it_off(daemon_env, tmp_path, monkeypatch):
     v._embedder = None
     assert not getattr(v.embedder, "shared", False)
     assert v.status()["embedder"]["shared_daemon"] is False
+
+
+@pytest.fixture()
+def read_only_home(tmp_path, monkeypatch):
+    """HOME a directory nothing can be made in, as for a service account or
+    in a hardened container: the session directory cannot exist."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("COMPARTMENT_SESSION_DIR")
+    monkeypatch.delenv("COMPARTMENT_EMBED_SOCKET", raising=False)
+    os.chmod(home, 0o500)
+    yield home
+    os.chmod(home, 0o700)
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="root ignores a directory's permissions")
+def test_a_home_that_cannot_hold_the_socket_embeds_with_its_own_model(
+        tmp_path, monkeypatch, read_only_home):
+    """The daemon's socket sits in the session directory, and making that
+    directory raised PermissionError straight out of get_embedder, so with
+    the daemon on, the default, a vault opened with its passphrase failed
+    every search, store and create it ran with the daemon off."""
+    vp = str(tmp_path / "v.vault")
+    v = Vault.create(vp, PASS, creator="test")
+    v.store("The router passphrase is taped under the desk", caller="test",
+            source="test")
+    v.lock()
+    monkeypatch.setenv("COMPARTMENT_EMBED_DAEMON", "1")
+    v = Vault.unlock(vp, passphrase=PASS)
+    found = v.search("where is the router passphrase", caller="test")["results"]
+    assert "router" in found[0]["text"]
+    assert isinstance(v.embedder, Embedder)
+    # A model that is not installed is still the error that names the remedy.
+    with pytest.raises(ModelError, match="download-model"):
+        get_embedder("multilingual-e5-small-int8")

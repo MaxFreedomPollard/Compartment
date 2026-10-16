@@ -647,7 +647,9 @@ class RemoteEmbedder:
             return None
         try:
             return cls(model_name, path or socket_path(), spawn=spawn, wait=wait)
-        except Unavailable:
+        except (Unavailable, OSError):
+            # OSError: the session directory or the lock files cannot be
+            # made here (a read-only home), which is no daemon either.
             return None
 
     # -- properties the vault reports --------------------------------------
