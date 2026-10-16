@@ -177,6 +177,58 @@ def test_update_gives_the_new_build_no_stdin(monkeypatch):
     assert all(kw.get("stdin") is subprocess.DEVNULL for kw in probes), ran
 
 
+#: A program writing `out` and `err` as the bytes they are.
+_WRITES = ("import sys; sys.stdout.buffer.write({out!r}); "
+           "sys.stderr.buffer.write({err!r})")
+
+#: `compartment update` in a process that decodes as Western Windows does:
+#: UTF-8 mode off and the locale's encoding cp1252. Only the upgrade itself
+#: is stubbed; the version probe and the refresh are real programs.
+_UPDATE_ON_CP1252 = """
+    import locale, subprocess, sys
+    locale.getencoding = lambda: "cp1252"
+    real_run = subprocess.run
+
+    def run(argv, **kwargs):
+        if argv[1:] == ["--version"]:
+            code = {version!r}
+        elif argv[1:] == ["integrate", "--refresh"]:
+            code = {refresh!r}
+        else:
+            return subprocess.CompletedProcess(argv, 0)
+        return real_run([sys.executable, "-c", code], **kwargs)
+    subprocess.run = run
+    from compartment import cli, embed_daemon
+    embed_daemon.stop = lambda: {{}}
+    cli.main(["update", "--no-app"])
+"""
+
+
+def test_update_reads_what_the_new_build_prints_as_utf8():
+    """A child's output captured with text=True and no encoding is decoded
+    with the locale's code page, the ANSI one on Windows (where UTF-8 mode
+    is off by default), while the CLI writes UTF-8. "\u0141" is C5 81 in
+    UTF-8 and cp1252 has nothing at 0x81, so a user folder like
+    C:\\Users\\\u0141ukasz in what the new build printed made update die
+    after the upgrade, before the app was restarted onto it."""
+    folder = "C:\\Users\\\u0141ukasz"
+    version = _WRITES.format(
+        out=b"compartment 4.11.0\n",
+        err=f"{folder}\\x.py:1: DeprecationWarning: x\n".encode("utf-8"))
+    refresh = _WRITES.format(
+        out=f"  updated {folder}\\.claude\\CLAUDE.md\n".encode("utf-8"),
+        err=b"")
+    script = textwrap.dedent(_UPDATE_ON_CP1252.format(version=version,
+                                                      refresh=refresh))
+    p = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                       env={**os.environ, "PYTHONUTF8": "0"}, timeout=60)
+    out = p.stdout.decode("utf-8", "replace")
+    err = p.stderr.decode("utf-8", "replace")
+    assert p.returncode == 0 and "Traceback" not in err, err
+    assert "updated: now compartment 4.11.0" in out, out
+    assert f"updated {folder}\\.claude\\CLAUDE.md" in out, out
+
+
 def test_uninstall_gives_claude_no_stdin(monkeypatch, tmp_path):
     from compartment import agent_skill, claude_hooks, menubar
     monkeypatch.setattr(cli, "_tray_app",
@@ -197,3 +249,28 @@ def test_uninstall_gives_claude_no_stdin(monkeypatch, tmp_path):
                                                       "remove"]]
     assert len(removes) == 2, ran
     assert all(kw.get("stdin") is subprocess.DEVNULL for kw in removes), ran
+
+
+def test_uninstall_reads_what_claude_prints_as_utf8(monkeypatch, tmp_path):
+    """`claude mcp remove` names the config it changed, under the user's
+    own folder, so uninstall decodes it as UTF-8 too. On Windows a wrong
+    guess fails inside subprocess's reader threads, as a traceback rather
+    than an exception, so the call itself is what is checked."""
+    from compartment import agent_skill, claude_hooks, menubar
+    monkeypatch.setattr(cli, "_tray_app",
+                        lambda: (_ for _ in ()).throw(RuntimeError("none")))
+    monkeypatch.setattr(menubar, "_is_generated", lambda path: False)
+    monkeypatch.setattr(claude_hooks, "is_installed", lambda: False)
+    monkeypatch.setattr(agent_skill, "remove", lambda target: False)
+    monkeypatch.setattr(agent_skill, "is_installed", lambda target: False)
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setenv("CLAUDE_MD", str(tmp_path / ".claude" / "CLAUDE.md"))
+    ran = _recording(monkeypatch)
+    cli.cmd_uninstall(types.SimpleNamespace(purge=False,
+                                            vault=str(tmp_path / "v")))
+    removes = [kw for argv, kw in ran if argv[:3] == ["claude", "mcp",
+                                                      "remove"]]
+    assert len(removes) == 2, ran
+    assert all(kw.get("encoding") == "utf-8" and kw.get("errors") == "replace"
+               for kw in removes), ran

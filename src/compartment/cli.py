@@ -454,8 +454,13 @@ def cmd_update(args) -> None:
         _die(f"update failed (exit {res.returncode})")
     ver = "?"
     try:
+        # The CLI writes UTF-8 whatever the console's code page. Left to the
+        # default, this decodes with the locale's (the ANSI code page on
+        # Windows), and a user folder name it could not decode made update
+        # die after the upgrade.
         out = subprocess.run([shutil.which("compartment") or "compartment",
                               "--version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace",
                              stdin=subprocess.DEVNULL, timeout=120)
         ver = (out.stdout or "").strip() or "?"
     except (OSError, subprocess.SubprocessError):
@@ -479,6 +484,7 @@ def cmd_update(args) -> None:
         ref = subprocess.run([shutil.which("compartment") or "compartment",
                               "integrate", "--refresh"],
                              capture_output=True, text=True,
+                             encoding="utf-8", errors="replace",
                              stdin=subprocess.DEVNULL, timeout=120)
         if ref.returncode == 0 and ref.stdout.strip():
             print(ref.stdout.rstrip())
@@ -570,6 +576,7 @@ def cmd_uninstall(args) -> None:
         try:
             r = subprocess.run(["claude", "mcp", "remove", name],
                                capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
                                stdin=subprocess.DEVNULL, timeout=120)
             if r.returncode == 0:
                 print(f"  MCP registration removed: {name}")
