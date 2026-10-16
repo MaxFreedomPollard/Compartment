@@ -329,13 +329,16 @@ def _retag_loop() -> None:
             # Chunked, the longest any call can wait is one slice. The listing
             # takes the gate too: it steps a SELECT on the connection every
             # tool call uses, and a shred's VACUUM fails while one is open.
+            # Every slice is planned against one snapshot taken with it, so
+            # the pass gives what one whole-vault plan would.
             with _toolgate:
                 ids = retag.targets(v)
+                ctx = retag.snapshot(v) if ids else None
             changed = added = removed = 0
             for i in range(0, len(ids), RETAG_CHUNK):
                 with _toolgate:
                     ch = retag.plan(v, prune=_state["retag_prune"],
-                                    only=ids[i:i + RETAG_CHUNK])
+                                    only=ids[i:i + RETAG_CHUNK], context=ctx)
                     changed += retag.apply(v, ch, caller=_state["caller"])
                     added += sum(len(c.added) for c in ch)
                     removed += sum(len(c.removed) for c in ch)

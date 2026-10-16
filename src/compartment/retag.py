@@ -273,24 +273,29 @@ def targets(vault, *, include_seeded: bool = False) -> list[str]:
     return out
 
 
-def plan(vault, *, include_seeded: bool = False, prune: bool = False,
-         limit: int | None = None, only: list[str] | None = None) -> list[Change]:
-    """Work out what every record's tags should be. Writes nothing.
+@dataclass
+class Snapshot:
+    """The vault-wide half of a plan, as the vault stood when it was taken:
+    every record's position and tags, the implication rules, the eligible
+    set and its patterns."""
+    ids: list[str]
+    mat: np.ndarray
+    index: dict[str, int]
+    rows: dict[str, str]
+    tags_by_id: dict[str, list[str]]
+    desc_by_id: dict[str, list[str]]
+    rules: dict[str, dict[str, float]]
+    allowed: set[str]
+    patterns: dict[str, re.Pattern]
 
-    `include_seeded` is off because a vault's starting memories are curated
-    pack content whose tags were chosen deliberately; the memories worth
-    re-deriving are the ones this machine learned. Seeded records still VOTE -
-    they are context, and excluding them from the neighbourhood would throw
-    away most of what the vault knows.
-    """
-    from .vault import is_seeded            # local: vault imports this module
 
+def snapshot(vault) -> Snapshot:
+    """What every slice of one pass is planned against. Taken once, it is
+    what makes a pass in slices give what one whole-vault plan gives: a
+    slice votes with the tags the vault had when the pass began, never with
+    what the slices before it wrote, and the setup is not repeated."""
     db = vault.db
     ids, mat = _record_matrix(db)
-    if not ids:
-        return []
-    index = {rid: i for i, rid in enumerate(ids)}
-
     rows = {}
     for row in db.conn.execute("SELECT id, tags FROM records"):
         rows[row["id"]] = row["tags"]
@@ -302,7 +307,32 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
     # in only one of the three signals would let the other two reintroduce
     # exactly what it excluded.
     allowed = eligible_tags(desc_by_id)
-    patterns = _vocab_pattern(allowed)
+    return Snapshot(ids, mat, {rid: i for i, rid in enumerate(ids)}, rows,
+                    tags_by_id, desc_by_id, rules, allowed,
+                    _vocab_pattern(allowed))
+
+
+def plan(vault, *, include_seeded: bool = False, prune: bool = False,
+         limit: int | None = None, only: list[str] | None = None,
+         context: Snapshot | None = None) -> list[Change]:
+    """Work out what every record's tags should be. Writes nothing.
+
+    `include_seeded` is off because a vault's starting memories are curated
+    pack content whose tags were chosen deliberately; the memories worth
+    re-deriving are the ones this machine learned. Seeded records still VOTE -
+    they are context, and excluding them from the neighbourhood would throw
+    away most of what the vault knows.
+
+    `context` is a snapshot() to plan against, taken at the start of a pass
+    that plans in slices; without one the plan takes its own.
+    """
+    from .vault import is_seeded            # local: vault imports this module
+
+    db = vault.db
+    ctx = snapshot(vault) if context is None else context
+    ids, mat, index, rows = ctx.ids, ctx.mat, ctx.index, ctx.rows
+    if not ids:
+        return []
 
     # `only` slices the work; the VOTERS are always the whole vault, because a
     # neighbourhood computed from one slice would give a record different tags
@@ -313,6 +343,17 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
                and (wanted is None or rid in wanted)]
     if limit is not None:
         targets = targets[:limit]
+    before = ctx.tags_by_id
+    if context is not None:
+        # A record's own tags as they are NOW: a tool call between two slices
+        # may have changed them, and the plan must not write over it.
+        before = {}
+        for rid in targets:
+            row = db.conn.execute("SELECT tags FROM records WHERE id = ?",
+                                  (rid,)).fetchone()
+            if row is not None:
+                before[rid] = json.loads(row["tags"])
+        targets = [rid for rid in targets if rid in before]
 
     changes: list[Change] = []
     for start in range(0, len(targets), BLOCK):
@@ -321,15 +362,14 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
         sims = block @ mat.T                       # (chunk, all records)
         for local, rid in enumerate(chunk):
             changes.append(_plan_one(
-                rid, sims[local], ids, index, desc_by_id, tags_by_id,
-                rules, patterns, allowed, vault, prune))
+                rid, sims[local], ids, index, ctx.desc_by_id, before[rid],
+                ctx.rules, ctx.patterns, ctx.allowed, vault, prune))
     return [c for c in changes if c.is_change]
 
 
-def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
+def _plan_one(rid, sim_row, ids, index, desc_by_id, before, rules,
               patterns, allowed, vault, prune) -> Change:
-    before = tags_by_id[rid]
-    own = list(desc_by_id[rid])
+    own = _descriptive(before)
 
     # --- signal 1: what the neighbourhood is called ---------------------------
     sim = sim_row.copy()

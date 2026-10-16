@@ -67,6 +67,41 @@ def table_walks(conn, statements) -> list[str]:
     return walks
 
 
+def fill_clustered(vault, n, seed=11):
+    """`n` organic records shaped like a vault people tag: groups of twenty
+    near each other in embedding space, about a third of each group carrying
+    the group's subject tag, nearly all of those and some others a broader
+    area tag shared by ten groups, and one record in twenty a label of its
+    own. Seeded random vectors stand in for embeddings, inserted through
+    Store.insert and indexed once, so thousands take a fraction of a
+    second."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    dim = int(vault.header.model["dim"])
+    groups = max(1, n // 20)
+    centres = rng.standard_normal((groups, dim)).astype(np.float32)
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+    for i in range(n):
+        g = i % groups
+        vec = centres[g] + rng.uniform(0.02, 0.045) * rng.standard_normal(
+            dim).astype(np.float32)
+        tags = []
+        if rng.random() < 0.35:
+            tags.append(f"topic-{g}")
+            if rng.random() < 0.9:
+                tags.append(f"area-{g % 10}")
+        elif rng.random() < 0.3:
+            tags.append(f"area-{g % 10}")
+        if rng.random() < 0.05:
+            tags.append(f"note-{i}")
+        vault.db.insert(record_id=None, ns="main",
+                        text=f"Synthetic note {i} in group {g}.",
+                        vec=vec / np.linalg.norm(vec), tags=tags,
+                        importance=0.5, quarantined=False, pack=None, prov={},
+                        master_key=vault._master)
+    vault._rebuild_index()
+
+
 @pytest.fixture()
 def vault_path(tmp_path):
     return str(tmp_path / "test.vault")

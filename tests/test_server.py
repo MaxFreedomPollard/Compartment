@@ -14,8 +14,10 @@ import types
 
 import pytest
 
-from compartment import server, vaultfile
+from compartment import retag, server, vaultfile
 from compartment.vault import Vault, strip_provenance
+
+from conftest import fill_clustered
 
 
 class _Stop(BaseException):
@@ -252,6 +254,74 @@ def test_a_shred_while_the_retag_pass_lists_its_targets_completes(
     assert v.db.conn.execute(
         "SELECT count(*) FROM audit WHERE op = 'forget' AND detail LIKE ?",
         (f"%{ids[1]}%",)).fetchone()[0] == 1
+
+
+class _CountingGate:
+    """server._toolgate, counting how many times it was taken."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.entered = 0
+
+    def __enter__(self):
+        self._lock.acquire()
+        self.entered += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+def _tags_now(v):
+    return {r["id"]: sorted(json.loads(r["tags"]))
+            for r in v.db.conn.execute("SELECT id, tags FROM records")}
+
+
+def _one_retag_pass(monkeypatch, gate=None):
+    if gate is not None:
+        monkeypatch.setattr(server, "_toolgate", gate)
+    monkeypatch.setitem(server._state, "last_retag", 0.0)
+    _fake_sleeps(monkeypatch, passes=1)
+    with pytest.raises(_Stop):
+        server._retag_loop()
+
+
+def test_a_background_retag_pass_gives_what_one_whole_vault_plan_gives(
+        serving, monkeypatch):
+    """The pass retags in slices, releasing the tool gate between them, and
+    planned each slice after applying the one before: a tag one slice added
+    was a vote in the next, so tags spread further than a plan spreads
+    them, and which records got them depended on where a record's random id
+    put it in the slicing. Slicing must not change what a record gets."""
+    v = serving
+    fill_clustered(v, 2000)
+    expected = {**_tags_now(v),
+                **{c.record_id: sorted(c.after) for c in retag.plan(v)}}
+    gate = _CountingGate()
+    _one_retag_pass(monkeypatch, gate)
+    assert _tags_now(v) == expected
+    slices = -(-len(retag.targets(v)) // server.RETAG_CHUNK)
+    assert slices >= 5 and gate.entered >= slices + 1   # one slice at a time
+
+
+def test_tags_a_tool_call_writes_between_two_slices_are_kept(serving,
+                                                            monkeypatch):
+    v = serving
+    fill_clustered(v, 200)
+    monkeypatch.setattr(server, "RETAG_CHUNK", 50)
+    late = retag.targets(v)[-1]                 # planned in the last slice
+    real_apply, calls = retag.apply, []
+
+    def apply(vault, changes, caller="retag"):
+        n = real_apply(vault, changes, caller=caller)
+        if not calls:                           # a tool call after slice one
+            vault.db.set_tags(late, ["chosen-by-a-tool-call"])
+        calls.append(n)
+        return n
+    monkeypatch.setattr(retag, "apply", apply)
+    _one_retag_pass(monkeypatch)
+    assert len(calls) == 4
+    assert "chosen-by-a-tool-call" in _tags_now(v)[late]
 
 
 def _live_texts(vault_path, key):
