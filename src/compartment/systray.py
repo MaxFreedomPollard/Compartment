@@ -24,7 +24,9 @@ Design notes:
 """
 from __future__ import annotations
 
+import csv
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,7 +39,7 @@ from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
                       RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, create_vault,
-                      default_vault, integrate, lock_vault,
+                      default_vault, integrate, lock_holder_pid, lock_vault,
                       open_dashboard, stop_dashboard,
                       release_instance_lock, self_check,
                       set_setting, starter_note, summarise, unlock_vault,
@@ -1332,30 +1334,46 @@ def run(vault: str | None = None, show: bool = False,
     return 0
 
 
+#: Every process on Windows with the command line that started it, as CSV.
+_WINDOWS_PROCESSES = ("Get-CimInstance Win32_Process | Select-Object "
+                      "ProcessId, ParentProcessId, CommandLine | "
+                      "ConvertTo-Csv -NoTypeInformation")
+
+#: A Windows command line that is the panel: the CLI, then its subcommand.
+_WINDOWS_APP = re.compile(r"compartment.*\s(menubar|panel|tray)(\s|$)",
+                          re.IGNORECASE)
+
+
 def running_pids() -> list[int]:
     """Every other panel copy on this machine.
 
-    Windows answers through tasklist. It used to answer with an empty list,
-    which is worse than not asking: every caller reads that as "nothing is
-    running", so the install waited fifteen seconds for an app that was
-    already up and then started a second one. A check that can never succeed
-    is not a check.
+    Windows answers from each process's command line. It used to answer with
+    an empty list, which is worse than not asking: every caller reads that as
+    "nothing is running", so the install waited fifteen seconds for an app
+    that was already up and then started a second one. A check that can
+    never succeed is not a check. Nor is one that always succeeds: by image
+    name, which is what tasklist went by, every console script is a
+    compartment.exe - each agent's MCP server, and the launcher of the very
+    update asking - so the app was "running" whenever any agent was. This
+    process and its launcher are never counted.
     """
     if sys.platform == "win32":
         try:
             out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq compartment.exe",
-                 "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=30).stdout
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 _WINDOWS_PROCESSES],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30).stdout
         except (OSError, subprocess.SubprocessError):
             return []
-        me, pids = os.getpid(), []
-        for line in (out or "").splitlines():
-            parts = [p.strip('" ') for p in line.split('","')]
-            # tasklist says "INFO: No tasks are running..." on no match, and
-            # that line has no second field to misread as a pid.
-            if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) != me:
-                pids.append(int(parts[1]))
+        mine, pids = {os.getpid(), os.getppid()}, []
+        # Anything that is not a row - the header, a message instead of a
+        # table - has no pid in its first field to misread.
+        for row in csv.reader((out or "").splitlines()):
+            if (len(row) > 2 and row[0].isdigit()
+                    and int(row[0]) not in mine
+                    and _WINDOWS_APP.search(row[2])):
+                pids.append(int(row[0]))
         return pids
     # The app's own command line and this user's processes, as on macOS:
     # see menubar.APP_COMMAND.
@@ -1390,8 +1408,15 @@ def quit_running(vault: str | None = None, timeout: float = 10.0) -> bool:
     while looking at the build it was meant to replace.
     """
     if sys.platform == "win32":
+        # The one process this vault's lock names, and only while it is
+        # still the panel: Windows soon gives a dead process's pid to another.
+        # `taskkill /IM compartment.exe` also stopped every agent's MCP server
+        # and the launcher of the update or uninstall running this.
+        pid = lock_holder_pid(vault or default_vault())
+        if pid is None or pid not in running_pids():
+            return False
         try:
-            r = subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
+            r = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                capture_output=True, timeout=30)
         except (OSError, subprocess.SubprocessError):
             return False

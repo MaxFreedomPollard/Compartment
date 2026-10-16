@@ -148,21 +148,30 @@ def acquire_instance_lock(vault: str):
     return fh, True
 
 
+def _pid_file(lock: Path) -> Path:
+    """Where the holder of `lock` leaves its pid: in the lock file itself,
+    except on Windows. msvcrt locks the first byte outright, and another
+    process cannot read a byte range Windows has locked, so there the lock
+    file would be unreadable by the only reader that wants it, and the pid
+    goes in a file of its own beside it."""
+    return lock.with_name(lock.name + ".pid") if sys.platform == "win32" \
+        else lock
+
+
 def _record_lock_holder(fh) -> None:
-    """Leave our pid in the lock file.
+    """Leave our pid where lock_holder_pid reads it (_pid_file).
 
     So that the copy entitled to take the menu bar knows which single process
-    to ask for it. The lock is per vault on purpose - a second vault is a
-    second memory and gets an icon of its own - and a pgrep for every running
-    copy would take that one down too.
-
-    POSIX only. msvcrt locks the first byte outright, and another process
-    cannot read a byte range Windows has locked, so on Windows the file would
-    be unreadable by the only reader that wants it.
+    to ask for it, and an update or uninstall which single process to stop.
+    The lock is per vault on purpose - a second vault is a second memory and
+    gets an icon of its own - and a pgrep for every running copy would take
+    that one down too.
     """
-    if sys.platform == "win32":
-        return
     try:
+        if sys.platform == "win32":
+            _pid_file(Path(fh.name)).write_text(f"{os.getpid()}\n",
+                                                encoding="utf-8")
+            return
         fh.seek(0)
         fh.truncate()
         fh.write(f"{os.getpid()}\n".encode())
@@ -179,7 +188,7 @@ def lock_holder_pid(vault: str) -> int | None:
     alone, never a reason to guess at it.
     """
     try:
-        path = _instance_lock_path(vault)
+        path = _pid_file(_instance_lock_path(vault))
         pid = int((path.read_text(encoding="utf-8", errors="replace")
                    ).strip() or 0)
     except (OSError, ValueError):
