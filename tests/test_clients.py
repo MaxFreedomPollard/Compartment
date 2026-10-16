@@ -17,6 +17,7 @@ import io
 import json
 import os
 import stat
+import threading
 import tomllib
 import types
 
@@ -628,6 +629,44 @@ def test_an_openclaw_write_cut_short_leaves_its_config_whole_with_a_backup(
     servers = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
     assert "compartment" in servers and servers["server-99"] == OTHER
     assert backup.read_bytes() == before
+
+
+def test_two_writes_of_one_config_at_once_each_leave_it_whole(tmp_path,
+                                                             monkeypatch):
+    """write_config wrote <file>.tmp, one name for every writer, so two at
+    the same moment (`integrate --all` and the panel's Connect) shared one
+    file: the second's open emptied what the first had written, the first
+    rename moved whatever was there into place, and the second found
+    nothing to rename. Here both have written before either renames."""
+    from compartment import vaultfile
+    # No file yet, so neither write takes the backup first: two backups of
+    # one file at once are a race of their own, not this one.
+    cfg = tmp_path / "client" / "mcp.json"
+    both_written = threading.Barrier(2, timeout=10)
+    real = vaultfile._atomic_replace
+
+    def replace(tmp, path):
+        both_written.wait()
+        real(tmp, path)
+    monkeypatch.setattr(vaultfile, "_atomic_replace", replace)
+    texts = [json.dumps({"mcpServers": {"someone-elses": OTHER,
+                                        f"writer-{i}": {"command": "x"}}},
+                        indent=2) for i in (1, 2)]
+    errors = []
+
+    def write(text):
+        try:
+            clients.write_config(cfg, text)
+        except Exception as exc:                        # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+    writers = [threading.Thread(target=write, args=(t,)) for t in texts]
+    for t in writers:
+        t.start()
+    for t in writers:
+        t.join(timeout=30)
+    assert errors == []
+    assert cfg.read_text(encoding="utf-8") in texts    # one of them, whole
+    assert [p.name for p in cfg.parent.iterdir() if p.suffix == ".tmp"] == []
 
 
 @pytest.mark.parametrize("name", ["CLAUDE.md", "openclaw.json"])

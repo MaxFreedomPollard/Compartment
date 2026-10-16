@@ -1,16 +1,19 @@
 """Regression cover for ACL grant precedence, vocabulary and isolation.
 
-Five defects are pinned here:
+Six defects are pinned here:
   1. wildcard grants resolved first-match-wins in dict order
   2. non-"rw" grants ("none", typos) still permitted reads
   3. an empty caller entry fell back to the "*" entry and was promoted
   4. VaultConfig instances shared the module default's inner dicts
   5. a save rewrote the file in place, so an open could meet half of it
+  6. a save's temporary file had one name for every save, and a save that
+     failed left it behind
 """
 import copy
 import errno
 import json
 import pathlib
+import threading
 
 import pytest
 
@@ -300,6 +303,59 @@ def test_a_save_on_a_full_disk_leaves_the_old_settings_whole(tmp_path,
             cfg.save(vault_path)
     assert path.read_bytes() == before
     assert VaultConfig.load(vault_path).settings["auto_lock_minutes"] == 45
+
+
+def test_two_saves_at_once_each_leave_the_file_whole(tmp_path, monkeypatch):
+    """Every save wrote <config>.tmp, so two at the same moment (the panel
+    and the CLI) shared one file: the second's open emptied what the first
+    had written, the first rename moved whatever was there into place, and
+    the second found nothing to rename. Here both have written before
+    either renames."""
+    vault_path, _ = _saved_config(tmp_path)
+    both_written = threading.Barrier(2, timeout=10)
+    real = acl._atomic_replace
+
+    def replace(tmp, path):
+        both_written.wait()
+        real(tmp, path)
+    monkeypatch.setattr(acl, "_atomic_replace", replace)
+    wanted, errors = [], []
+
+    def save(minutes):
+        cfg = VaultConfig()
+        cfg.settings["auto_lock_minutes"] = minutes
+        wanted.append(json.dumps({"callers": cfg.callers,
+                                  "settings": cfg.settings}, indent=2))
+        try:
+            cfg.save(vault_path)
+        except Exception as exc:                        # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+    savers = [threading.Thread(target=save, args=(m,)) for m in (46, 47)]
+    for t in savers:
+        t.start()
+    for t in savers:
+        t.join(timeout=30)
+    assert errors == []
+    assert pathlib.Path(VaultConfig.path_for(vault_path)).read_text(
+        encoding="utf-8") in wanted                     # one of them, whole
+    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"] == []
+
+
+def test_a_save_that_fails_leaves_no_temporary_file(tmp_path, monkeypatch):
+    """The old settings stayed whole, and the cut-short temporary file
+    stayed too, beside the vault, for good."""
+    vault_path, cfg = _saved_config(tmp_path)
+    real_open = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return _DiskFillsUp(f) if "w" in mode else f
+
+    with monkeypatch.context() as m:
+        m.setattr(acl, "open", opening, raising=False)
+        with pytest.raises(OSError, match="No space left"):
+            cfg.save(vault_path)
+    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"] == []
 
 
 # -- no-regression: the shipped default and packs ----------------------------

@@ -37,6 +37,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import secrets
 import shutil
 import sys
 import tomllib
@@ -369,7 +370,7 @@ def write_config(path: Path, text: str) -> Path | None:
     if existed:
         backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
         shutil.copy2(target, backup)
-    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp = target.with_name(f"{target.name}.{secrets.token_hex(8)}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             if existed and os.name != "nt":
