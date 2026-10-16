@@ -135,6 +135,22 @@ def test_removal_never_deletes_a_directory_holding_anything_else(homes):
     assert stray.exists()
 
 
+@pytest.mark.parametrize("target", ALL)
+def test_removal_keeps_a_copy_the_user_edited(homes, target):
+    """remove() unlinked SKILL.md without looking at it, so uninstalling
+    deleted a skill somebody had rewritten, with no backup, while install()
+    backs exactly that copy up before replacing it."""
+    A.install(target)
+    p = A.skill_path(target)
+    p.write_text("my own sweep instructions, tuned over weeks\n",
+                 encoding="utf-8")
+    assert A.remove(target) is False
+    assert p.read_text(encoding="utf-8").startswith("my own sweep")
+    p.write_bytes(A.source().read_bytes())       # the packaged copy again
+    assert A.remove(target) is True
+    assert not p.parent.exists(), "an empty skill directory goes with it"
+
+
 # ------------------------------------------------------------------ status ---
 def test_status_reports_every_target(homes):
     A.install("claude")

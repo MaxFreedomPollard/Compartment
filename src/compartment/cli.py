@@ -551,12 +551,18 @@ def cmd_uninstall(args) -> None:
     except Exception as exc:                             # noqa: BLE001
         print(f"  capture hook: {exc}")
     # Installing wrote a file into each agent's own skills directory, so
-    # uninstalling takes it back. Only the skill file itself: a backup of an
-    # edited copy stays, and so does the directory if anything else is in it.
+    # uninstalling takes it back. Only the skill file as it was written: an
+    # edited copy stays and is named, a backup of one stays, and so does the
+    # directory if anything else is in it.
     for _t in agent_skill.SKILL_TARGETS:
         try:
             if agent_skill.remove(_t):
                 print(f"  /compartmentalize skill removed from {_t}")
+            elif (agent_skill.is_installed(_t)
+                  and not agent_skill.is_current(_t)):
+                print(f"  /compartmentalize skill kept in {_t}: it differs "
+                      "from the packaged copy, so it may hold your edits "
+                      f"({agent_skill.skill_path(_t)})")
         except Exception as exc:                         # noqa: BLE001
             print(f"  {_t} skill: {exc}")
     from .home import LEGACY_NAME, NAME
