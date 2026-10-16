@@ -335,24 +335,6 @@ def _read_json(path: Path) -> dict:
                          "refusing to touch it") from exc
 
 
-def _backup(path: Path) -> Path | None:
-    """A byte-exact copy beside the original, before we change it."""
-    if not path.exists():
-        return None
-    dest = path.with_suffix(path.suffix + BACKUP_SUFFIX)
-    shutil.copy2(path, dest)
-    return dest
-
-
-def _write_atomic(path: Path, text: str) -> None:
-    """Write via a temporary file, so an interrupted write cannot truncate
-    somebody's configuration."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
 def write_config(path: Path, text: str) -> Path | None:
     """Replace a file the user or another program owns with `text`. Returns
     the byte-exact backup taken first, beside it, or None when there was no
@@ -459,14 +441,19 @@ def register(client: Client, vault: str, caller: str | None = None,
         out["snippet"] = snippet(client, vault, caller)
         return out
 
-    out["backup"] = str(_backup(p) or "") or None
     servers = data.setdefault(client.root, {})
     if not isinstance(servers, dict):
         out["reason"] = f"{client.root} in {p} is not an object"
         out["snippet"] = snippet(client, vault, caller)
         return out
     servers[NAME] = entry                       # refresh rather than duplicate
-    _write_atomic(p, json.dumps(data, indent=2) + "\n")
+    try:
+        backup = write_config(p, json.dumps(data, indent=2) + "\n")
+    except OSError as exc:
+        out["reason"] = f"cannot write {p} ({exc})"
+        out["snippet"] = snippet(client, vault, caller)
+        return out
+    out["backup"] = str(backup) if backup else None
     out["written"] = True
     return out
 
@@ -492,9 +479,14 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
         out["snippet"] = block
         return out
 
-    out["backup"] = str(_backup(p) or "") or None
     joiner = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
-    _write_atomic(p, existing + joiner + block + "\n")
+    try:
+        backup = write_config(p, existing + joiner + block + "\n")
+    except OSError as exc:
+        out["reason"] = f"cannot write {p} ({exc})"
+        out["snippet"] = block
+        return out
+    out["backup"] = str(backup) if backup else None
     out["written"] = True
     return out
 
@@ -521,8 +513,7 @@ def unregister(client: Client, path: Path | None = None) -> bool:
                 dropping = False
             if not dropping:
                 out_lines.append(line)
-        _backup(p)
-        _write_atomic(p, "".join(out_lines))
+        write_config(p, "".join(out_lines))
         return True
 
     try:
@@ -533,9 +524,8 @@ def unregister(client: Client, path: Path | None = None) -> bool:
     if not isinstance(servers, dict) or NAME not in servers:
         return False
     del servers[NAME]
-    _backup(p)
     data[client.root] = servers
-    _write_atomic(p, json.dumps(data, indent=2) + "\n")
+    write_config(p, json.dumps(data, indent=2) + "\n")
     return True
 
 

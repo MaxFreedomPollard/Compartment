@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
+
+from . import clients
 
 NAME = "compartment"
 FILENAME = "claude_desktop_config.json"
@@ -80,18 +81,12 @@ def register(command: str, args: list[str], path: Path | None = None) -> dict:
     duplicating."""
     p = Path(path) if path else config_path()
     data = _read(p)                                 # raises on malformed
-    backup = None
-    if p.exists():
-        backup = p.with_suffix(p.suffix + ".compartment-backup")
-        shutil.copy2(p, backup)
 
     servers = data.setdefault("mcpServers", {})
     servers[NAME] = {"command": command, "args": list(args)}
 
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, p)
+    # Backed up first, replaced whole, and a symlinked config stays a link.
+    backup = clients.write_config(p, json.dumps(data, indent=2) + "\n")
     return {"config": str(p), "backup": str(backup) if backup else None}
 
 
@@ -104,9 +99,7 @@ def unregister(path: Path | None = None) -> bool:
         return False
     del servers[NAME]
     data["mcpServers"] = servers
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, p)
+    clients.write_config(p, json.dumps(data, indent=2) + "\n")
     return True
 
 

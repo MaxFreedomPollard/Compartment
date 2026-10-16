@@ -21,7 +21,7 @@ import types
 
 import pytest
 
-from compartment import cli, clients
+from compartment import claude_desktop, claude_hooks, cli, clients
 
 
 VAULT = "/v/memory.vault"
@@ -484,3 +484,110 @@ def test_a_claude_md_the_user_made_read_only_is_left_alone(tmp_path,
         assert os.listdir(md.parent) == [md.name]   # no backup, no temp
     finally:
         md.chmod(0o644)
+
+
+# ------------------------------------------- configs kept in dotfiles
+
+#: Each writer and its remover, the file it writes, what is in that file
+#: already, and a part of it that has to survive both.
+_LINKED_WRITERS = {
+    "cursor": (".cursor/mcp.json",
+               '{"mcpServers": {"theirs": {"command": "x"}}}\n', '"theirs"',
+               lambda p: clients.register(clients.CLIENTS["cursor"], VAULT,
+                                          path=p),
+               lambda p: clients.unregister(clients.CLIENTS["cursor"],
+                                            path=p)),
+    "codex": (".codex/config.toml", 'model = "o3"\n', 'model = "o3"',
+              lambda p: clients.register(clients.CLIENTS["codex"], VAULT,
+                                         path=p),
+              lambda p: clients.unregister(clients.CLIENTS["codex"], path=p)),
+    "claude-code-hook": (".claude/settings.json",
+                         '{"permissions": {"allow": ["Bash"]}}\n',
+                         '"permissions"',
+                         lambda p: claude_hooks.install(
+                             compartment_bin="compartment", vault=VAULT,
+                             settings=p),
+                         lambda p: claude_hooks.uninstall(settings=p)),
+    "claude-desktop": ("Claude/claude_desktop_config.json",
+                       '{"mcpServers": {"theirs": {"command": "x"}}}\n',
+                       '"theirs"',
+                       lambda p: claude_desktop.register(
+                           "compartment", ["serve"], path=p),
+                       lambda p: claude_desktop.unregister(path=p)),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(_LINKED_WRITERS))
+def test_every_writer_keeps_a_symlinked_config_a_link(writer, tmp_path):
+    """os.replace renamed the new file over the link itself, so after a
+    write ~/.cursor/mcp.json, Claude Code's settings.json or Codex's
+    config.toml was a plain copy and the file in the user's dotfiles (a
+    stow tree, a home-manager path) no longer reached the program. Init
+    did this to ~/.claude/settings.json without being asked."""
+    rel, content, theirs, add, remove = _LINKED_WRITERS[writer]
+    dot = tmp_path / "dotfiles"
+    dot.mkdir()
+    real = dot / os.path.basename(rel)
+    real.write_text(content, encoding="utf-8")
+    link = tmp_path / "home" / rel
+    _symlink_or_skip(link, real)
+
+    add(link)
+    assert link.is_symlink()
+    assert os.path.samefile(link, real)
+    text = real.read_text(encoding="utf-8")
+    assert "compartment" in text and theirs in text
+    backup = link.with_name(link.name + clients.BACKUP_SUFFIX)
+    assert backup.read_text(encoding="utf-8") == content
+
+    remove(link)
+    assert link.is_symlink()
+    assert os.path.samefile(link, real)
+    text = real.read_text(encoding="utf-8")
+    assert "compartment" not in text and theirs in text
+    assert os.listdir(dot) == [real.name]       # no temp file left there
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid")
+                                        and os.geteuid() == 0),
+                    reason="a directory's mode does not stop this user "
+                           "writing in it")
+def test_a_config_linked_into_a_directory_this_cannot_write_is_refused(
+        tmp_path):
+    """A link into a read-only tree (a Nix store path) cannot be written
+    through. Renaming over the link "worked" by detaching it; now the
+    clients get the block to paste and the other writers fail as they do
+    for any file they cannot write, with the link and its file untouched."""
+    store = tmp_path / "store"
+    store.mkdir()
+    home = tmp_path / "home"
+    links = {}
+    for rel in (".cursor/mcp.json", ".codex/config.toml",
+                ".claude/settings.json", "Claude/claude_desktop_config.json"):
+        real = store / os.path.basename(rel)
+        real.write_text("", encoding="utf-8")
+        links[rel] = home / rel
+        _symlink_or_skip(links[rel], real)
+    store.chmod(0o555)
+    try:
+        for rel in (".cursor/mcp.json", ".codex/config.toml"):
+            client = clients.CLIENTS["cursor" if "cursor" in rel else "codex"]
+            res = clients.register(client, VAULT, path=links[rel])
+            assert res["written"] is False, rel
+            assert "compartment" in res["snippet"]
+            assert "cannot write" in res["reason"]
+        with pytest.raises(OSError):
+            claude_hooks.install(compartment_bin="compartment",
+                                 settings=links[".claude/settings.json"])
+        with pytest.raises(OSError):
+            claude_desktop.register(
+                "compartment", ["serve"],
+                path=links["Claude/claude_desktop_config.json"])
+        for rel, link in links.items():
+            assert link.is_symlink(), rel
+            assert link.read_text(encoding="utf-8") == ""
+            assert os.listdir(link.parent) == [link.name]   # no backup
+        assert sorted(os.listdir(store)) == sorted(
+            os.path.basename(r) for r in links)             # no temp file
+    finally:
+        store.chmod(0o755)

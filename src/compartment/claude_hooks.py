@@ -24,7 +24,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import claude_memory
+from . import claude_memory, clients
 
 SETTINGS = Path.home() / ".claude" / "settings.json"
 # Identifies OUR entries. Both tokens, not one literal string: the command
@@ -82,10 +82,6 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
     """Add (or refresh) compartment's capture hook. Never removes anyone else's."""
     path = Path(settings) if settings else SETTINGS
     data = _read(path)                                  # raises on malformed
-    backup = None
-    if path.exists():
-        backup = path.with_suffix(path.suffix + ".compartment-backup")
-        shutil.copy2(path, backup)
 
     hooks = data.setdefault("hooks", {})
     groups = hooks.setdefault(EVENT, [])
@@ -101,10 +97,9 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
     kept.append(_entry(hook_command(compartment_bin, vault)))
     hooks[EVENT] = kept
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # Backed up first, replaced whole, and through a symlink to the file
+    # it points at, so settings kept in dotfiles stay there.
+    backup = clients.write_config(path, json.dumps(data, indent=2) + "\n")
     return {"settings": str(path), "backup": str(backup) if backup else None,
             "event": EVENT, "matcher": MATCHER}
 
@@ -129,11 +124,7 @@ def uninstall(settings: Path | None = None) -> bool:
     # Same care as install(): keep a recovery copy, then swap the new file in
     # atomically. A crash or a full disk mid-write must not cost the user every
     # other hook, permission and env var in this file.
-    if path.exists():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".compartment-backup"))
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    clients.write_config(path, json.dumps(data, indent=2) + "\n")
     return True
 
 
