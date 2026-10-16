@@ -117,8 +117,32 @@ def no_real_session_store(monkeypatch, tmp_path):
     machine of whoever ran it. That is exactly what the fixture below says a
     suite run must never do. Tests that are about the store already pick
     their own directory, and a setenv inside a test wins over this one.
+
+    The per-boot secret a credential is keyed with lives in the kernel, not
+    under tmp_path, so it outlived the run until the next restart: about
+    forty a run. The teardown destroys this store's, and that of the store
+    the test pointed COMPARTMENT_SESSION_DIR at if it is under tmp_path.
     """
-    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "session-store"))
+    store = tmp_path / "session-store"
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(store))
+    yield
+    forget_session_holder(store)
+    own = os.environ.get("COMPARTMENT_SESSION_DIR")
+    if own and own != str(store) and pathlib.Path(own).is_relative_to(
+            tmp_path):
+        forget_session_holder(own)
+
+
+def forget_session_holder(session_dir) -> None:
+    """Destroy the per-boot secret of the session store at `session_dir`, as
+    a restart would. Its name is the one session._holder() gives that
+    directory, so only that store's secret can go, and nothing is created on
+    disk."""
+    from compartment import session
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(session, "_session_dir",
+                   lambda: pathlib.Path(session_dir))
+        session._forget_boot_secret()
 
 
 @pytest.fixture(autouse=True)

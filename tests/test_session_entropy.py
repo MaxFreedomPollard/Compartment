@@ -402,3 +402,60 @@ def test_a_lookup_that_meets_a_half_made_holder_answers_locked(monkeypatch):
     assert not p.exists()
     session.store(VAULT, KEY)
     assert session.get(VAULT) == KEY
+
+
+# --- a test run leaves nothing in the kernel --------------------------------
+
+#: Two tests that each store a credential: one in the session store the
+#: suite gives every test, one in a store of its own. Each writes down which
+#: store it used.
+_TWO_TESTS = '''
+import os
+from compartment import session
+
+
+def _store_and_say_where(tmp_path):
+    session.store(str(tmp_path / "v.vault"), bytes(32))
+    assert session._boot_secret(create=False) is not None
+    with open(os.environ["STORES_SEEN"], "a", encoding="utf-8") as f:
+        f.write(os.environ["COMPARTMENT_SESSION_DIR"] + "\\n")
+
+
+def test_in_the_store_the_suite_gives_it(tmp_path):
+    _store_and_say_where(tmp_path)
+
+
+def test_in_a_store_of_its_own(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "own"))
+    _store_and_say_where(tmp_path)
+'''
+
+
+def test_a_test_that_stores_a_credential_leaves_no_secret_behind(
+        tmp_path, monkeypatch):
+    """The secret is in the kernel, not under tmp_path, so every test that
+    stored a credential left one there until the next restart: about forty
+    a run, each named for a session store pytest had already deleted. The
+    suite's own fixtures, loaded into a run of two tests, destroy the one in
+    the store they give a test and the one in a store a test chose."""
+    (tmp_path / "test_two.py").write_text(_TWO_TESTS, encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    seen = tmp_path / "stores-seen"
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "conftest", "-c", str(tmp_path / "pytest.ini"),
+         "--basetemp", str(tmp_path / "run"), str(tmp_path / "test_two.py")],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": str(pathlib.Path(__file__).parent),
+             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "STORES_SEEN": str(seen)})
+    assert run.returncode == 0, run.stdout + run.stderr
+    stores = seen.read_text(encoding="utf-8").splitlines()
+    assert len(stores) == 2 and stores[1].endswith("own")
+    left = []
+    for store in stores:
+        monkeypatch.setattr(session, "_session_dir",
+                            lambda store=store: pathlib.Path(store))
+        if session._boot_secret(create=False) is not None:
+            left.append(store)
+            session._forget_boot_secret()       # not left for a restart
+    assert left == []
