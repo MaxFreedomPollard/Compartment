@@ -1466,7 +1466,9 @@ def _write_managed_claude_md() -> Path:
         text = pre + block + post
     else:
         text = (text.rstrip() + "\n\n" + block + "\n") if text.strip() else block + "\n"
-    md.write_text(text, encoding="utf-8")
+    # Backed up and replaced whole: a write cut short must not leave the
+    # user's own file truncated.
+    clients.write_config(md, text)
     return md
 
 
@@ -1823,13 +1825,10 @@ def _integrate_target(args) -> None:
                 existed = cfg_path.is_file()
                 cfg = (json.loads(cfg_path.read_text(encoding="utf-8"))
                        if existed else {})
-                backup = None
-                if existed:
-                    backup = cfg_path.with_suffix(".json.bak-compartment")
-                    backup.write_bytes(cfg_path.read_bytes())  # byte-exact recovery copy
                 cfg.setdefault("mcpServers", {})["compartment"] = entry
-                cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                # A byte-exact backup first, then the file replaced whole.
+                backup = clients.write_config(cfg_path,
+                                              json.dumps(cfg, indent=2))
                 wrote = True
                 print(f"✓ registered in {cfg_path}"
                       + (f" (backup: {backup.name})" if backup else ""))

@@ -10,11 +10,18 @@ in has not integrated with anything.
 Every case here starts from a config that already has another server in it,
 because that is the state every real machine is in.
 """
+import builtins
+import contextlib
+import errno
+import io
 import json
+import os
+import stat
+import types
 
 import pytest
 
-from compartment import clients
+from compartment import cli, clients
 
 
 VAULT = "/v/memory.vault"
@@ -296,3 +303,184 @@ def test_the_command_falls_back_to_path_then_to_the_bare_name(tmp_path,
     assert clients.executable() == "/opt/bin/compartment"
     monkeypatch.setattr(clients.shutil, "which", lambda n: None)
     assert clients.executable() == "compartment"
+
+
+# ------------------------------------------ CLAUDE.md and OpenClaw's config
+
+class _DiskFillsUp:
+    """A text file that takes 4,096 characters and then reports the disk
+    full, the way a write ends on a disk with no room left."""
+
+    def __init__(self, f):
+        self._f, self._room = f, 4096
+
+    def write(self, s):
+        if len(s) > self._room:
+            self._f.write(s[:self._room])
+            self._room = 0
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self._room -= len(s)
+        return self._f.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+@contextlib.contextmanager
+def _disk_full_in(directory, monkeypatch):
+    """Every text file opened for writing in `directory` fills the disk after
+    4,096 characters, whether the code opens it with open() or a Path
+    method."""
+    real_open, where = io.open, os.path.abspath(directory)
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if ("w" in mode and "b" not in mode
+                and isinstance(file, (str, os.PathLike))
+                and os.path.dirname(os.path.abspath(file)) == where):
+            return _DiskFillsUp(f)
+        return f
+
+    with monkeypatch.context() as m:
+        m.setattr(io, "open", opening)
+        m.setattr(builtins, "open", opening)
+        yield
+
+
+def _claude_md(tmp_path, monkeypatch):
+    """40 KB of the user's own rules and last version's block."""
+    md = tmp_path / ".claude" / "CLAUDE.md"
+    md.parent.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_MD", str(md))
+    rules = "".join(f"- my own rule {i}: explain the trade-off before "
+                    "acting.\n" for i in range(640))
+    md.write_text(rules + "\n" + cli._CLAUDE_MD_BEGIN + "\nlast version's "
+                  "block\n" + cli._CLAUDE_MD_END + "\n", encoding="utf-8")
+    return md, rules
+
+
+def _symlink_or_skip(link, target):
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"no symlinks here ({exc})")
+
+
+def test_a_claude_md_rewrite_cut_short_leaves_it_whole_with_a_backup(
+        tmp_path, monkeypatch):
+    """The block was written back through a truncating open with no backup,
+    so a write that stopped partway (a full disk, a kill) during `update`,
+    `integrate claude` or init left the user's CLAUDE.md cut short: 40 KB of
+    their own rules became 4 KB, and nothing kept a copy."""
+    md, rules = _claude_md(tmp_path, monkeypatch)
+    if os.name != "nt":
+        md.chmod(0o600)
+    before = md.read_bytes()
+
+    with _disk_full_in(md.parent, monkeypatch):
+        with pytest.raises(OSError):
+            cli._write_managed_claude_md()
+    assert md.read_bytes() == before                   # whole, not cut short
+    backup = md.with_name(md.name + clients.BACKUP_SUFFIX)
+    assert backup.read_bytes() == before
+    assert sorted(p.name for p in md.parent.iterdir()) == sorted(
+        [md.name, backup.name])                         # no temp file left
+
+    # With room on the disk the block is replaced and nothing else moves.
+    cli._write_managed_claude_md()
+    text = md.read_text(encoding="utf-8")
+    assert text.startswith(rules) and "last version's block" not in text
+    assert text.count(cli._CLAUDE_MD_BEGIN) == 1
+    assert backup.read_bytes() == before
+    if os.name != "nt":                                 # a private file stays
+        assert stat.S_IMODE(md.stat().st_mode) == 0o600  # private
+
+
+def test_an_openclaw_write_cut_short_leaves_its_config_whole_with_a_backup(
+        tmp_path, monkeypatch, capsys):
+    """`integrate openclaw` took its backup and then wrote openclaw.json in
+    place, through a truncating open, so a write cut short left the config,
+    with every other server in it, cut short as well."""
+    home = tmp_path / "openclaw-home"
+    home.mkdir()
+    monkeypatch.setenv("OPENCLAW_HOME", str(home))
+    cfg = home / "openclaw.json"
+    cfg.write_text(json.dumps({"mcpServers": {f"server-{i}": OTHER
+                                              for i in range(100)}},
+                              indent=2), encoding="utf-8")
+    before = cfg.read_bytes()
+    args = types.SimpleNamespace(target="openclaw", vault=VAULT)
+
+    with _disk_full_in(home, monkeypatch):
+        cli._integrate_target(args)
+    assert "could not edit" in capsys.readouterr().out
+    assert cfg.read_bytes() == before
+    backup = cfg.with_name(cfg.name + clients.BACKUP_SUFFIX)
+    assert backup.read_bytes() == before
+
+    cli._integrate_target(args)
+    servers = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
+    assert "compartment" in servers and servers["server-99"] == OTHER
+    assert backup.read_bytes() == before
+
+
+@pytest.mark.parametrize("name", ["CLAUDE.md", "openclaw.json"])
+def test_a_claude_md_or_openclaw_config_kept_in_dotfiles_stays_a_link(
+        name, tmp_path, monkeypatch):
+    """Both files were written in place, through the link. A replacement
+    renamed into place has to go beside the file the link points at, or it
+    turns the link into a plain copy that the dotfiles no longer reach."""
+    dot = tmp_path / "dotfiles"
+    dot.mkdir()
+    real = dot / name
+    if name == "CLAUDE.md":
+        link = tmp_path / ".claude" / name
+        monkeypatch.setenv("CLAUDE_MD", str(link))
+        real.write_text("# kept in my dotfiles\n", encoding="utf-8")
+        write = cli._write_managed_claude_md
+    else:
+        link = tmp_path / "openclaw-home" / name
+        monkeypatch.setenv("OPENCLAW_HOME", str(link.parent))
+        real.write_text(json.dumps({"mcpServers": {"theirs": OTHER}}),
+                        encoding="utf-8")
+        write = lambda: cli._integrate_target(  # noqa: E731
+            types.SimpleNamespace(target="openclaw", vault=VAULT))
+    before = real.read_bytes()
+    _symlink_or_skip(link, real)
+
+    write()
+    assert link.is_symlink()
+    assert os.path.samefile(link, real)
+    text = real.read_text(encoding="utf-8")
+    assert ("kept in my dotfiles" in text and cli._CLAUDE_MD_BEGIN in text
+            if name == "CLAUDE.md"
+            else set(json.loads(text)["mcpServers"]) == {"theirs",
+                                                          "compartment"})
+    backup = link.with_name(link.name + clients.BACKUP_SUFFIX)
+    assert backup.read_bytes() == before
+    assert os.listdir(dot) == [name]            # nothing left beside it
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root may write a read-only file")
+def test_a_claude_md_the_user_made_read_only_is_left_alone(tmp_path,
+                                                          monkeypatch):
+    """Written in place, a read-only CLAUDE.md refused the write. Renaming a
+    new copy over it would not ask, so the write has to."""
+    md, _ = _claude_md(tmp_path, monkeypatch)
+    before = md.read_bytes()
+    md.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            cli._write_managed_claude_md()
+        assert md.read_bytes() == before
+        assert os.listdir(md.parent) == [md.name]   # no backup, no temp
+    finally:
+        md.chmod(0o644)

@@ -34,6 +34,7 @@ put it, which is all the auto-writing ones do anyway, minus the typing.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -352,6 +353,50 @@ def _write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def write_config(path: Path, text: str) -> Path | None:
+    """Replace a file the user or another program owns with `text`. Returns
+    the byte-exact backup taken first, beside it, or None when there was no
+    file yet.
+
+    The text goes to a temporary file beside the file itself, flushed to
+    disk, and is renamed over it, so a write cut short (a full disk, a kill)
+    leaves the old file whole instead of truncated. A symlink is followed:
+    the file it points at is replaced and the link stays a link. The file
+    keeps its permission bits, and one this cannot write, or that sits in a
+    directory this cannot write, is refused before anything is touched, as
+    writing it in place would be.
+    """
+    from .vaultfile import _atomic_replace
+    path = Path(path)
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    if not (os.access(target.parent, os.W_OK)
+            and (not existed or os.access(target, os.W_OK))):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES),
+                              str(target))
+    backup = None
+    if existed:
+        backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
+        shutil.copy2(target, backup)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            if existed and os.name != "nt":
+                shutil.copymode(target, tmp)    # before any text is in it
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        _atomic_replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return backup
+
+
 def _toml_value(v) -> str:
     """Just enough TOML to emit one table of strings and string arrays."""
     if isinstance(v, list):
@@ -512,4 +557,4 @@ def status() -> list[dict]:
 
 __all__ = ["NAME", "CLIENTS", "ALIASES", "Client", "resolve", "executable",
            "server_args", "entry_for", "snippet", "is_registered", "register",
-           "unregister", "detected", "status"]
+           "unregister", "detected", "status", "write_config"]
