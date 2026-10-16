@@ -132,6 +132,33 @@ def test_a_person_at_a_terminal_is_still_asked(vault_path, monkeypatch,
     assert "results" in json.loads(capsys.readouterr().out)
 
 
+@pytest.mark.parametrize("command, says", [
+    (["unlock"], "a passphrase is needed: use --passphrase-stdin when not "
+                 "interactive"),
+    (["init", "--no-app"], "a passphrase is needed: use --passphrase or "
+                           "--passphrase-stdin when not interactive"),
+])
+def test_unlock_and_init_ask_nobody_for_the_passphrase(
+        command, says, vault_path, monkeypatch, capsys):
+    """`unlock` without --passphrase-stdin and `init` without --passphrase
+    or --passphrase-stdin still went straight to getpass, with the same
+    gap as the other prompts: on an open pipe it waited for good, on a
+    closed one it died with EOFError. init stops before making anything."""
+    unlock = command[0] == "unlock"
+    if unlock:
+        Vault.create(vault_path, PASS, creator="test").lock()
+
+    def prompted(prompt=""):
+        raise AssertionError(f"prompted with nobody to answer: {prompt!r}")
+    monkeypatch.setattr(cli.getpass, "getpass", prompted)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--vault", vault_path, *command])
+    assert e.value.code != 0
+    assert says in capsys.readouterr().err
+    assert os.path.exists(vault_path) is unlock
+
+
 #: Passphrases people type: one that cp1252 reads back as other letters, and
 #: one with a byte cp1252 has no character for (U+0401 is D0 81 in UTF-8).
 NON_ASCII = ["Passwört-café", "Ёжик-42"]

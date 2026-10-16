@@ -175,6 +175,9 @@ def cmd_init(args) -> None:
     elif args.passphrase:
         pw = args.passphrase
     else:
+        if not _can_prompt():
+            _die("a passphrase is needed: use --passphrase or "
+                 "--passphrase-stdin when not interactive")
         pw = getpass.getpass("Choose a passphrase: ")
         pw2 = getpass.getpass("Repeat passphrase:  ")
         if pw != pw2:
@@ -701,6 +704,9 @@ def _read_passphrase(args, prompt: str = "Passphrase: ") -> str:
         if not pw:
             _die("no passphrase on stdin")
         return pw
+    if not args.passphrase and not _can_prompt():
+        _die("a passphrase is needed: use --passphrase-stdin when not "
+             "interactive")
     return args.passphrase or getpass.getpass(prompt)
 
 
