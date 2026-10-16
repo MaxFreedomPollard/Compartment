@@ -37,7 +37,7 @@ except ImportError:                                     # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import __version__, audit, gate, offline_guard, selftest
+from . import __version__, audit, gate, offline_guard, selftest, session
 from .acl import VaultConfig
 from .crypto import CryptoError, TamperError
 from .platforms import file_signature
@@ -110,7 +110,12 @@ except TypeError:                                       # mcp 1.x
 _state: dict = {"vault": None, "path": None, "caller": "unknown",
                 "last_op": time.time(), "auto_lock_min": 30,
                 "retag_hours": 6, "retag_prune": False,
-                "last_retag": time.time(), "settings_sig": None}
+                "last_retag": time.time(), "settings_sig": None,
+                "cred_sig": None, "cred_checked": 0.0}
+
+#: How often a server holding the key looks for its credential again, so
+#: that `compartment lock`, typed or pressed in the panel, reaches it too.
+CREDENTIAL_CHECK_SECONDS = 5
 
 
 def _read_settings() -> None:
@@ -152,8 +157,52 @@ def _read_settings() -> None:
         _state["retag_hours"] = 6
 
 
+def _credential_signature():
+    """session.watch_signature for this vault, or None if it cannot be
+    taken."""
+    try:
+        return session.watch_signature(_state["path"])
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _credential_gone(v: Vault) -> bool:
+    """Whether the credential this server opened the vault with has gone:
+    `compartment lock`, or the panel's Lock, cleared it.
+
+    Asked the way the panel's reader asks (vaultview.check_credential): at
+    most every CREDENTIAL_CHECK_SECONDS, and with a search only when the
+    credential's files say it may have changed. A look that fails says
+    nothing either way, since a credential file that could not be read is
+    not a lock, and a passphrase in the environment is standing intent."""
+    now = time.monotonic()
+    if now - _state["cred_checked"] < CREDENTIAL_CHECK_SECONDS:
+        return False
+    _state["cred_checked"] = now
+    sig = _credential_signature()
+    if sig is None or sig == _state["cred_sig"]:
+        return False
+    try:
+        found = Vault.find_credential(_state["path"])
+    except Exception:                                   # noqa: BLE001
+        return False                # could not tell; the next look asks again
+    if found is None or (found[1] is not None and found[1] != v._master):
+        return True
+    _state["cred_sig"] = sig
+    return False
+
+
 def _vault() -> Vault:
     v = _state["vault"]
+    if v is not None and not v._locked and _credential_gone(v):
+        # Lock closes the vault: in this process too, not only at the next
+        # idle auto-lock. Flushed and sealed as any lock is, so the reads it
+        # audited are kept; the call then fails as locked, below, the way
+        # it does in a fresh process.
+        try:
+            v.lock()
+        except Exception:                               # noqa: BLE001
+            _drop_key(v)            # lock() drops the key either way
     if v is not None and not v._locked and v.is_stale():
         # another process (Hermes provider, CLI, another host) wrote the
         # vault - reload so we operate on current state
@@ -162,6 +211,7 @@ def _vault() -> Vault:
     if v is None or v._locked:
         # try silent re-unlock via keychain/env (user intent persists until
         # `compartment lock` clears the credential)
+        sig = _credential_signature()
         try:
             pw, key = Vault.resolve_credential(_state["path"])
         except CryptoError as exc:
@@ -191,6 +241,7 @@ def _vault() -> Vault:
             # it unchanged instead of masking it.
             raise
         _state["vault"] = v
+        _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
         _read_settings()
     _state["last_op"] = time.time()
     return v
@@ -839,8 +890,11 @@ def memory_unlock(passphrase: str) -> str:
         # same second factor the startup path uses: without it this tool can
         # never open a two-factor vault, however explicitly it was enabled
         kf = Vault.load_keyfile_hint(_state["path"])
+        sig = _credential_signature()
         _state["vault"] = Vault.unlock(_state["path"], passphrase=passphrase,
                                        keyfile=kf)
+        # This open used no stored credential, so finding none is no lock.
+        _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
         _state["last_op"] = time.time()
         return json.dumps({"locked": False, "note": DATA_NOT_INSTRUCTIONS})
     except CryptoError as exc:
@@ -895,11 +949,13 @@ def main(argv: list[str] | None = None) -> None:
         offline_guard.activate()
     _state["path"] = args.vault
     _state["caller"] = args.caller
+    sig = _credential_signature()
     try:
         pw, key = Vault.resolve_credential(args.vault)
         kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
         _state["vault"] = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
                                        keyfile=kf)
+        _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
         _read_settings()
     except CryptoError:
         _state["vault"] = None  # start locked; tools will say so

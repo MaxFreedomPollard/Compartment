@@ -33,7 +33,8 @@ def _fake_sleeps(monkeypatch, passes):
         if len(sleeps) > passes:
             raise _Stop
     monkeypatch.setattr(server, "time",
-                        types.SimpleNamespace(sleep=sleep, time=time.time))
+                        types.SimpleNamespace(sleep=sleep, time=time.time,
+                                              monotonic=time.monotonic))
 
 
 def _run_autolock(monkeypatch, passes):
@@ -54,11 +55,15 @@ def _autolock_thread():
 
 @pytest.fixture()
 def serving(monkeypatch, vault, vault_path):
-    """The server's state with this vault open and idle past its auto-lock."""
+    """The server's state with this vault open and idle past its auto-lock,
+    its credential as an open records it."""
+    from compartment import session
     for key, value in (("vault", vault), ("path", vault_path),
                        ("caller", "agent"), ("auto_lock_min", 30),
                        ("last_op", time.time() - 31 * 60),
-                       ("settings_sig", None)):
+                       ("settings_sig", None),
+                       ("cred_sig", session.watch_signature(vault_path)),
+                       ("cred_checked", time.monotonic())):
         monkeypatch.setitem(server._state, key, value)
     return vault
 
@@ -479,3 +484,105 @@ def test_a_config_cut_short_keeps_the_settings_in_use(serving, vault_path,
     whole.save(vault_path)
     server._read_settings()
     assert server._state["auto_lock_min"] == 15
+
+
+def _stored_credential_only(monkeypatch):
+    """No keychain and no passphrase in the environment, so the session
+    store is the only credential there is; every look is made at once."""
+    from compartment import vault as vault_module
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    for name in ("COMPARTMENT_PASSPHRASE", "ENGRAM_PASSPHRASE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(server, "CREDENTIAL_CHECK_SECONDS", 0, raising=False)
+
+
+def test_a_lock_reaches_a_running_server(serving, vault_path, monkeypatch):
+    """`compartment lock`, which the panel's Lock runs, clears the stored
+    credentials and touches nothing else. A running server looked for a
+    credential only when its own handle was missing, locked or stale, so
+    it kept the key and went on reading and writing memories until it had
+    been idle for the whole auto-lock time."""
+    from compartment import session
+    _stored_credential_only(monkeypatch)
+    session.store(vault_path, serving._master)        # `compartment unlock`
+    try:
+        _call(server.memory_search, "which Postgres version does staging run")
+        session.clear(vault_path)                     # `compartment lock`
+        with pytest.raises(server.MemoryToolError) as e:
+            _call(server.memory_store, "Lock does not stop this", "from chat")
+    finally:
+        session.clear(vault_path)
+    assert "compartment unlock" in str(e.value)
+    assert serving._locked and serving._master is None
+    _, texts = _live_texts(vault_path, Vault.unlock(
+        vault_path, passphrase="CorrectHorse")._master)
+    assert texts == []
+
+
+def test_a_passphrase_in_the_environment_outlasts_a_lock(serving, vault_path,
+                                                         monkeypatch):
+    """A passphrase in the environment is standing intent (SECURITY.md):
+    clearing the stored credentials leaves it, so the server keeps going."""
+    from compartment import session
+    _stored_credential_only(monkeypatch)
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    session.store(vault_path, serving._master)
+    try:
+        _call(server.memory_search, "anything")
+        session.clear(vault_path)
+        out = json.loads(_call(server.memory_search, "anything"))
+    finally:
+        session.clear(vault_path)
+    assert "results" in out and not serving._locked
+
+
+def test_a_credential_that_cannot_be_read_leaves_the_server_working(
+        serving, monkeypatch):
+    """Could not tell is not locked: a credential file that failed to read
+    (a permissions slip, a stalled share) must not lock a working server.
+    The next look asks again."""
+    from compartment import session
+    from compartment.crypto import CryptoError
+    _stored_credential_only(monkeypatch)
+    monkeypatch.setattr(session, "watch_signature", lambda path: ("changed",))
+
+    def unreadable(path, passphrase=None):
+        raise CryptoError("Cannot read the session credential")
+    monkeypatch.setattr(Vault, "find_credential", staticmethod(unreadable))
+    out = json.loads(_call(server.memory_search, "anything"))
+    assert "results" in out and not serving._locked
+
+
+def test_the_credential_is_looked_for_at_most_every_few_seconds(
+        serving, monkeypatch):
+    from compartment import session
+    looks, clock = [], [1000.0]
+    monkeypatch.setattr(session, "watch_signature",
+                        lambda path: looks.append(1) or ("unchanged",))
+    monkeypatch.setattr(server, "time", types.SimpleNamespace(
+        time=time.time, sleep=time.sleep, monotonic=lambda: clock[0]))
+    for key, value in (("cred_sig", ("unchanged",)),
+                       ("cred_checked", clock[0])):
+        monkeypatch.setitem(server._state, key, value)
+    for _ in range(3):
+        server._vault()
+    assert looks == []
+    clock[0] += server.CREDENTIAL_CHECK_SECONDS
+    server._vault()
+    server._vault()
+    assert looks == [1]
+
+
+def test_a_vault_opened_by_memory_unlock_stays_open(vault, vault_path,
+                                                    own_state, monkeypatch):
+    """memory_unlock opens with the passphrase it is given and stores no
+    credential, so the absence of one is not a lock there."""
+    _stored_credential_only(monkeypatch)
+    _set(vault_path, unlock_tool_enabled=True)
+    vault.lock()
+    for key, value in (("vault", None), ("path", vault_path),
+                       ("caller", "agent")):
+        monkeypatch.setitem(server._state, key, value)
+    _call(server.memory_unlock, "CorrectHorse")
+    out = json.loads(_call(server.memory_search, "anything"))
+    assert "results" in out
