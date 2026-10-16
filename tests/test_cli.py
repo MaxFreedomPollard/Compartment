@@ -132,6 +132,77 @@ def test_a_person_at_a_terminal_is_still_asked(vault_path, monkeypatch,
     assert "results" in json.loads(capsys.readouterr().out)
 
 
+#: Passphrases people type: one that cp1252 reads back as other letters, and
+#: one with a byte cp1252 has no character for (U+0401 is D0 81 in UTF-8).
+NON_ASCII = ["Passwört-café", "Ёжик-42"]
+
+
+@pytest.mark.parametrize("passphrase", NON_ASCII)
+def test_the_apps_unlock_a_vault_whose_passphrase_was_typed_at_a_terminal(
+        passphrase, vault_path):
+    """The menu bar and tray apps write the passphrase down
+    --passphrase-stdin as UTF-8, and Python decodes a piped stdin with the
+    locale's encoding: the ANSI code page on Windows, where UTF-8 mode is
+    off by default. The first passphrase arrived as other text, so Unlock
+    said "wrong passphrase"; the second crashed the read. The child here
+    reads its stdin as Windows does."""
+    Vault.create(vault_path, passphrase, creator="test").lock()
+    p = subprocess.run(
+        [sys.executable, "-m", "compartment.cli", "--vault", vault_path,
+         "unlock", "--passphrase-stdin", "--once"],
+        input=(passphrase + "\n").encode("utf-8"), capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"},
+        timeout=120)
+    said = (p.stdout + p.stderr).decode("utf-8", "replace")
+    assert p.returncode == 0 and "credential verified" in said, said
+
+
+def _a_windows_pipe(text):
+    """stdin as a Windows process reading a pipe has it: the bytes, behind a
+    reader that decodes them with the ANSI code page."""
+    return io.TextIOWrapper(io.BytesIO(text.encode("utf-8")),
+                            encoding="cp1252")
+
+
+def test_a_vault_created_from_the_apps_has_the_passphrase_they_sent(
+        tmp_path, monkeypatch):
+    """`init --passphrase-stdin` read it the same way, so a vault created
+    from the panel on Windows took the misread text as its passphrase, and
+    the passphrase its owner chose did not open it."""
+    monkeypatch.setattr(cli, "_seed_blobs", lambda: [])
+    monkeypatch.setattr(cli, "connect_present_agents", lambda path: [])
+    monkeypatch.setattr(sys, "stdin", _a_windows_pipe(NON_ASCII[0] + "\n"))
+    path = str(tmp_path / "new.vault")
+    cli.main(["--vault", path, "init", "--passphrase-stdin", "--no-app",
+              "--no-session"])
+    Vault.unlock(path, passphrase=NON_ASCII[0])
+
+
+def test_a_passphrase_changed_from_the_apps_is_the_one_they_sent(
+        vault_path, passphrase_in_env, monkeypatch):
+    """The panel's Change password, `rekey --new-passphrase-stdin`, too."""
+    Vault.create(vault_path, PASS, creator="test").lock()
+    monkeypatch.setattr(cli, "keychain_clear", lambda path: False)
+    monkeypatch.setattr(sys, "stdin", _a_windows_pipe(NON_ASCII[0] + "\n"))
+    cli.main(["--vault", vault_path, "rekey", "--new-passphrase-stdin"])
+    Vault.unlock(vault_path, passphrase=NON_ASCII[0])
+
+
+def test_a_passphrase_on_stdin_that_is_not_utf8_is_refused_by_name(
+        vault_path, monkeypatch, capsys):
+    """Strict, since a replaced character would quietly be another
+    passphrase, and said plainly rather than as a traceback: what a pipe in
+    a legacy code page sends."""
+    Vault.create(vault_path, PASS, creator="test").lock()
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(
+        io.BytesIO(NON_ASCII[0].encode("cp1252") + b"\n"), encoding="cp1252"))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--vault", vault_path, "unlock", "--passphrase-stdin",
+                  "--once"])
+    assert e.value.code == 1
+    assert "the passphrase on stdin is not UTF-8" in capsys.readouterr().err
+
+
 def _status(vault_path, capsys):
     capsys.readouterr()
     cli.main(["--vault", vault_path, "status"])

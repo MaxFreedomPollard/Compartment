@@ -169,7 +169,7 @@ def cmd_init(args) -> None:
         # and compared the two entries where the user could see them, so this
         # takes the agreed one down a pipe rather than putting a secret in a
         # command line every process on the machine can read.
-        pw = sys.stdin.readline().rstrip("\r\n")
+        pw = _passphrase_from_stdin()
         if not pw:
             _die("no passphrase on stdin")
     elif args.passphrase:
@@ -673,6 +673,21 @@ def _ask_yn(q: str) -> bool:
     return input(f"{q} [y/N] ").strip().lower().startswith("y")
 
 
+def _passphrase_from_stdin() -> str:
+    """One line of stdin, decoded as the UTF-8 the apps write it in.
+
+    Python decodes a piped stdin with the locale's encoding, which on
+    Windows is the ANSI code page (UTF-8 mode is off there by default): a
+    passphrase with an accented letter, sent by the tray app, arrived as
+    other text, and one with 0x81 or 0x8D in its UTF-8 bytes crashed the
+    read. Strict, because a replaced character would silently be another
+    passphrase."""
+    try:
+        return sys.stdin.buffer.readline().decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError:
+        _die("the passphrase on stdin is not UTF-8")
+
+
 def _read_passphrase(args, prompt: str = "Passphrase: ") -> str:
     """Get the passphrase without ever putting it in argv.
 
@@ -682,7 +697,7 @@ def _read_passphrase(args, prompt: str = "Passphrase: ") -> str:
     the secret down a pipe, where nothing else can see it.
     """
     if getattr(args, "passphrase_stdin", False):
-        pw = sys.stdin.readline().rstrip("\r\n")
+        pw = _passphrase_from_stdin()
         if not pw:
             _die("no passphrase on stdin")
         return pw
@@ -1147,7 +1162,7 @@ def cmd_rekey(args) -> None:
         # The apps confirm the repeat in their own dialog, where the user can
         # see both fields, and send one line. Same reasoning as unlock: the
         # secret goes down a pipe, never into argv.
-        pw = sys.stdin.readline().rstrip("\r\n")
+        pw = _passphrase_from_stdin()
         if not pw:
             _die("no passphrase on stdin")
     else:
