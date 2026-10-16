@@ -379,7 +379,10 @@ def prior(importance: float, created: float, now: float | None = None,
     `now`, `kind` and `affirmed` stay in the signature for the opinion
     branch, whose recency runs from the last re-affirmation on the shorter,
     heavier opinion constants above."""
-    centred = 2.0 * float(importance) - 1.0        # 0.5 default -> exactly 0
+    # 0.5 default -> exactly 0. Clamped to the 0..1 the weight is built for,
+    # which only the server's tools enforce on the way in: past it a record
+    # stored at 50 outranked every match and one at -3 was never found.
+    centred = 2.0 * min(1.0, max(0.0, float(importance))) - 1.0
     if kind == "opinion":
         now = time.time() if now is None else now
         ref = float(affirmed or created)

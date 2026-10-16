@@ -1,4 +1,5 @@
-"""What the scoring model is handed: text in whatever spelling it arrives in.
+"""What the scoring model is handed: text in whatever spelling it arrives in,
+and importance on whatever scale.
 
 tests/test_ranking.py and tests/test_recency.py state the model itself and
 are its contract; these hold its inputs to what the index beside it does.
@@ -87,3 +88,80 @@ def test_a_place_typed_without_its_accent_finds_the_memory_that_has_it(vault):
             assert top["id"] == rid, (q, top["text"])
             scores.append(top["score"])
         assert scores[0] == pytest.approx(scores[1])
+
+
+# --------------------------------------------------- importance off its scale
+# Only the MCP server clamped importance to 0..1. The CLI's --importance, the
+# Hermes plugin, imports and the Python API passed it through, and the prior
+# is built for 0..1: 50 multiplied a score by 15.85, -3 made it negative.
+
+def test_an_importance_past_either_end_weighs_what_that_end_weighs():
+    now = 1_000_000.0
+    for kind in ("fact", "opinion"):
+        top = R.prior(1.0, now, now, kind=kind)
+        bottom = R.prior(0.0, now, now, kind=kind)
+        assert R.prior(50, now, now, kind=kind) == top
+        assert R.prior(8.0, now, now, kind=kind) == top
+        assert R.prior(-3, now, now, kind=kind) == bottom
+    assert R.final_score(0.6, 0.0, importance=-3, created=now, now=now) > 0
+
+
+def test_an_importance_in_range_scores_exactly_as_before():
+    now = 1_000_000.0
+    for imp in [i / 40 for i in range(41)] + [1e-12, 0.123456789, 1 - 1e-12]:
+        assert R.prior(imp, now, now) == R.W_IMPORTANCE * (2.0 * imp - 1.0)
+
+
+def _store_beside_two(vault, text, importance):
+    right = vault.store("The staging server runs Postgres 15 on port 5433.",
+                        caller="test")["id"]
+    vault.store("Backups run nightly at 02:00 to the NAS.", caller="test")
+    vault.store("The office printer is on the second floor.", caller="test")
+    other = vault.store(text, caller="test", importance=importance)["id"]
+    return right, other
+
+
+def test_a_memory_stored_at_importance_50_does_not_answer_other_questions(
+        vault):
+    right, loud = _store_beside_two(
+        vault, "The office router reboots every Sunday.", 50)
+    assert vault.get(loud, caller="test")["importance"] == 1.0
+    top = vault.search("staging Postgres port", caller="test")["results"][0]
+    assert top["id"] == right
+
+
+def test_a_memory_stored_at_importance_8_admits_no_wrong_answer(vault):
+    """A 1-10 scale is what models and other tools often send."""
+    right, wrong = _store_beside_two(
+        vault, "The production database listens on port 5432.", 8.0)
+    found = [r["id"] for r in vault.search(
+        "which port does the staging Postgres use", caller="test")["results"]]
+    assert found[0] == right and wrong not in found
+
+
+def test_a_memory_stored_at_importance_minus_3_is_still_found(vault):
+    _, low = _store_beside_two(
+        vault, "The office router reboots every Sunday.", -3)
+    assert vault.get(low, caller="test")["importance"] == 0.0
+    found = vault.search("when does the router reboot", caller="test")
+    assert [r["id"] for r in found["results"]][:1] == [low]
+
+
+def test_a_nan_importance_is_stored_as_the_default(vault):
+    rid = vault.store("The office router reboots every Sunday.",
+                      caller="test", importance=float("nan"))["id"]
+    assert vault.get(rid, caller="test")["importance"] == 0.5
+
+
+def test_an_importance_stored_before_the_clamp_is_ranked_as_if_clamped(vault):
+    """What earlier versions wrote is still in the column."""
+    right, _ = _store_beside_two(
+        vault, "Invoices are due on the fifth of each month.", 0.5)
+    vec = vault.embedder.embed_record("The office router reboots every Sunday.")
+    vault.db.insert(record_id=None, ns="main",
+                    text="The office router reboots every Sunday.", vec=vec,
+                    tags=[], importance=50.0, quarantined=False, pack=None,
+                    prov={}, master_key=vault._master)
+    vault._rebuild_index()
+    top = vault.search("staging Postgres port", caller="test")["results"][0]
+    assert top["id"] == right

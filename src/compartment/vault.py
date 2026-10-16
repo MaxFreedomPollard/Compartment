@@ -967,6 +967,11 @@ class Vault:
             # excluded so the vector represents the claim itself.
             vec = self.embedder.embed_record(strip_provenance(text))
         vec = np.atleast_2d(np.asarray(vec, dtype=np.float32))
+        # Kept to 0..1 as the server's tools keep it, so a value on another
+        # scale (1-10, say) lands in a dashboard bucket; a NaN is the default.
+        importance = float(importance)
+        importance = (0.5 if importance != importance
+                      else min(1.0, max(0.0, importance)))
         # THE OPINION PATH: update-first, not insert-first. An opinion is a
         # claim that revises rather than accumulates, so before any insert the
         # vault itself looks for the live opinion this one resembles. What
