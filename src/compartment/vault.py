@@ -514,6 +514,7 @@ class Vault:
         # both the namespace and the pack name, which is the recency
         # population's own predicate.
         self.db._invalidate_recency()
+        self.db._invalidate_namespaces()
         registry = json.loads(self.db.get_meta("packs", "{}"))
         registry.pop("starter", None)
         self.db.set_meta("packs", json.dumps(registry))
@@ -666,17 +667,9 @@ class Vault:
                 shared=self._embed_daemon_setting())
         return self._embedder
 
-    def _rank_candidates(self, query: str, qvec, pool: int,
-                         namespaces: set[str] | None = None):
-        """Score one candidate pool. Returns (fused, cosine, static).
-
-        `fused` is the score a caller sees: the evidence with the semantic
-        channel aged by how much of the vault is newer, times the prior.
-        `static` is the same score with no ageing, and it is what decides
-        MEMBERSHIP: how relevant a memory is cannot be settled by its age,
-        so recency orders results and never removes one. `namespaces` scopes
-        the population that ageing counts against, and None means the whole
-        vault, which is what the dashboard wants."""
+    def _candidate_hits(self, query: str, qvec, pool: int):
+        """One pool's candidates, before any scoring: the best cosine and
+        the vector rank of each record, and the keyword hits in BM25 order."""
         # The index holds one entry per embedding WINDOW, so several hits can
         # belong to one record. Reduce by MAX: a record is relevant if any part
         # of it is, and averaging would punish a long memory for the parts that
@@ -694,8 +687,24 @@ class Vault:
                 v_rank[rid] = len(v_rank)
             if len(vec_score) >= pool:
                 break
+        return vec_score, v_rank, self.db.fts_search(query, pool,
+                                                      COMMON_TERM_FRACTION)
 
-        fts_hits = self.db.fts_search(query, pool, COMMON_TERM_FRACTION)
+    def _rank_candidates(self, query: str, qvec, pool: int,
+                         namespaces: set[str] | None = None, hits=None):
+        """Score one candidate pool. Returns (fused, cosine, static).
+
+        `fused` is the score a caller sees: the evidence with the semantic
+        channel aged by how much of the vault is newer, times the prior.
+        `static` is the same score with no ageing, and it is what decides
+        MEMBERSHIP: how relevant a memory is cannot be settled by its age,
+        so recency orders results and never removes one. `namespaces` scopes
+        the population that ageing counts against, and None means the whole
+        vault, which is what the dashboard wants. `hits` is what
+        _candidate_hits returned for this pool, for a caller that has it."""
+        vec_score, v_rank, fts_hits = (
+            hits if hits is not None
+            else self._candidate_hits(query, qvec, pool))
         l_rank = {rid: r for r, (rid, _) in enumerate(fts_hits)}
 
         # How much of the query's information does each keyword hit explain?
@@ -1268,17 +1277,21 @@ class Vault:
                                     f"q={query[:80]!r} hits=0")
             return {"results": [], "note": DATA_NOT_INSTRUCTIONS}
         qvec = self.embedder.embed_query(query)
-        boosted, vec_score, static = {}, {}, {}
         # Filters below run after ranking, so a pool sized to top_k can be
         # emptied by them while matching records sit just past the cut. Widen
         # and retry rather than answer "nothing found" from an exhausted pool.
+        # Whether to widen turns only on how many candidates a pool finds, so
+        # that is settled first and only the pool kept is scored.
         pool = CANDIDATE_POOL
         for attempt in range(POOL_EXPANSIONS):
-            boosted, vec_score, static = self._rank_candidates(
-                query, qvec, pool, allowed)
-            if len(boosted) >= want * 4 or len(boosted) >= len(self._id_by_ikey):
+            hits = self._candidate_hits(query, qvec, pool)
+            found = len(hits[0].keys() | {rid for rid, _ in hits[2]})
+            if (found >= want * 4 or found >= len(self._id_by_ikey)
+                    or attempt == POOL_EXPANSIONS - 1):
                 break
             pool *= 4
+        boosted, vec_score, static = self._rank_candidates(
+            query, qvec, pool, allowed, hits)
 
         # The starting memories are ordinary records in "main", so a namespace
         # filter cannot reach them. Anyone who wants recall limited to what the

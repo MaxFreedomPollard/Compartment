@@ -149,6 +149,11 @@ class Store:
         # every write that moves superseded_by, which has no index: with none
         # superseded, restore_children has nothing to look for.
         self._superseded_n: int | None = None
+        # The namespace names and their record counts: every search, recent
+        # and relations call reads them to scope itself, and they came from a
+        # GROUP BY over every record. Dropped by whatever adds a record,
+        # removes one or moves one to another namespace.
+        self._ns_cache: list[dict] | None = None
         if image is not None:
             self.conn.deserialize(image)
             # idempotent schema upgrade: vaults sealed by older versions gain
@@ -290,7 +295,8 @@ class Store:
         elif self._superseded_n is not None:
             self._superseded_n += 1
         self._invalidate_df()
-        self._invalidate_recency()
+        self._recency_add(rid)
+        self._invalidate_namespaces()
         return rid
 
     def tombstone(self, record_id: str, by: str) -> bool:
@@ -453,6 +459,37 @@ class Store:
         self._recency_cache = None
         self._recency_subsets.clear()
 
+    def _invalidate_namespaces(self) -> None:
+        """Drop the cached namespace counts (see namespaces)."""
+        self._ns_cache = None
+
+    def _recency_add(self, record_id: str) -> None:
+        """An insert's half of keeping the recency population. A record that
+        joins it no older than every cached time belongs at the end, which is
+        where the sorted rebuild would put it, so it is appended there; any
+        other joiner drops the cache. Membership and time are read back with
+        the population's own predicate, so the two cannot disagree."""
+        if self._recency_cache is None:
+            return
+        row = self.conn.execute(
+            "SELECT ns, COALESCE(affirmed, created) AS t FROM records "
+            "WHERE id = ? AND superseded_by IS NULL AND pack IS NULL "
+            "AND instr(tags, '\"id:') = 0", (record_id,)).fetchone()
+        if row is None:
+            return                      # not in the population: nothing moved
+        times, codes, index = self._recency_cache
+        t = row["t"]
+        if not isinstance(t, (int, float)) or (times.size and t < times[-1]):
+            self._invalidate_recency()
+            return
+        index = dict(index)
+        code = index.setdefault(row["ns"], len(index))
+        times = np.append(times, t)
+        times.setflags(write=False)
+        codes = np.append(codes, np.asarray([code], dtype=np.int32))
+        self._recency_cache = (times, codes, index)
+        self._recency_subsets.clear()
+
     def _recency_population(self) -> tuple[np.ndarray, np.ndarray,
                                            dict[str, int]]:
         """Build, or return, the sorted times and their namespace codes.
@@ -584,6 +621,7 @@ class Store:
             self._superseded_n -= 1
         self._invalidate_df()
         self._invalidate_recency()
+        self._invalidate_namespaces()
         if cur.rowcount == 0:
             return False
         if shred:
@@ -673,9 +711,13 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) c FROM records WHERE ns = ?", (ns,)).fetchone()["c"]
 
     def namespaces(self) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT ns, COUNT(*) c FROM records GROUP BY ns ORDER BY ns").fetchall()
-        return [{"namespace": r["ns"], "records": r["c"]} for r in rows]
+        if self._ns_cache is None:
+            rows = self.conn.execute(
+                "SELECT ns, COUNT(*) c FROM records GROUP BY ns ORDER BY ns").fetchall()
+            self._ns_cache = [{"namespace": r["ns"], "records": r["c"]}
+                              for r in rows]
+        # Fresh dicts, as the query handed out: a caller may change its own.
+        return [dict(e) for e in self._ns_cache]
 
     # -- expiry -------------------------------------------------------------
 
