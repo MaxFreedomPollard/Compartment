@@ -19,7 +19,7 @@ from compartment.store import Store
 from compartment.vault import (Vault, is_seeded, local_stamp, strip_provenance,
                                with_provenance)
 
-from conftest import PASS
+from conftest import PASS, fill_clustered
 
 
 # --- opening a vault written by an older version ------------------------------
@@ -349,10 +349,14 @@ def test_pruning_keeps_a_tag_the_text_itself_says(vault):
 
 
 def test_a_second_pass_over_an_unchanged_vault_changes_nothing(vault):
-    for i in range(6):
-        vault.store(f"Fact number {i} about mail servers.", caller="test",
-                    tags=["mail"])
-    retag.run(vault, caller="test")
+    """On six memories this always held. On a vault of thousands with tags
+    in clusters each pass's additions were evidence for the next, so six
+    passes in a row over a 10,000-record vault that nothing else touched
+    changed 1,409, 1,035, 273, 270, 278 and 248 records, and every one of
+    them rewrote the whole vault."""
+    fill_clustered(vault, 3000)
+    first = retag.run(vault, caller="test")
+    assert first["records_changed"] > 300         # it does propagate
     assert retag.plan(vault) == []
 
 

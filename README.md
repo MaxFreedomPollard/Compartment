@@ -141,8 +141,8 @@ you learn that the client wants figures before conclusions. The agent tags
 the memory `northwind`. Two years later the same client, now called Harbour,
 hires you again, and the agent searches with the tag `harbour`. The memory
 is still true, but a tag filter cannot find it. So a background pass gives
-every memory the tags its nearest neighbours in embedding space carry,
-weighted by similarity: as Harbour memories accumulate near that old one, it
+every memory the tags its nearest neighbours in embedding space were stored
+with, weighted by similarity: as Harbour memories accumulate near that old one, it
 picks up the `harbour` tag. Two more signals run alongside: tags that almost
 always occur together imply each other, and an existing tag whose phrase
 appears in a memory's text is attached. The pass writes only tags, never

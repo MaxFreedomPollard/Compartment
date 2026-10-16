@@ -296,12 +296,18 @@ def snapshot(vault) -> Snapshot:
     what the slices before it wrote, and the setup is not repeated."""
     db = vault.db
     ids, mat = _record_matrix(db)
-    rows = {}
-    for row in db.conn.execute("SELECT id, tags FROM records"):
+    rows, chosen = {}, {}
+    for row in db.conn.execute("SELECT id, tags, tags_origin FROM records"):
         rows[row["id"]] = row["tags"]
+        chosen[row["id"]] = row["tags_origin"] or row["tags"]
 
     tags_by_id = {rid: json.loads(t) for rid, t in rows.items()}
-    desc_by_id = {rid: _descriptive(t) for rid, t in tags_by_id.items()}
+    # Only the tags a record was stored with vote, imply and count towards
+    # eligibility. What a pass adds is its answer; as evidence for the next
+    # pass it carried tags one hop further every interval, so a vault never
+    # settled and was rewritten each time. A record from before tags_origin
+    # existed votes with the tags it has.
+    desc_by_id = {rid: _descriptive(json.loads(t)) for rid, t in chosen.items()}
     rules = _implications([v for v in desc_by_id.values() if v])
     # One eligibility set, applied to every way a tag can be proposed. Filtering
     # in only one of the three signals would let the other two reintroduce
@@ -389,8 +395,8 @@ def _plan_one(rid, sim_row, ids, index, desc_by_id, before, rules,
     scored: dict[str, float] = {t: s for t, s in support.items()
                                 if s >= PROPAGATE_SHARE and t in allowed}
 
-    # --- signal 2: tags this record's own tags imply --------------------------
-    for tag in own:
+    # --- signal 2: tags the record was stored with imply ----------------------
+    for tag in desc_by_id[rid]:
         for implied, conf in rules.get(tag, {}).items():
             if implied in allowed:
                 scored[implied] = max(scored.get(implied, 0.0), conf)
