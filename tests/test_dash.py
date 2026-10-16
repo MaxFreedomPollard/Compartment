@@ -122,3 +122,57 @@ def test_the_panel_hears_where_dash_is_serving(vault, vault_path, tmp_path,
         menubar.stop_dashboard()
         clicked.join(timeout=15)
         session.clear(vault_path)
+
+
+def _stored_credential_only(monkeypatch):
+    """No keychain and no passphrase in the environment, so the session
+    store is the only credential there is; every look is made at once."""
+    from compartment import vault as vault_module
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    for name in ("COMPARTMENT_PASSPHRASE", "ENGRAM_PASSPHRASE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(dash, "CREDENTIAL_CHECK_SECONDS", 0, raising=False)
+
+
+def test_a_lock_reaches_a_running_dashboard(served, vault, vault_path,
+                                            monkeypatch):
+    """`compartment lock`, which the panel's Lock runs, clears the stored
+    credentials and touches nothing else. A running dashboard kept its own
+    unlocked vault and never looked again, so its page went on answering
+    with decrypted memories after the lock, until the process was stopped."""
+    from compartment import session
+    from compartment.platforms import file_signature
+    _stored_credential_only(monkeypatch)
+    session.store(vault_path, vault._master)          # `compartment unlock`
+    try:
+        _, body, _ = _get(served + "api/recent")
+        assert json.loads(body)["recent"]
+        before = file_signature(vault_path)
+        session.clear(vault_path)                     # `compartment lock`
+        with pytest.raises(urllib.error.HTTPError) as e:
+            _get(served + "api/recent")
+    finally:
+        session.clear(vault_path)
+    assert e.value.code == 423                        # the page shows locked
+    assert vault._locked and vault._master is None    # and the key is gone
+    assert file_signature(vault_path) == before       # nothing was written
+    status, body, _ = _get(served)                    # the page still renders
+    assert status == 200 and b"Compartment" in body
+
+
+def test_a_credential_that_cannot_be_read_leaves_the_dashboard_serving(
+        served, vault, vault_path, monkeypatch):
+    """Could not tell is not locked: a credential file that failed to read,
+    or a boot that cannot be identified, says nothing about a lock."""
+    from compartment import session
+    from compartment.crypto import CryptoError
+    from compartment.vault import Vault
+    _stored_credential_only(monkeypatch)
+    monkeypatch.setattr(session, "watch_signature", lambda path: object())
+
+    def unreadable(path, passphrase=None):
+        raise CryptoError("the session file could not be read")
+    monkeypatch.setattr(Vault, "find_credential", staticmethod(unreadable))
+    status, body, _ = _get(served + "api/recent")
+    assert status == 200 and json.loads(body)["recent"]
+    assert not vault._locked

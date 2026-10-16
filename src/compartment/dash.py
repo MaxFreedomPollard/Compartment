@@ -29,12 +29,17 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import session
 from .acl import AclError
 from .crypto import CryptoError
 from .ranking import CANDIDATE_POOL
 from .vault import Vault, VaultLockedError
 
 TAG_HIDE_PREFIX = "id:"          # seed ids would swamp the tag cloud
+
+#: How often a dashboard holding the key looks for its credential again, so
+#: that `compartment lock`, typed or pressed in the panel, reaches it too.
+CREDENTIAL_CHECK_SECONDS = 5
 
 # Importance tiers (salience.py). The page's JS colours memory rows from this
 # list (it is injected into PAGE below), so the tier boundaries and the hex
@@ -50,16 +55,24 @@ TYPE_BUCKETS = [
 
 class _VaultRef:
     """Hands out a live vault, transparently reopening when another process
-    (the MCP server, the CLI) wrote the vault file since we read it."""
+    (the MCP server, the CLI) wrote the vault file since we read it, and
+    letting go of it once its credential has gone, so that after a lock the
+    page reports the vault locked instead of serving it."""
 
     def __init__(self, path: str, vault: Vault):
         self.path = path
         self._v = vault
         self._lock = threading.Lock()
+        self._cred_sig = _credential_signature(path)
+        self._cred_checked = time.monotonic()
 
     def get(self) -> Vault:
         with self._lock:
+            v = self._v
+            if v is not None and not v._locked and self._credential_gone(v):
+                _drop_key(v)
             if self._v is None or self._v._locked or self._v.is_stale():
+                sig = _credential_signature(self.path)
                 try:
                     pw, key = Vault.resolve_credential(self.path)
                 except CryptoError as exc:      # no credential = still locked
@@ -68,7 +81,56 @@ class _VaultRef:
                     Vault.load_keyfile_hint(self.path)
                 self._v = Vault.unlock(self.path, passphrase=pw, raw_key=key,
                                        keyfile=kf)
+                self._cred_sig, self._cred_checked = sig, time.monotonic()
             return self._v
+
+    def _credential_gone(self, v: Vault) -> bool:
+        """Whether the credential this vault was opened with has gone:
+        `compartment lock`, or the panel's Lock, cleared it.
+
+        Asked the way the MCP server asks (server._credential_gone): at most
+        every CREDENTIAL_CHECK_SECONDS, and with a search only when the
+        credential's files say it may have changed. A look that fails says
+        nothing either way, since a credential file that could not be read
+        is not a lock, and a passphrase in the environment is standing
+        intent."""
+        now = time.monotonic()
+        if now - self._cred_checked < CREDENTIAL_CHECK_SECONDS:
+            return False
+        self._cred_checked = now
+        sig = _credential_signature(self.path)
+        if sig is None or sig == self._cred_sig:
+            return False
+        try:
+            found = Vault.find_credential(self.path)
+        except Exception:                               # noqa: BLE001
+            return False            # could not tell; the next look asks again
+        if found is None or (found[1] is not None and found[1] != v._master):
+            return True
+        self._cred_sig = sig
+        return False
+
+
+def _credential_signature(path: str):
+    """session.watch_signature for this vault, or None if it cannot be
+    taken."""
+    try:
+        return session.watch_signature(path)
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _drop_key(v: Vault) -> None:
+    """Let go of the key and the decrypted memories, as Vault.lock() does
+    after its save - and without the save: the dashboard writes nothing to
+    the vault, so there is nothing for a save to keep. Under the vault's own
+    lock, so a read already under way finishes first."""
+    with v._oplock:
+        v._master = None
+        v._locked = True
+        v.db.conn.close()
+        v.index = None
+        v._id_by_ikey = {}
 
 
 # ---------------------------------------------------------------- snapshots

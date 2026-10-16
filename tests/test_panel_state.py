@@ -403,6 +403,28 @@ def test_lock_runs_with_no_view_holding_the_key(vault_path, quiet_agents):
     assert st["locked"] is True and st["recent"] == []
 
 
+def test_lock_stops_the_dashboard_the_panel_started(vault_path, quiet_agents,
+                                                    monkeypatch):
+    """A dashboard started from the panel keeps an unlocked vault of its
+    own. Lock stopped the view and left it running, so its page went on
+    serving decrypted memories after the lock; only Quit stopped it."""
+    import subprocess
+    _open(vault_path)
+    dash = subprocess.Popen([sys.executable, "-c",
+                             "import time; time.sleep(30)"])
+    monkeypatch.setitem(menubar._DASH, "proc", dash)
+    monkeypatch.setitem(menubar._DASH, "url", "http://127.0.0.1:1/token/")
+    try:
+        ps = menubar.PanelState(vault_path, view=_FakeView())
+        assert ps.lock(lambda: session.clear(vault_path) or True) is True
+        assert dash.poll() is not None, "the dashboard was left serving"
+        assert menubar._DASH["proc"] is None
+    finally:
+        if dash.poll() is None:
+            dash.kill()
+        dash.wait(timeout=10)
+
+
 def test_refresh_async_reruns_once_for_requests_made_meanwhile(vault_path,
                                                                 quiet_agents):
     _open(vault_path)

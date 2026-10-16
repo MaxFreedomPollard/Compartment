@@ -787,10 +787,14 @@ class PanelState:
             return dict(self.state)
 
     def lock(self, lock_fn) -> bool:
-        """Run `lock_fn` with no view process alive, then show locked."""
+        """Run `lock_fn` with no view process alive and no dashboard, then
+        show locked."""
         with self._lock:
             self._gen += 1
         with self.view.held():
+            # A dashboard this panel started holds the key in a process of
+            # its own, and went on serving the vault after the lock.
+            stop_dashboard()
             ok = bool(lock_fn())
         if ok:
             self.mark(locked=True, checking=False, records=0, organic=0,
