@@ -196,6 +196,23 @@ def test_a_daemon_that_stops_answering_does_not_hang_its_clients(
     assert isinstance(fresh, Embedder)
 
 
+def test_a_text_the_model_rejects_is_an_error_not_a_lost_daemon(daemon_env):
+    """A text the tokenizer cannot encode, such as one with a lone surrogate
+    from a cut emoji, comes back from the daemon as an error reply. The
+    client took that for a daemon that had gone: it dropped the connection,
+    loaded a model of its own for the rest of the process, ran the text
+    again there, and the caller saw the tokenizer's bare TypeError."""
+    r = RemoteEmbedder.connect()
+    r.embed_query("warm up")
+    pid = r.daemon_pid
+    with pytest.raises(ValueError, match="TypeError"):
+        r.embed_query("where is the router \ud83d passphrase")
+    assert r.shared and r.daemon_pid == pid
+    assert embed_daemon.status(daemon_env)["clients"] == 1
+    assert r.embed_query("an ordinary query afterwards").shape == (r.dim,)
+    assert r.shared
+
+
 def test_a_dead_socket_file_is_replaced(daemon_env):
     daemon_env.parent.mkdir(parents=True, exist_ok=True)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

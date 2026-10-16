@@ -758,7 +758,12 @@ class RemoteEmbedder:
                     return resp
                 if resp.get("kind") == "ModelError":
                     raise ModelError(resp.get("error", "model error"))
-                raise Unavailable(resp.get("error", "daemon error"))
+                # The daemon is there and answered: what failed is this
+                # request, and its input would fail the same way in a model
+                # of this process's own.
+                raise ValueError(f"the shared embedding process failed: "
+                                 f"{resp.get('kind', 'error')}: "
+                                 f"{resp.get('error', '')}")
         raise Unavailable("unreachable")
 
     def _fallback(self) -> Embedder:
