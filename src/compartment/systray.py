@@ -41,8 +41,9 @@ from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
                       change_passphrase, claim_first_run, create_vault,
                       default_vault, integrate, lock_holder_pid, lock_vault,
                       open_dashboard, stop_dashboard,
-                      release_instance_lock, run_in_background, self_check,
-                      set_setting, starter_note, summarise, unlock_vault,
+                      offers_settings, release_instance_lock,
+                      run_in_background, self_check,
+                      starter_note, summarise, unlock_vault,
                       PanelState)
 from .menubar import quit_running as _stop_lock_holder
 
@@ -118,18 +119,20 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
         if state["locked"] is False:
             rows.append(("change", "Change password"))
     s = state["settings"]
-    rows.append(("heading", "SETTINGS"))
-    rows.append(("toggle:capture_hook",
-                 "Create memories automatically: "
-                 f"{'on' if s['capture_hook'] else 'off'}"))
-    rows.append(("toggle:search_starter_facts",
-                 f"Search starter facts: "
-                 f"{'on' if s['search_starter_facts'] else 'off'}"))
-    rows.append(("toggle:expire_memories",
-                 f"Forget memories when they expire: "
-                 f"{'on' if s.get('expire_memories', True) else 'off'}"))
-    rows.append(("choice:auto_lock_minutes",
-                 f"Auto-lock: {auto_lock_label(s['auto_lock_minutes'])}"))
+    # Not before there is a vault: see offers_settings.
+    if offers_settings(state):
+        rows.append(("heading", "SETTINGS"))
+        rows.append(("toggle:capture_hook",
+                     "Create memories automatically: "
+                     f"{'on' if s['capture_hook'] else 'off'}"))
+        rows.append(("toggle:search_starter_facts",
+                     f"Search starter facts: "
+                     f"{'on' if s['search_starter_facts'] else 'off'}"))
+        rows.append(("toggle:expire_memories",
+                     f"Forget memories when they expire: "
+                     f"{'on' if s.get('expire_memories', True) else 'off'}"))
+        rows.append(("choice:auto_lock_minutes",
+                     f"Auto-lock: {auto_lock_label(s['auto_lock_minutes'])}"))
     # Installing leaves you with a vault that nothing is using until an agent
     # is wired to it. One button per agent, so that step is not a terminal
     # command someone has to know about.
@@ -1045,46 +1048,53 @@ def run(vault: str | None = None, show: bool = False,
             ttk.Label(frame, text="Stays unlocked until restart or Lock",
                       foreground="#666").pack(anchor="w")
 
-        ttk.Separator(frame).pack(fill="x", pady=10)
-        ttk.Label(frame, text="SETTINGS",
-                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        # Not before there is a vault: see offers_settings.
+        if offers_settings(state):
+            ttk.Separator(frame).pack(fill="x", pady=10)
+            ttk.Label(frame, text="SETTINGS",
+                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
 
-        hook = tk.BooleanVar(value=s["capture_hook"])
-        starter = tk.BooleanVar(value=s["search_starter_facts"])
-        expiring = tk.BooleanVar(value=s.get("expire_memories", True))
+            hook = tk.BooleanVar(value=s["capture_hook"])
+            starter = tk.BooleanVar(value=s["search_starter_facts"])
+            expiring = tk.BooleanVar(value=s.get("expire_memories", True))
 
-        def toggle(key, var):
-            states.set_settings(set_setting(vault_path, key, bool(var.get())))
-            refresh()
+            def toggle(key, var):
+                # One that could not be saved says why; a refresh now would
+                # read the vault again and clear the reason off the panel.
+                if states.change_setting(key, bool(var.get())):
+                    refresh()
+                else:
+                    redraw()
 
-        ttk.Checkbutton(frame, text="Create memories automatically",
-                        variable=hook,
-                        command=lambda: toggle("capture_hook", hook)
-                        ).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(frame, text="Search starter facts", variable=starter,
-                        command=lambda: toggle("search_starter_facts", starter)
-                        ).pack(anchor="w")
-        ttk.Checkbutton(frame, text="Forget memories when they expire",
-                        variable=expiring,
-                        command=lambda: toggle("expire_memories", expiring)
-                        ).pack(anchor="w")
+            ttk.Checkbutton(frame, text="Create memories automatically",
+                            variable=hook,
+                            command=lambda: toggle("capture_hook", hook)
+                            ).pack(anchor="w", pady=(6, 0))
+            ttk.Checkbutton(frame, text="Search starter facts", variable=starter,
+                            command=lambda: toggle("search_starter_facts", starter)
+                            ).pack(anchor="w")
+            ttk.Checkbutton(frame, text="Forget memories when they expire",
+                            variable=expiring,
+                            command=lambda: toggle("expire_memories", expiring)
+                            ).pack(anchor="w")
 
-        row = ttk.Frame(frame)
-        row.pack(fill="x", pady=(8, 0))
-        ttk.Label(row, text="Auto-lock").pack(side="left")
-        choice = tk.StringVar(value=auto_lock_label(s["auto_lock_minutes"]))
+            row = ttk.Frame(frame)
+            row.pack(fill="x", pady=(8, 0))
+            ttk.Label(row, text="Auto-lock").pack(side="left")
+            choice = tk.StringVar(value=auto_lock_label(s["auto_lock_minutes"]))
 
-        def set_lock(label):
-            for m in AUTO_LOCK_CHOICES:
-                if auto_lock_label(m) == label:
-                    states.set_settings(set_setting(vault_path,
-                                                    "auto_lock_minutes", m))
-                    break
-            refresh()
+            def set_lock(label):
+                for m in AUTO_LOCK_CHOICES:
+                    if auto_lock_label(m) == label:
+                        if not states.change_setting("auto_lock_minutes", m):
+                            redraw()              # keep the reason on screen
+                            return
+                        break
+                refresh()
 
-        ttk.OptionMenu(row, choice, choice.get(),
-                       *[auto_lock_label(m) for m in AUTO_LOCK_CHOICES],
-                       command=set_lock).pack(side="right")
+            ttk.OptionMenu(row, choice, choice.get(),
+                           *[auto_lock_label(m) for m in AUTO_LOCK_CHOICES],
+                           command=set_lock).pack(side="right")
 
         ttk.Separator(frame).pack(fill="x", pady=10)
         ttk.Label(frame, text="CONNECT AN AGENT",

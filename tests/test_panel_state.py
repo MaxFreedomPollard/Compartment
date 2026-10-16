@@ -425,6 +425,34 @@ def test_lock_stops_the_dashboard_the_panel_started(vault_path, quiet_agents,
         dash.wait(timeout=10)
 
 
+def test_a_setting_changed_in_the_panel_is_saved_and_shown(vault_path,
+                                                           quiet_agents):
+    _open(vault_path)
+    ps = menubar.PanelState(vault_path, view=_FakeView())
+    assert ps.change_setting("auto_lock_minutes", 15) is True
+    assert ps.snapshot()["settings"]["auto_lock_minutes"] == 15
+    assert menubar.read_settings(vault_path)["auto_lock_minutes"] == 15
+
+
+def test_a_setting_that_cannot_be_saved_says_so(vault_path, quiet_agents):
+    """A config that does not parse - cut short mid-write, or a hand edit -
+    made set_setting raise inside the switch's handler, where nothing caught
+    it: the switch moved, nothing was saved, and nothing said so."""
+    from compartment.acl import VaultConfig
+    _open(vault_path)
+    ps = menubar.PanelState(vault_path, view=_FakeView())
+    ps.refresh()
+    before = ps.snapshot()["settings"]
+    with open(VaultConfig.path_for(vault_path), "w", encoding="utf-8"):
+        pass                                  # the config, empty
+    with pytest.raises(ValueError):           # what the handler has to catch
+        menubar.set_setting(vault_path, "search_starter_facts", False)
+    assert ps.change_setting("search_starter_facts", False) is False
+    st = ps.snapshot()
+    assert "could not save" in st["error"].lower()
+    assert st["settings"] == before           # the switch goes back
+
+
 def test_a_slow_button_runs_off_the_thread_that_clicked():
     """Connect waits on the agent's own tool and Create on all of `init`,
     for up to five and fifteen minutes. Run on the UI thread, where a

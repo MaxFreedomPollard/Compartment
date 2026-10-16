@@ -817,6 +817,21 @@ class PanelState:
             self._sigs.pop("settings", None)
             return dict(self.state)
 
+    def change_setting(self, key: str, value) -> bool:
+        """set_setting for a switch in the panel, its result shown at once.
+
+        False, with the reason on screen, when it could not be saved: a
+        config that does not parse, a folder that cannot be written. That
+        raised inside the switch's handler, where nothing caught it, so the
+        switch moved, nothing was saved and nothing said so. The switch now
+        goes back to what is saved."""
+        try:
+            self.set_settings(set_setting(self.vault, key, value))
+            return True
+        except Exception as exc:                        # noqa: BLE001
+            self.mark(error=f"Could not save that setting: {exc}")
+            return False
+
     def lock(self, lock_fn) -> bool:
         """Run `lock_fn` with no view process alive and no dashboard, then
         show locked."""
@@ -1330,6 +1345,15 @@ def starter_note(state: dict) -> str:
 
 def auto_lock_label(minutes: int) -> str:
     return "Never" if not minutes else f"{minutes} min"
+
+
+def offers_settings(state: dict) -> bool:
+    """Whether the panel shows its settings switches: only once there is a
+    vault. What they change is the vault's config file, and creating the
+    vault writes that file afresh, so a switch flipped before Create was
+    undone by it, with nothing said. Locked is fine: the config needs no
+    passphrase."""
+    return bool(state.get("exists"))
 
 
 # ---------------------------------------------------------------- login item
@@ -2240,49 +2264,51 @@ def run(vault: str | None = None, show: bool = False,
                                    wrap=True))
             views.append(divider())
 
-            views.append(label("SETTINGS", 10, bold=True, secondary=True))
-            s = st["settings"]
+            # Not before there is a vault: see offers_settings.
+            if offers_settings(st):
+                views.append(label("SETTINGS", 10, bold=True, secondary=True))
+                s = st["settings"]
 
-            self.hook_switch = NSSwitch.alloc().init()
-            self.hook_switch.setState_(1 if s["capture_hook"] else 0)
-            self.hook_switch.setTarget_(self)
-            self.hook_switch.setAction_("toggleHook:")
-            # No explanatory line under these two: the switch says what it
-            # does, and a popover cannot grow past the height macOS gives it
-            # without putting the whole panel behind a scrollbar.
-            views.append(row(label("Create memories automatically"), _spacer(),
-                             self.hook_switch))
+                self.hook_switch = NSSwitch.alloc().init()
+                self.hook_switch.setState_(1 if s["capture_hook"] else 0)
+                self.hook_switch.setTarget_(self)
+                self.hook_switch.setAction_("toggleHook:")
+                # No explanatory line under these two: the switch says what it
+                # does, and a popover cannot grow past the height macOS gives it
+                # without putting the whole panel behind a scrollbar.
+                views.append(row(label("Create memories automatically"), _spacer(),
+                                 self.hook_switch))
 
-            self.starter_switch = NSSwitch.alloc().init()
-            self.starter_switch.setState_(1 if s["search_starter_facts"] else 0)
-            self.starter_switch.setTarget_(self)
-            self.starter_switch.setAction_("toggleStarter:")
-            views.append(row(label("Search starter facts"), _spacer(),
-                             self.starter_switch))
+                self.starter_switch = NSSwitch.alloc().init()
+                self.starter_switch.setState_(1 if s["search_starter_facts"] else 0)
+                self.starter_switch.setTarget_(self)
+                self.starter_switch.setAction_("toggleStarter:")
+                views.append(row(label("Search starter facts"), _spacer(),
+                                 self.starter_switch))
 
-            # A memory stored with a last day on it is removed once that day
-            # has gone. Off, the date is recorded and shown and nothing is
-            # ever deleted. Nothing without an expiry is touched either way.
-            self.expire_switch = NSSwitch.alloc().init()
-            self.expire_switch.setState_(1 if s["expire_memories"] else 0)
-            self.expire_switch.setTarget_(self)
-            self.expire_switch.setAction_("toggleExpire:")
-            views.append(row(label("Forget memories when they expire"),
-                             _spacer(), self.expire_switch))
+                # A memory stored with a last day on it is removed once that day
+                # has gone. Off, the date is recorded and shown and nothing is
+                # ever deleted. Nothing without an expiry is touched either way.
+                self.expire_switch = NSSwitch.alloc().init()
+                self.expire_switch.setState_(1 if s["expire_memories"] else 0)
+                self.expire_switch.setTarget_(self)
+                self.expire_switch.setAction_("toggleExpire:")
+                views.append(row(label("Forget memories when they expire"),
+                                 _spacer(), self.expire_switch))
 
-            seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
-                [auto_lock_label(m) for m in AUTO_LOCK_CHOICES], 0, self,
-                "changeAutoLock:")
-            try:
-                seg.setSelectedSegment_(
-                    AUTO_LOCK_CHOICES.index(int(s["auto_lock_minutes"])))
-            except ValueError:
-                seg.setSelectedSegment_(1)
-            self.autolock_seg = seg
-            views.append(row(label("Auto-lock"), _spacer(), seg))
-            views.append(label("Lock the vault after this much idle time",
-                               10, secondary=True))
-            views.append(divider())
+                seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
+                    [auto_lock_label(m) for m in AUTO_LOCK_CHOICES], 0, self,
+                    "changeAutoLock:")
+                try:
+                    seg.setSelectedSegment_(
+                        AUTO_LOCK_CHOICES.index(int(s["auto_lock_minutes"])))
+                except ValueError:
+                    seg.setSelectedSegment_(1)
+                self.autolock_seg = seg
+                views.append(row(label("Auto-lock"), _spacer(), seg))
+                views.append(label("Lock the vault after this much idle time",
+                                   10, secondary=True))
+                views.append(divider())
 
             # Installing leaves you with a vault and an icon, and nothing
             # using either until an agent is wired to it. That step is one
@@ -2528,20 +2554,23 @@ def run(vault: str | None = None, show: bool = False,
             self.rebuild()
 
         def toggleStarter_(self, sender):
-            self.panel.set_settings(set_setting(
-                vault_path, "search_starter_facts", bool(sender.state())))
+            self.panel.change_setting("search_starter_facts",
+                                      bool(sender.state()))
             self.rebuild()
 
         def toggleExpire_(self, sender):
-            self.panel.set_settings(set_setting(
-                vault_path, "expire_memories", bool(sender.state())))
+            saved = self.panel.change_setting("expire_memories",
+                                              bool(sender.state()))
             self.rebuild()
-            self.panel.refresh_async()      # the counts depend on this one
+            # The counts depend on this one. Not after a failed save: the
+            # read would clear the reason off the panel before it was seen.
+            if saved:
+                self.panel.refresh_async()
 
         def changeAutoLock_(self, sender):
             idx = int(sender.selectedSegment())
-            self.panel.set_settings(set_setting(
-                vault_path, "auto_lock_minutes", AUTO_LOCK_CHOICES[idx]))
+            self.panel.change_setting("auto_lock_minutes",
+                                      AUTO_LOCK_CHOICES[idx])
             self.rebuild()
 
         def connectAgent_(self, sender):
