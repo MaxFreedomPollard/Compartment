@@ -138,6 +138,41 @@ def test_a_client_survives_the_daemon_being_killed(daemon_env):
     assert r.shared and r.daemon_pid and r.daemon_pid != first
 
 
+def _returns_within(seconds, fn):
+    """What fn returns, or a failure if it is still waiting after `seconds`."""
+    out = []
+    t = threading.Thread(target=lambda: out.append(fn()), daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        pytest.fail(f"still waiting after {seconds} s")
+    return out[0]
+
+
+def test_a_daemon_that_stops_answering_does_not_hang_its_clients(
+        daemon_env, monkeypatch, local):
+    """A daemon that is alive but not serving (suspended with Ctrl-Z, stuck
+    under a debugger) still completes connect() through the kernel backlog
+    and never closes the connection. The hello and every request waited for
+    its reply with no limit, and in the server the waiting call holds the
+    tool gate, so every memory tool hung behind it."""
+    monkeypatch.setattr(embed_daemon, "_HELLO_TIMEOUT", 0.3, raising=False)
+    monkeypatch.setattr(embed_daemon, "_REQUEST_TIMEOUT", 0.3, raising=False)
+    r = RemoteEmbedder.connect()
+    r.embed_query("warm up")
+    pid = r.daemon_pid
+    q = "where is the router passphrase"
+    os.kill(pid, signal.SIGSTOP)
+    try:
+        vec = _returns_within(30, lambda: r.embed_query(q))
+        fresh = _returns_within(30, get_embedder)
+    finally:
+        os.kill(pid, signal.SIGCONT)
+    assert not r.shared                          # it went on with its own model
+    assert np.array_equal(vec, local.embed_query(q))
+    assert isinstance(fresh, Embedder)
+
+
 def test_a_dead_socket_file_is_replaced(daemon_env):
     daemon_env.parent.mkdir(parents=True, exist_ok=True)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

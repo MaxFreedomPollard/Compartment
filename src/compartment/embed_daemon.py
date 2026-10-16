@@ -89,6 +89,20 @@ _MAX_LINE = 64 * 1024 * 1024
 #: directory instead.
 _MAX_SOCKET_PATH = 100
 
+#: How long a client waits for a daemon to answer its hello. A daemon that
+#: is alive but not serving (suspended with Ctrl-Z, stuck under a debugger)
+#: still completes connect() through the kernel backlog and never closes the
+#: connection, so a reply that is not coming is only noticed by a limit.
+_HELLO_TIMEOUT = 5.0
+
+#: How long a request may take: this, plus _TIMEOUT_PER_TEXT for each text
+#: of an embed_passages. The slowest single requests, a first one that loads
+#: the model and a record of 64 windows, take about 4 s on a current laptop,
+#: and a 448-token window about 50 ms. A request past its limit is retried
+#: once and then embedded by a model of the caller's own.
+_REQUEST_TIMEOUT = 60.0
+_TIMEOUT_PER_TEXT = 1.0
+
 
 class Unavailable(RuntimeError):
     """The shared daemon cannot be used; the caller embeds locally."""
@@ -507,10 +521,10 @@ def _connect(path: Path, timeout: float = 5.0) -> socket.socket | None:
     except OSError:
         s.close()
         return None
-    # Requests block for as long as a batch takes to embed; a dead daemon
-    # closes the connection and readline returns EOF, which is the signal
-    # the client acts on. No timeout here.
-    s.settimeout(None)
+    # The timeout stays on. A dead daemon closes the connection, but one
+    # that is stopped or wedged never does, and without a limit the reader
+    # waits for it forever. RemoteEmbedder sets its own limits on the hello
+    # and on each request.
     return s
 
 
@@ -649,6 +663,7 @@ class RemoteEmbedder:
                 raise Unavailable(f"no embedding daemon at {self._path}")
             self._sock, self._rfile, self._wfile = s, s.makefile("rb"), s.makefile("wb")
             try:
+                s.settimeout(_HELLO_TIMEOUT)
                 _write(self._wfile, {"op": "hello", "model": self.model_name})
                 hello = _read(self._rfile)
             except (OSError, ValueError) as exc:
@@ -711,11 +726,13 @@ class RemoteEmbedder:
 
     def _call(self, op: str, **fields) -> dict:
         """One round trip, reconnecting once if the daemon went away."""
+        limit = _REQUEST_TIMEOUT + _TIMEOUT_PER_TEXT * len(fields.get("texts", ()))
         with self._lock:
             for attempt in (1, 2):
                 try:
                     if self._sock is None:
                         self._open()
+                    self._sock.settimeout(limit)
                     _write(self._wfile, {"op": op, "model": self.model_name, **fields})
                     resp = _read(self._rfile)
                     if resp is None:
