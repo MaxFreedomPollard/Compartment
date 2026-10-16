@@ -213,6 +213,51 @@ def test_a_text_the_model_rejects_is_an_error_not_a_lost_daemon(daemon_env):
     assert r.shared
 
 
+def test_a_long_list_of_passages_is_embedded_once_through_the_daemon(
+        monkeypatch):
+    """A reply carries 2 KB a text, so from 32,768 texts on it was longer
+    than the 64 MiB the client allows a line: the client dropped it and
+    asked again, the daemon embedded everything a second time, and then the
+    caller's own model did it a third, and kept serving it. An import sends
+    every record in one call. The model is a stand-in here: the reply's
+    length depends only on how many texts there are."""
+    made = []
+
+    class Counting:
+        def __init__(self, name):
+            self.dim = model_info(name).dim
+            self.texts = 0
+            made.append(self)
+
+        def embed_passages(self, texts, batch=64):
+            self.texts += len(texts)
+            out = np.zeros((len(texts), self.dim), np.float32)
+            out[:, 0] = [float(t.rsplit(" ", 1)[1]) for t in texts]
+            return out
+
+    monkeypatch.setattr(embed_daemon, "Embedder", Counting)
+    d = tempfile.mkdtemp(prefix="cmpt-")
+    daemon = embed_daemon._Daemon(Path(d) / "embed.sock", idle=60)
+    t = threading.Thread(target=daemon.run, daemon=True)
+    t.start()
+    try:
+        assert _wait_until(daemon.path.exists, 10)
+        r = RemoteEmbedder.connect(path=daemon.path, spawn=False)
+        n = 33_000
+        out = r.embed_passages([f"memory number {i}" for i in range(n)])
+        assert out.shape == (n, r.dim)
+        assert np.array_equal(out[:, 0], np.arange(n, dtype=np.float32))
+        served = daemon._models[DEFAULT_MODEL]
+        assert served.texts == n                  # each text once, by the daemon
+        assert [m for m in made if m is not served] == []
+        assert r.shared
+        r.close()
+    finally:
+        daemon._shutdown()
+        t.join(5)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_a_dead_socket_file_is_replaced(daemon_env):
     daemon_env.parent.mkdir(parents=True, exist_ok=True)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

@@ -84,6 +84,11 @@ SOCKET_NAME = "embed.sock"
 #: not a limit anyone should meet.
 _MAX_LINE = 64 * 1024 * 1024
 
+#: Texts per embed_passages round trip. A reply carries 2 KB a text (384
+#: float32 in base64) and a client refuses a line over _MAX_LINE, so a long
+#: list, a whole import, goes in parts: 8,192 texts make a 16 MiB reply.
+_PASSAGES_PER_CALL = 8192
+
 #: AF_UNIX paths are short: 104 bytes on macOS and the BSDs, 108 on Linux,
 #: including the terminating NUL. A path over this goes to the temp
 #: directory instead.
@@ -787,8 +792,11 @@ class RemoteEmbedder:
             return np.zeros((0, self.dim), np.float32)
         if self._local is None:
             try:
-                return _unpack(self._call("embed_passages", texts=texts,
-                                          batch=int(batch))["vecs"])
+                return np.concatenate([
+                    _unpack(self._call("embed_passages",
+                                       texts=texts[i:i + _PASSAGES_PER_CALL],
+                                       batch=int(batch))["vecs"])
+                    for i in range(0, len(texts), _PASSAGES_PER_CALL)])
             except Unavailable:
                 pass
         return self._fallback().embed_passages(texts, batch=batch)
