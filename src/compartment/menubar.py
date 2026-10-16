@@ -265,6 +265,11 @@ def default_vault() -> str:
 #: Worked out once, then reused: asking the login shell costs a fork.
 _USER_PATH = None
 
+#: Printed by the login shell just before its PATH. Whatever a profile prints
+#: on the way - an echo, a version manager's "Now using node ..." - comes
+#: before it, and was glued onto the first entry when there was no marker.
+_PATH_MARK = "__COMPARTMENT_PATH__"
+
 
 def user_path() -> str:
     """The PATH a terminal on this machine would have.
@@ -288,10 +293,16 @@ def user_path() -> str:
     if sys.platform != "win32":
         shell = os.environ.get("SHELL") or "/bin/sh"
         try:
-            out = subprocess.run([shell, "-lc", 'printf %s "$PATH"'],
-                                 capture_output=True, text=True, timeout=15,
-                                 encoding="utf-8", errors="replace").stdout
-            parts += [p for p in (out or "").strip().split(os.pathsep) if p]
+            # No keyboard: a profile that reads input would otherwise wait on
+            # a terminal a login item does not have.
+            out = subprocess.run(
+                [shell, "-lc", f"printf '\\n{_PATH_MARK}%s' \"$PATH\""],
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace",
+                stdin=subprocess.DEVNULL).stdout or ""
+            if _PATH_MARK in out:
+                parts += [p for p in out.rsplit(_PATH_MARK, 1)[1].strip()
+                          .split(os.pathsep) if p]
         except (OSError, subprocess.SubprocessError):
             pass
     parts += [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
