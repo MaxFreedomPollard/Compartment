@@ -361,10 +361,13 @@ def run(path: str, vault: Vault) -> None:
     import webbrowser
     ref = _VaultRef(path, vault)
     httpd, url = start(ref)
-    print(f"Compartment dashboard: {url}")
+    # Flushed, and before the browser: the panel learns where the page is
+    # from this first line, read through a pipe, and unflushed it sat in the
+    # buffer for as long as the server ran - with the panel waiting on it.
+    print(f"Compartment dashboard: {url}", flush=True)
     print("  serving from RAM, 127.0.0.1 only, GET only - viewing the vault "
-          "changes nothing in it")
-    print("  Ctrl-C to stop")
+          "changes nothing in it", flush=True)
+    print("  Ctrl-C to stop", flush=True)
     try:
         webbrowser.open(url)
     except Exception:

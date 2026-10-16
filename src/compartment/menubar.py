@@ -828,6 +828,12 @@ def fetch_state(vault: str) -> dict:
 _DASH: dict = {"proc": None, "url": None}
 _DASH_PREFIX = "Compartment dashboard: "
 
+#: How long the Dashboard button waits for `compartment dash` to say where it
+#: serves. Longer than a cold unlock of a big vault (Argon2, then a full
+#: decrypt), and finite: the wait is on the UI thread, and one that never
+#: ended froze the whole app.
+DASH_START_TIMEOUT = 60
+
 
 def dashboard_url(line: str) -> str | None:
     """The URL `compartment dash` announces on its first line, or None."""
@@ -854,7 +860,8 @@ def open_dashboard(vault: str) -> str | None:
     `dash` opens the browser itself the moment it is serving, so a first
     click needs only a started process; a later click reopens the URL it
     announced. Returns that URL, or None when the server did not start (a
-    locked vault, for instance, which `dash` refuses).
+    locked vault, for instance, which `dash` refuses) or did not say where
+    it serves within DASH_START_TIMEOUT.
     """
     proc, url = _DASH["proc"], _DASH["url"]
     if proc is not None and proc.poll() is None and url:
@@ -869,16 +876,33 @@ def open_dashboard(vault: str) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     _DASH["proc"], _DASH["url"] = proc, None
-    url = None
-    for line in proc.stdout:                # the announcement is line one
-        url = dashboard_url(line)
-        if url:
-            break
+    # Listened for on a thread of its own, and waited for here no longer
+    # than DASH_START_TIMEOUT: this runs on the UI thread, and a dash that
+    # never announced itself held it - and the whole app - for as long as
+    # that dash ran.
+    heard: queue.Queue = queue.Queue()
+
+    def listen():
+        try:
+            for line in proc.stdout:        # the announcement is line one
+                found = dashboard_url(line)
+                if found:
+                    heard.put(found)
+                    break
+        except (OSError, ValueError):
+            pass
+        heard.put(None)
+        _drain(proc)
+
+    threading.Thread(target=listen, daemon=True).start()
+    try:
+        url = heard.get(timeout=DASH_START_TIMEOUT)
+    except queue.Empty:
+        url = None
     if not url:
         stop_dashboard()
         return None
     _DASH["url"] = url
-    threading.Thread(target=_drain, args=(proc,), daemon=True).start()
     return url
 
 

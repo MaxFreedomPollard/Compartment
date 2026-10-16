@@ -85,3 +85,40 @@ def test_dashboard_is_read_only(served):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(req, timeout=5)
     assert e.value.code == 501                # no POST handler exists at all
+
+
+def test_the_panel_hears_where_dash_is_serving(vault, vault_path, tmp_path,
+                                               monkeypatch):
+    """The panel's Dashboard button waits for the first line `compartment
+    dash` prints, the one that says where it is serving. It went into the
+    pipe unflushed, so it sat in the buffer for as long as dash served, and
+    the button, and the app with it, never came back."""
+    import sys
+    from compartment import menubar, session
+    session.store(vault_path, vault._master)          # `compartment unlock`
+    # dash opens the browser itself; this one opens nothing.
+    if sys.platform == "win32":
+        browser = tmp_path / "browser.bat"
+        browser.write_text("@exit /b 0\r\n", encoding="utf-8")
+    else:
+        browser = tmp_path / "browser"
+        browser.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        browser.chmod(0o755)
+    monkeypatch.setenv("BROWSER", str(browser))
+    menubar._DASH.update(proc=None, url=None)
+    out = {}
+    clicked = threading.Thread(target=lambda: out.update(
+        url=menubar.open_dashboard(vault_path)), daemon=True)
+    clicked.start()
+    clicked.join(timeout=30)
+    try:
+        assert not clicked.is_alive(), \
+            "the panel was still waiting for dash's first line"
+        url = out["url"]
+        assert url and url.startswith("http://127.0.0.1:")
+        status, _body, _ = _get(url + "api/stats")    # it serves that URL
+        assert status == 200
+    finally:
+        menubar.stop_dashboard()
+        clicked.join(timeout=15)
+        session.clear(vault_path)
