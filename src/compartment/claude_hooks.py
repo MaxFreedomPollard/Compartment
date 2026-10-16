@@ -72,9 +72,12 @@ def _read(path: Path) -> dict:
         return {}
     try:
         text = path.read_text(encoding="utf-8").strip()
-        return json.loads(text) if text else {}
+        data = json.loads(text) if text else {}
     except (json.JSONDecodeError, OSError):
         raise ValueError(f"{path} is not valid JSON; refusing to touch it")
+    if not isinstance(data, dict):          # null, a list: not settings
+        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
+    return data
 
 
 def install(compartment_bin: str | None = None, vault: str | None = None,

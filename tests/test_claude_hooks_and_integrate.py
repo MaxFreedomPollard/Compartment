@@ -113,6 +113,18 @@ def test_install_refuses_malformed_settings(home):
         claude_hooks.install(compartment_bin="compartment")
 
 
+@pytest.mark.parametrize("raw", ["null", "[]"])
+def test_install_refuses_settings_that_are_json_but_not_an_object(home, raw):
+    """`null` or `[]` parsed, and .setdefault then failed on it with an
+    AttributeError no caller expects. Malformed settings are refused with
+    ValueError, and so are these, untouched."""
+    home.settings.parent.mkdir(parents=True, exist_ok=True)
+    home.settings.write_text(raw, encoding="utf-8")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        claude_hooks.install(compartment_bin="compartment")
+    assert home.settings.read_text(encoding="utf-8") == raw
+
+
 def test_uninstall_removes_only_ours(home):
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text(json.dumps({"hooks": {claude_hooks.EVENT: [

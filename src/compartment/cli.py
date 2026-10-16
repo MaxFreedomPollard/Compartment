@@ -1704,7 +1704,11 @@ def _integrate_all(args) -> None:
         return
     print(f"{len(found)} client(s) found\n")
     for c in found:
-        _integrate_client(c, args, brief=True)
+        try:
+            _integrate_client(c, args, brief=True)
+        except Exception as exc:                 # noqa: BLE001
+            # One client's file must not stop the rest being wired.
+            print(f"• {c.display}: skipped ({exc})")
     print("\nrestart any client that was running to pick it up.")
 
 

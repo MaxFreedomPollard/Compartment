@@ -324,16 +324,19 @@ def _read_json(path: Path) -> dict:
 
     An empty or missing file is a fresh start. Anything that will not parse
     is somebody's work that we do not understand, and the only safe move is
-    to stop.
+    to stop. So is JSON that is not an object (null, a list).
     """
     if not path.exists():
         return {}
     try:
         text = path.read_text(encoding="utf-8").strip()
-        return json.loads(text) if text else {}
+        data = json.loads(text) if text else {}
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         raise ValueError(f"{path} is not valid JSON ({exc}); "
                          "refusing to touch it") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
+    return data
 
 
 def write_config(path: Path, text: str) -> Path | None:

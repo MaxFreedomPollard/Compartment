@@ -70,9 +70,12 @@ def _read(path: Path) -> dict:
         return {}
     try:
         text = path.read_text(encoding="utf-8").strip()
-        return json.loads(text) if text else {}
+        data = json.loads(text) if text else {}
     except (json.JSONDecodeError, OSError):
         raise ValueError(f"{path} is not valid JSON; refusing to touch it")
+    if not isinstance(data, dict):          # null, a list: not a config
+        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
+    return data
 
 
 def register(command: str, args: list[str], path: Path | None = None) -> dict:

@@ -376,6 +376,70 @@ def test_status_has_a_row_for_every_client():
     assert {r["key"] for r in rows} == set(clients.CLIENTS)
 
 
+def _clients_live_in(home, monkeypatch):
+    """Every client's directory under `home`: HOME-based ones, the XDG ones
+    (the conftest already moved XDG_CONFIG_HOME) and, on Windows, APPDATA."""
+    monkeypatch.setattr(clients.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("APPDATA", str(home / "AppData"))
+
+
+@pytest.mark.parametrize("raw", ["null\n", "[]\n"])
+def test_a_config_that_is_json_but_not_an_object_is_refused(raw, tmp_path,
+                                                            monkeypatch,
+                                                            capsys):
+    """`null` or `[]` in another program's config parsed, and .get and
+    .setdefault then failed on it: `integrate --list`, a read-only report,
+    died with AttributeError, and `integrate --all` stopped at that client,
+    so every one after it in the table (Gemini CLI after Cursor) was never
+    wired."""
+    _clients_live_in(tmp_path, monkeypatch)
+    cursor = tmp_path / ".cursor" / "mcp.json"
+    cursor.parent.mkdir()
+    cursor.write_text(raw, encoding="utf-8")
+    gemini = tmp_path / ".gemini" / "settings.json"
+    gemini.parent.mkdir()
+    gemini.write_text('{"theme": "dark"}\n', encoding="utf-8")
+
+    cli.main(["integrate", "--list"])
+    listed = capsys.readouterr().out
+    assert "Cursor" in listed and "installed, not connected" in listed
+
+    cli.main(["--vault", VAULT, "integrate", "--all"])
+    out = capsys.readouterr().out
+    assert "is not a JSON object; refusing to touch it" in out
+    assert cursor.read_text(encoding="utf-8") == raw          # untouched
+    settings = json.loads(gemini.read_text(encoding="utf-8"))
+    assert settings["theme"] == "dark" and "compartment" in settings[
+        "mcpServers"]
+    c = clients.CLIENTS["cursor"]
+    assert clients.is_registered(c, path=cursor) is False
+    assert clients.unregister(c, path=cursor) is False
+
+
+def test_one_client_that_fails_does_not_stop_integrate_all(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    """Nothing in the --all loop caught what one client raised, so a single
+    unreadable config ended the run for all the clients after it."""
+    _clients_live_in(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".gemini").mkdir()
+    real_register = clients.register
+
+    def register(client, *a, **k):
+        if client.key == "cursor":
+            raise RuntimeError("something nobody planned for")
+        return real_register(client, *a, **k)
+
+    monkeypatch.setattr(clients, "register", register)
+    cli.main(["--vault", VAULT, "integrate", "--all"])
+    out = capsys.readouterr().out
+    assert "Cursor" in out and "something nobody planned for" in out
+    assert "compartment" in json.loads((tmp_path / ".gemini" / "settings.json")
+                                       .read_text(encoding="utf-8"))[
+                                           "mcpServers"]
+
+
 # ---------------------------------------------------------- the command itself
 
 def test_the_written_command_is_an_absolute_path(tmp_path, monkeypatch):

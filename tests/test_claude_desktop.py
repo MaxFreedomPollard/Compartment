@@ -106,6 +106,19 @@ def test_a_malformed_config_reads_as_not_registered(tmp_path):
     assert claude_desktop.is_registered(cfg) is False
 
 
+@pytest.mark.parametrize("raw", ["null", "[]"])
+def test_a_config_that_is_json_but_not_an_object_is_refused(tmp_path, raw):
+    """`null` or `[]` parsed, and .get and .setdefault then failed on it
+    with an AttributeError: is_registered, which the panel asks, crashed
+    instead of answering, and register crashed instead of refusing."""
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(raw)
+    assert claude_desktop.is_registered(cfg) is False
+    with pytest.raises(ValueError, match="not a JSON object"):
+        claude_desktop.register("compartment", ENTRY_ARGS, path=cfg)
+    assert cfg.read_text() == raw                       # left untouched
+
+
 def test_present_is_false_when_the_app_is_nowhere(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_desktop.sys, "platform", "linux")
     assert claude_desktop.present(tmp_path / "gone" / "cfg.json") is False
