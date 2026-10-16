@@ -81,13 +81,24 @@ def claim_first_run(vault: str) -> bool:
 
 # --------------------------------------------------------------- data layer
 
-#: Held for as long as the status bar app runs. One icon per vault.
+#: Held for as long as the status bar app runs. One icon per vault: the lock
+#: is the vault's own file name with this after it (_instance_lock_path).
 INSTANCE_LOCK_NAME = ".menubar.lock"
 
 #: Module-level so the handle outlives acquire_instance_lock's frame. A
 #: garbage-collected file object closes its descriptor, and closing the
 #: descriptor drops the lock, which would let a second copy in.
 _INSTANCE_LOCK = None
+
+
+def _instance_lock_path(vault: str) -> Path:
+    """This vault's lock: beside it, hidden, and named after the vault file.
+
+    It was named after the folder alone, so every vault in one folder shared
+    a lock: a second vault there could get no panel of its own, and the
+    launchd copy started for it read the other's pid and stopped that app."""
+    v = Path(vault).expanduser()
+    return v.parent / f".{v.name}{INSTANCE_LOCK_NAME}"
 
 
 def acquire_instance_lock(vault: str):
@@ -105,7 +116,7 @@ def acquire_instance_lock(vault: str):
     """
     global _INSTANCE_LOCK
     try:
-        path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+        path = _instance_lock_path(vault)
     except (OSError, ValueError):
         return None, True
 
@@ -168,7 +179,7 @@ def lock_holder_pid(vault: str) -> int | None:
     alone, never a reason to guess at it.
     """
     try:
-        path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+        path = _instance_lock_path(vault)
         pid = int((path.read_text(encoding="utf-8", errors="replace")
                    ).strip() or 0)
     except (OSError, ValueError):

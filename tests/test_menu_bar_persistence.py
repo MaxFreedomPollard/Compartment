@@ -192,7 +192,7 @@ def test_the_lock_names_the_process_holding_it(tmp_path):
     than killing every icon on a machine that runs two vaults."""
     vault = str(tmp_path / "memory.vault")
     menubar.acquire_instance_lock(vault)
-    body = (tmp_path / menubar.INSTANCE_LOCK_NAME).read_text(encoding="utf-8")
+    body = menubar._instance_lock_path(vault).read_text(encoding="utf-8")
     assert body.strip() == str(os.getpid())
 
 
@@ -213,8 +213,7 @@ def test_eviction_touches_only_the_process_that_holds_this_vault(tmp_path,
                                                                  monkeypatch):
     vault = str(tmp_path / "memory.vault")
     (tmp_path).mkdir(parents=True, exist_ok=True)
-    (tmp_path / menubar.INSTANCE_LOCK_NAME).write_text("4242\n",
-                                                       encoding="utf-8")
+    menubar._instance_lock_path(vault).write_text("4242\n", encoding="utf-8")
     killed = []
 
     def fake_kill(pid, sig):
@@ -232,7 +231,7 @@ def test_an_incumbent_that_never_said_who_it_is_is_left_alone(tmp_path,
     Standing down costs an icon until the next login; killing a process
     picked by guesswork costs more."""
     vault = str(tmp_path / "memory.vault")
-    (tmp_path / menubar.INSTANCE_LOCK_NAME).write_text("", encoding="utf-8")
+    menubar._instance_lock_path(vault).write_text("", encoding="utf-8")
     monkeypatch.setattr(menubar.os, "kill",
                         lambda *a: pytest.fail("killed something unidentified"))
     assert menubar.evict_unsupervised(vault) is False
