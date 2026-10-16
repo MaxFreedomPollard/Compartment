@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
+import signal
 import sys
 import threading
 import time
@@ -35,7 +37,7 @@ except ImportError:                                     # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import __version__, gate, offline_guard, selftest
+from . import __version__, audit, gate, offline_guard, selftest
 from .crypto import CryptoError, TamperError
 from .vault import (DATA_NOT_INSTRUCTIONS, Vault, VaultLockedError,
                     VaultStaleError, expiry_date, strip_provenance)
@@ -798,6 +800,44 @@ def memory_unlock(passphrase: str) -> str:
         raise _fail(exc) from exc
 
 
+def _save_on_exit() -> None:
+    """Save once as the server stops, when the session left audit rows that
+    only RAM holds: a read is audited in RAM and reaches disk with a save,
+    and without this one every search and get of a session that ended
+    before the auto-lock was lost."""
+    try:
+        with _toolgate:
+            v = _state["vault"]
+            if v is None or v._locked:
+                return
+            anchored = audit.read_anchor(v.db.conn)
+            if anchored is not None and audit.count(v.db.conn) <= anchored[1]:
+                return
+            v.save()
+    except VaultStaleError:
+        # Another process wrote the vault since this handle read it, and a
+        # stale handle cannot save. Its unsaved rows go with it.
+        pass
+    except Exception as exc:                            # noqa: BLE001
+        print(f"compartment: could not save on exit: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+def _stop(signum, frame) -> None:
+    """SIGTERM: the save a closed stdin gets, then the end SIGTERM always
+    meant. Not SystemExit raised through the event loop: anyio tells its
+    idle worker threads to stop only when the server's task ends, and the
+    interpreter waits for them on the way out, so a server ended that way
+    never exited. A second SIGTERM during the save is ignored: the process
+    ends as soon as the save is done."""
+    signal.signal(signum, signal.SIG_IGN)
+    try:
+        _save_on_exit()
+    finally:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="compartment serve")
     ap.add_argument("--vault", required=True)
@@ -839,7 +879,11 @@ def main(argv: list[str] | None = None) -> None:
         _state["vault"] = None  # start locked; tools will say so
     threading.Thread(target=_autolock_loop, daemon=True).start()
     threading.Thread(target=_retag_loop, daemon=True).start()
-    mcp.run()  # stdio transport
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        mcp.run()  # stdio transport
+    finally:
+        _save_on_exit()
 
 
 if __name__ == "__main__":

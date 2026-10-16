@@ -5,6 +5,8 @@ worker thread, so a test calls it through `__wrapped__` (functools.wraps
 keeps it), and asyncio's self-pipe is a loopback socket on Windows, which
 the offline guard the suite runs under refuses."""
 import json
+import os
+import signal
 import sqlite3
 import threading
 import time
@@ -330,3 +332,74 @@ def test_a_locked_vault_tells_the_model_what_to_run(vault_path, monkeypatch):
     with pytest.raises(Exception) as e:
         _through_the_sdk(monkeypatch, "memory_search", {"query": "anything"})
     assert "compartment unlock" in str(e.value), str(e.value)
+
+
+@pytest.fixture()
+def own_state(monkeypatch):
+    """A copy of server._state for this test, so that main() leaves nothing
+    behind for the next one."""
+    monkeypatch.setattr(server, "_state", dict(server._state))
+
+
+def _serve(monkeypatch, vault_path, session):
+    """server.main() with `session` in place of the stdio transport, its two
+    background loops not started, and the passphrase in the environment as
+    the only credential (no keychain lookup). main() handles SIGTERM for
+    the whole process, so the handler it found is put back."""
+    from compartment import vault as vault_module
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    monkeypatch.setattr(server, "_autolock_loop", lambda: None)
+    monkeypatch.setattr(server, "_retag_loop", lambda: None)
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: session())
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        server.main(["--vault", vault_path, "--caller", "agent"])
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def _audited_on_disk(vault_path):
+    v = Vault.unlock(vault_path, passphrase="CorrectHorse")
+    return [r["op"] for r in v.db.conn.execute(
+        "SELECT op FROM audit ORDER BY seq")]
+
+
+def test_a_session_that_ends_saves_the_reads_it_audited(
+        vault, vault_path, own_state, monkeypatch):
+    """A read is audited in RAM and reaches disk only with a save, and the
+    server saved only on auto-lock, a retag pass or memory_lock. A host
+    that closed stdin before any of those took every search and get of the
+    session with it, which SECURITY.md says only a kill -9 can do."""
+    rid = vault.store("The staging database runs Postgres 16",
+                      caller="test")["id"]
+    vault.lock()
+
+    def session():
+        _call(server.memory_search, "which Postgres version does staging run")
+        _call(server.memory_get, rid)
+    _serve(monkeypatch, vault_path, session)
+    assert _audited_on_disk(vault_path)[-2:] == ["search", "get"]
+
+
+def test_a_server_stopped_with_sigterm_saves_them_too(
+        vault, vault_path, own_state, monkeypatch):
+    """SIGTERM, the other way a host ends a server, had no handler: the
+    process died on the spot, with the same loss. It still ends by the
+    signal, once the save is on disk."""
+    vault.lock()
+    before = signal.getsignal(signal.SIGTERM)
+    ended = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: ended.append(
+        (pid, sig, signal.getsignal(sig), _audited_on_disk(vault_path)[-1])))
+
+    def session():
+        _call(server.memory_search, "which Postgres version does staging run")
+        handler = signal.getsignal(signal.SIGTERM)
+        if handler is before or not callable(handler):
+            pytest.fail("compartment serve leaves SIGTERM to end it on the "
+                        "spot, with nothing saved")
+        signal.raise_signal(signal.SIGTERM)
+    _serve(monkeypatch, vault_path, session)
+    assert ended == [(os.getpid(), signal.SIGTERM, signal.SIG_DFL, "search")]

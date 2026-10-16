@@ -988,6 +988,7 @@ def cmd_unlink(args) -> None:
 def cmd_get(args) -> None:
     v = _open_vault(args)
     _print(v.get(args.id, caller=args.caller))
+    v.save()
 
 
 def cmd_forget(args) -> None:
