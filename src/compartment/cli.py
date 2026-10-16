@@ -575,6 +575,70 @@ def cmd_uninstall(args) -> None:
                 print(f"  MCP registration removed: {name}")
         except (OSError, subprocess.SubprocessError):
             pass
+    # The rest of what integrate wrote points at the program about to be
+    # removed, so it goes too: each step on its own, and reported.
+    try:
+        if claude_desktop.unregister():
+            print("  Claude Desktop registration removed")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  Claude Desktop: {exc}")
+    for client in clients.CLIENTS.values():
+        try:
+            if not clients.is_registered(client):
+                continue
+            if clients.unregister(client):
+                print(f"  removed from {client.display} "
+                      f"({client.config_path()})")
+            else:
+                print(f"  {client.display}: left as it is; remove "
+                      f"compartment from {client.config_path()} by hand")
+        except Exception as exc:                         # noqa: BLE001
+            print(f"  {client.display}: {exc}")
+    openclaw = Path(os.environ.get("OPENCLAW_HOME",
+                                   Path.home() / ".openclaw")) / "openclaw.json"
+    try:
+        cfg = (json.loads(openclaw.read_text(encoding="utf-8"))
+               if openclaw.is_file() else {})
+        servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
+        if isinstance(servers, dict) and "compartment" in servers:
+            del servers["compartment"]
+            # As integrate wrote it: backed up, then replaced whole.
+            clients.write_config(openclaw, json.dumps(cfg, indent=2))
+            print(f"  OpenClaw registration removed from {openclaw}")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  OpenClaw: {openclaw} left as it is ({exc})")
+    try:
+        md = _remove_managed_claude_md()
+        if md:
+            print(f"  compartment block removed from {md}")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  CLAUDE.md: {exc}")
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    plugin = hermes_home / "plugins" / "compartment"
+    try:
+        files = ("__init__.py", "plugin.yaml")
+        if all((plugin / f).is_file() for f in files):
+            packaged = _data_dir() / "hermes-plugin"
+            if plugin.is_symlink():         # integrate copies; a link is theirs
+                print(f"  Hermes provider plugin kept at {plugin}: it is a "
+                      f"link to {plugin.resolve()}")
+            elif all((plugin / f).read_bytes() == (packaged / f).read_bytes()
+                     for f in files):
+                for f in files:
+                    (plugin / f).unlink()
+                # The bytecode Hermes compiled from it, then the directory
+                # once nothing else is in it.
+                shutil.rmtree(plugin / "__pycache__", ignore_errors=True)
+                try:
+                    plugin.rmdir()
+                except OSError:
+                    pass
+                print(f"  Hermes provider plugin removed from {plugin}")
+            else:
+                print(f"  Hermes provider plugin kept at {plugin}: it "
+                      "differs from the packaged copy")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  Hermes plugin: {exc}")
     if args.purge:
         # only on an explicit --purge: this is the only copy of everything
         # the agent has ever learned, and it is not recoverable.
@@ -1475,6 +1539,30 @@ def _write_managed_claude_md() -> Path:
     # Backed up and replaced whole: a write cut short must not leave the
     # user's own file truncated.
     clients.write_config(md, text)
+    return md
+
+
+def _remove_managed_claude_md() -> Path | None:
+    """Take the fenced block back out of the user's CLAUDE.md: the inverse
+    of _write_managed_claude_md, leaving everything outside the markers as
+    it is. Returns the file, or None when it holds no block."""
+    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    if not md.is_file():
+        return None
+    text = md.read_text(encoding="utf-8")
+    start = text.find(_CLAUDE_MD_BEGIN)
+    end = (text.find(_CLAUDE_MD_END, start + len(_CLAUDE_MD_BEGIN))
+           if start >= 0 else -1)
+    if end < 0:
+        return None
+    pre, post = text[:start], text[end + len(_CLAUDE_MD_END):]
+    # The newlines the writer put around it go too: the blank line after the
+    # user's text, and the end of the END line.
+    if pre.endswith("\n\n"):
+        pre = pre[:-1]
+    if post.startswith("\n"):
+        post = post[1:]
+    clients.write_config(md, pre + post)
     return md
 
 

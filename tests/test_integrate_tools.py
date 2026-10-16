@@ -184,6 +184,12 @@ def test_uninstall_gives_claude_no_stdin(monkeypatch, tmp_path):
     monkeypatch.setattr(menubar, "_is_generated", lambda path: False)
     monkeypatch.setattr(claude_hooks, "is_installed", lambda: False)
     monkeypatch.setattr(agent_skill, "remove", lambda target: False)
+    monkeypatch.setattr(agent_skill, "is_installed", lambda target: False)
+    # Uninstall also takes compartment out of every client's config and of
+    # CLAUDE.md, all found from the home directory, which is tmp_path here.
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setenv("CLAUDE_MD", str(tmp_path / ".claude" / "CLAUDE.md"))
     ran = _recording(monkeypatch)
     cli.cmd_uninstall(types.SimpleNamespace(purge=False,
                                             vault=str(tmp_path / "v")))
