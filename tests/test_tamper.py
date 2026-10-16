@@ -125,6 +125,8 @@ MALFORMED_HEADERS = {
     "a keyslot has no type": lambda h: _without(h["keyslots"][0], "type"),
     "a keyslot has no salt": lambda h: _without(h["keyslots"][0], "salt"),
     "a keyslot's salt is not hex": lambda h: h["keyslots"][0].update(salt="zz"),
+    "a keyslot's salt is too short":
+        lambda h: h["keyslots"][0].update(salt="00" * 7),
     "a keyslot's kdf is a string":
         lambda h: h["keyslots"][0].update(kdf="argon2id"),
     "model is a list": lambda h: h.update(model=[]),

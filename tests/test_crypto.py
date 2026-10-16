@@ -90,3 +90,43 @@ def test_a_keyslot_kdf_out_of_range_is_refused_before_deriving(monkeypatch):
         with pytest.raises(TamperError, match="Integrity check failed"):
             crypto.open_slot(slot(**ok), "pw")
     assert asked == [(16, 1024 * 1024, 16), (3, 65536, 4)]
+
+
+def _slot_with_salt(salt):
+    return {"type": "passphrase", "salt": salt, "wrapped": "00" * 64,
+            "kdf": {"alg": "argon2id", "time_cost": 1, "memory_kib": 8,
+                    "parallelism": 1}}
+
+
+def _recording_argon2(monkeypatch):
+    """The real Argon2id, with every salt it is asked to derive with."""
+    real, salts = crypto.hash_secret_raw, []
+
+    def argon2(**kwargs):
+        salts.append(kwargs["salt"])
+        return real(**kwargs)
+    monkeypatch.setattr(crypto, "hash_secret_raw", argon2)
+    return salts
+
+
+@pytest.mark.parametrize("salt", ["zz", 16, "00" * 7])
+def test_a_keyslot_salt_not_hex_or_too_short_is_refused_before_deriving(
+        salt, monkeypatch):
+    """The salt sits in the plaintext header beside the KDF settings. One
+    that was not hex escaped open_slot as bytes.fromhex's ValueError (or
+    TypeError), and one shorter than the 8 bytes Argon2id accepts escaped
+    unlock as Argon2's own HashingError, "Salt is too short": none of them
+    an error a caller knows as a damaged vault."""
+    derived = _recording_argon2(monkeypatch)
+    with pytest.raises(TamperError, match="salt"):
+        crypto.open_slot(_slot_with_salt(salt), "pw")
+    assert derived == []
+
+
+def test_an_eight_byte_keyslot_salt_is_still_derived(monkeypatch):
+    """Eight bytes is Argon2id's own floor, so it is derived as before; the
+    all-zero wrapped key then fails to open, as a wrong one would."""
+    derived = _recording_argon2(monkeypatch)
+    with pytest.raises(TamperError, match="Integrity check failed"):
+        crypto.open_slot(_slot_with_salt("00" * 8), "pw")
+    assert derived == [bytes(8)]

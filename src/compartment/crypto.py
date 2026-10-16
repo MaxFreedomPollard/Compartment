@@ -220,7 +220,13 @@ def open_slot(slot: dict, secret: str, keyfile: bytes | None = None) -> bytes:
     first time its credential is used; the caller persists that by saving the
     header. Re-sealing only happens when something was actually legacy, or
     every unlock would dirty the header and force a needless vault rewrite."""
-    salt, kdf = bytes.fromhex(slot["salt"]), slot["kdf"]
+    try:
+        salt = bytes.fromhex(slot["salt"])
+    except (TypeError, ValueError) as exc:
+        raise TamperError("keyslot salt is not hex") from exc
+    if len(salt) < 8:                     # Argon2id refuses a shorter one
+        raise TamperError("keyslot salt is shorter than 8 bytes")
+    kdf = slot["kdf"]
     _check_slot_kdf(kdf)
     wrapped = bytes.fromhex(slot["wrapped"])
     failure: TamperError | None = None
