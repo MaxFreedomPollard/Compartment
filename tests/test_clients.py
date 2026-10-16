@@ -17,6 +17,7 @@ import io
 import json
 import os
 import stat
+import tomllib
 import types
 
 import pytest
@@ -203,6 +204,119 @@ def test_codex_unregister_takes_only_our_table(tmp_path):
     assert "[mcp_servers.compartment]" not in text
     assert '[mcp_servers.other]' in text
     assert 'command = "x"' in text
+
+
+#: Configs with our table in them, what Codex must read once it is taken
+#: out (None: no mcp_servers left at all), and text that must survive.
+_CODEX_REMOVALS = {
+    # A comment block just above the next table documents that table.
+    "a neighbour's comment": (
+        'model = "o3"\n\n[mcp_servers.compartment]\ncommand = "compartment"\n'
+        'args = ["--vault", "/v", "serve"]\n\n'
+        "# Bob's server, do not remove\n"
+        '[mcp_servers.other]\ncommand = "x"\n',
+        {"other": {"command": "x"}},
+        ["# Bob's server, do not remove", 'model = "o3"']),
+    "an env subtable": (
+        '[mcp_servers.compartment]\ncommand = "/x/compartment"\n'
+        'args = ["serve"]\n\n'
+        '[mcp_servers.compartment.env]\nCOMPARTMENT_EMBED_DAEMON = "0"\n',
+        None, []),
+    "a comment on the header line": (
+        '[mcp_servers.compartment]  # memory\ncommand = "/x/compartment"\n'
+        'args = ["serve"]\n\n[mcp_servers.other]\ncommand = "x"\n',
+        {"other": {"command": "x"}}, ['[mcp_servers.other]']),
+    "a blank line inside our table": (
+        '[mcp_servers.other]\ncommand = "x"\n\n[mcp_servers.compartment]\n'
+        'command = "/x/compartment"\n\nargs = ["--vault", "/v", "serve"]\n',
+        {"other": {"command": "x"}}, []),
+    "a comment inside our table": (
+        '[mcp_servers.other]\ncommand = "x"\n\n[mcp_servers.compartment]\n'
+        '# memory server\ncommand = "/x/compartment"\nargs = ["serve"]\n',
+        {"other": {"command": "x"}}, []),
+    "a value over several lines": (
+        '[mcp_servers.compartment]\ncommand = "/x/compartment"\nargs = [\n'
+        '  "--vault",\n  "/v",\n  "serve",\n]\n'
+        '[mcp_servers.other]\ncommand = "x"\n',
+        {"other": {"command": "x"}}, []),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CODEX_REMOVALS))
+def test_codex_unregister_takes_out_exactly_our_table(case, tmp_path):
+    """Removal dropped lines by their shape, from our header to the next
+    line starting with "[": it took the next table's comment with it, left
+    a [mcp_servers.compartment.env] subtable behind as a server with no
+    command, and matched the header only as an exact line, so one with a
+    comment after it was never removed while removal still reported
+    success."""
+    text, servers, kept = _CODEX_REMOVALS[case]
+    codex = clients.CLIENTS["codex"]
+    p = tmp_path / "config.toml"
+    p.write_text(text, encoding="utf-8")
+    assert clients.is_registered(codex, path=p) is True
+
+    assert clients.unregister(codex, path=p) is True
+    after = p.read_text(encoding="utf-8")
+    assert tomllib.loads(after).get("mcp_servers") == servers
+    for line in kept:
+        assert line in after
+    assert clients.is_registered(codex, path=p) is False
+
+
+def test_a_codex_header_inside_another_servers_string_is_not_ours(tmp_path):
+    """A line that only looks like our header, inside a neighbour's
+    multi-line string, counted as a registration, and removal cut the file
+    from there to the next "[" line, so the string never closed and Codex
+    could read none of its servers."""
+    codex = clients.CLIENTS["codex"]
+    p = tmp_path / "config.toml"
+    text = ('[mcp_servers.other]\ncommand = "x"\nnotes = """\n'
+            '[mcp_servers.compartment]\nwas here once\n"""\n')
+    p.write_text(text, encoding="utf-8")
+    assert clients.is_registered(codex, path=p) is False
+    assert clients.unregister(codex, path=p) is False
+    assert p.read_text(encoding="utf-8") == text
+
+
+def test_a_commented_out_codex_header_is_not_a_registration(tmp_path):
+    """`# [mcp_servers.compartment]` counted as registered, so register
+    refused with "already registered; left as it is" and wired nothing."""
+    codex = clients.CLIENTS["codex"]
+    p = tmp_path / "config.toml"
+    p.write_text("# [mcp_servers.compartment] disabled for now\n",
+                 encoding="utf-8")
+    assert clients.is_registered(codex, path=p) is False
+
+    res = clients.register(codex, VAULT, path=p)
+    assert res["written"] is True
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith("# [mcp_servers.compartment] disabled for now\n")
+    assert "compartment" in tomllib.loads(text)["mcp_servers"]
+
+
+def test_a_codex_entry_that_cannot_be_taken_out_cleanly_is_left_for_the_user(
+        tmp_path, monkeypatch, capsys):
+    """An entry written as an inline table under [mcp_servers] has no table
+    of its own to take out. Removal is refused rather than guessed at: the
+    file is left as it is and the entry is shown for the user to remove,
+    where the command used to say it was never there."""
+    monkeypatch.setattr(clients.Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    codex = clients.CLIENTS["codex"]
+    p = codex.config_path()
+    p.parent.mkdir(parents=True)
+    text = ('[mcp_servers]\ncompartment = { command = "/x/compartment", '
+            'args = ["serve"] }\nother = { command = "x" }\n')
+    p.write_text(text, encoding="utf-8")
+
+    assert clients.unregister(codex, path=p) is False
+    cli._integrate_client(codex, types.SimpleNamespace(remove=True,
+                                                       vault=VAULT))
+    out = capsys.readouterr().out
+    assert "left as it is" in out and "was not in" not in out
+    assert "[mcp_servers.compartment]" in out          # what to take out
+    assert p.read_text(encoding="utf-8") == text
 
 
 # ----------------------------------------------------------------- removal

@@ -1712,6 +1712,15 @@ def _integrate_client(client, args, brief: bool = False) -> None:
     """Register compartment with one MCP client, or say why not."""
     if getattr(args, "remove", False):
         gone = clients.unregister(client)
+        if not gone and clients.is_registered(client):
+            # Taking it out would have broken the file or left part of it,
+            # so the file is as it was and the user gets what to remove.
+            print(f"• {client.display}: left as it is; compartment could not "
+                  f"be taken out of {client.config_path()} without breaking "
+                  "it. Remove this entry by hand:")
+            for line in clients.snippet(client, args.vault).splitlines():
+                print(f"   {line}")
+            return
         print(f"{'removed from' if gone else 'was not in'} "
               f"{client.display} ({client.config_path()})")
         return

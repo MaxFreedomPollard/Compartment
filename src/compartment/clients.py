@@ -39,6 +39,7 @@ import json
 import os
 import shutil
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -394,6 +395,81 @@ def _toml_block(entry: dict) -> str:
     return "\n".join(lines)
 
 
+def _toml_has_ours(client: Client, text: str) -> bool:
+    """Whether a TOML document defines our server, as TOML reads it rather
+    than by the look of a line: a commented-out header is not one, a header
+    with a comment after it is. Raises tomllib.TOMLDecodeError when the
+    document does not parse."""
+    servers = tomllib.loads(text).get(client.root)
+    return isinstance(servers, dict) and NAME in servers
+
+
+def _toml_statements(text: str) -> list[tuple[str, dict]] | None:
+    """The document as its statements, each with what it parses to alone:
+    a table header, a key and its value however many lines the value spans,
+    a comment or a blank line. A line joins the statement before it until
+    that parses, so a line inside a multi-line string or array is never
+    taken for a header. None when the text ends inside a statement."""
+    out, buf = [], ""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        buf += line + ("\n" if i < len(lines) - 1 else "")
+        if not buf:
+            continue
+        try:
+            out.append((buf, tomllib.loads(buf)))
+        except tomllib.TOMLDecodeError:
+            continue
+        buf = ""
+    return None if buf else out
+
+
+def _toml_header(statement: tuple[str, dict]) -> tuple[str, ...] | None:
+    """The key path of a table header statement, None for anything else."""
+    text, node = statement
+    if not text.lstrip().startswith("["):
+        return None
+    path = []
+    while isinstance(node, dict) and len(node) == 1:
+        key, node = next(iter(node.items()))
+        path.append(key)
+    return tuple(path)
+
+
+def _toml_without_ours(client: Client, text: str) -> str | None:
+    """`text` with our table taken out: its header, every key in it, values
+    over several lines included, and every [<root>.compartment.*] table
+    under it. Comments and blank lines inside it go with it; the ones after
+    its last key stay, since a comment just above the next table documents
+    that table. Nothing else changes. None when that would not parse, or
+    would still hold our server (an inline table, dotted keys), which is
+    the check that matters more than any of the rest."""
+    stmts = _toml_statements(text)
+    if stmts is None:
+        return None
+    ours = (client.root, NAME)
+    heads = [_toml_header(s) for s in stmts]
+    keep = [True] * len(stmts)
+    i = 0
+    while i < len(stmts):
+        if heads[i] is None or heads[i][:2] != ours:
+            i += 1
+            continue
+        last, j = i, i + 1
+        while j < len(stmts) and (heads[j] is None or heads[j][:2] == ours):
+            if stmts[j][0].strip() and not stmts[j][0].lstrip().startswith("#"):
+                last = j
+            j += 1
+        for k in range(i, last + 1):
+            keep[k] = False
+        i = j
+    out = "".join(s for (s, _), k in zip(stmts, keep) if k)
+    try:
+        return None if _toml_has_ours(client, out) else out
+    except tomllib.TOMLDecodeError:
+        return None
+
+
 def is_registered(client: Client, path: Path | None = None) -> bool:
     """Whether compartment is already in this client's server list."""
     p = Path(path) if path else client.config_path()
@@ -401,8 +477,8 @@ def is_registered(client: Client, path: Path | None = None) -> bool:
         return False
     if client.kind == "toml":
         try:
-            return f"[{client.root}.{NAME}]" in p.read_text(encoding="utf-8")
-        except OSError:
+            return _toml_has_ours(client, p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):    # unreadable, not UTF-8, not TOML
             return False
     if client.kind != "json":
         return False
@@ -464,17 +540,23 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
     So the whole edit is appending one table, which leaves every comment,
     every ordering and every hand-made formatting decision in the file
     exactly as its owner left it. Re-registering rewrites nothing: an entry
-    that is already there is reported, not duplicated.
+    that is already there is reported, not duplicated. A file that does
+    not parse is refused, as a JSON one is.
     """
     block = _toml_block(entry)
     try:
         existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        registered = _toml_has_ours(client, existing)
     except (OSError, UnicodeDecodeError) as exc:
         out["reason"] = f"cannot read {p} ({exc})"
         out["snippet"] = block
         return out
+    except tomllib.TOMLDecodeError as exc:
+        out["reason"] = f"{p} is not valid TOML ({exc}); refusing to touch it"
+        out["snippet"] = block
+        return out
 
-    if f"[{client.root}.{NAME}]" in existing:
+    if registered:
         out["reason"] = "already registered; left as it is"
         out["snippet"] = block
         return out
@@ -498,22 +580,16 @@ def unregister(client: Client, path: Path | None = None) -> bool:
         return False
 
     if client.kind == "toml":
-        text = p.read_text(encoding="utf-8")
-        header = f"[{client.root}.{NAME}]"
-        if header not in text:
+        try:
+            text = p.read_text(encoding="utf-8")
+            if not _toml_has_ours(client, text):
+                return False
+        except ValueError:          # not UTF-8 or not TOML: not ours to guess at
             return False
-        # A TOML table runs until the next table header or the end of file.
-        out_lines, dropping = [], False
-        for line in text.splitlines(keepends=True):
-            stripped = line.strip()
-            if stripped == header:
-                dropping = True
-                continue
-            if dropping and stripped.startswith("["):
-                dropping = False
-            if not dropping:
-                out_lines.append(line)
-        write_config(p, "".join(out_lines))
+        rest = _toml_without_ours(client, text)
+        if rest is None:            # left for the user to take out by hand
+            return False
+        write_config(p, rest)
         return True
 
     try:
