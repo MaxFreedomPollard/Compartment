@@ -41,7 +41,7 @@ from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
                       change_passphrase, claim_first_run, create_vault,
                       default_vault, integrate, lock_holder_pid, lock_vault,
                       open_dashboard, stop_dashboard,
-                      release_instance_lock, self_check,
+                      release_instance_lock, run_in_background, self_check,
                       set_setting, starter_note, summarise, unlock_vault,
                       PanelState)
 from .menubar import quit_running as _stop_lock_holder
@@ -891,6 +891,14 @@ def run(vault: str | None = None, show: bool = False,
     states.refresh(include_vault=False)               # local files: instant
     states.on_change = lambda: root.after(0, landed)
 
+    def off_ui(work, then) -> None:
+        """work() on a thread of its own, then then(its result) back on Tk's
+        thread: see run_in_background. A click's handler runs on Tk's
+        thread, and one that waited on the CLI there froze the panel - and,
+        through after(), the tray icon's menu - for as long as the CLI took.
+        """
+        run_in_background(work, lambda out: root.after(0, lambda: then(out)))
+
     def _content(frame, state) -> None:
         """Everything the panel shows. Packs into `frame`, never sizes it -
         deciding how tall the window gets is build()'s job, below."""
@@ -914,12 +922,19 @@ def run(vault: str | None = None, show: bool = False,
             new.focus_set()
 
             def do_change(*_):
-                ok, note = change_passphrase(vault_path, new.get(), rep.get())
+                first, again = new.get(), rep.get()
                 new.delete(0, "end")          # never leave one on screen
                 rep.delete(0, "end")
-                panel["changing"] = not ok
-                panel["change_note"] = note
-                refresh()
+
+                def changed(out):
+                    ok, note = ((False, "could not change the passphrase: "
+                                        f"{out}")
+                                if isinstance(out, Exception) else out)
+                    panel["changing"] = not ok
+                    panel["change_note"] = note
+                    refresh()
+                off_ui(lambda: change_passphrase(vault_path, first, again),
+                       changed)
 
             new.bind("<Return>", do_change)
             rep.bind("<Return>", do_change)
@@ -975,18 +990,16 @@ def run(vault: str | None = None, show: bool = False,
                 panel["create_note"] = "Creating the vault…"
                 refresh()
 
-                def work():
-                    try:
-                        _ok, note = create_vault(vault_path, pw, pw)
-                    except Exception as exc:      # noqa: BLE001
-                        note = f"could not create the vault: {exc}"
+                def created(out):
                     panel["creating"] = False
-                    panel["create_note"] = note
+                    panel["create_note"] = (
+                        f"could not create the vault: {out}"
+                        if isinstance(out, Exception) else out[1])
                     if os.path.exists(vault_path):
                         states.mark(exists=True, locked=None, checking=True,
                                     error=None)
                     refresh()
-                (panel.get("win") or root).after(50, work)
+                off_ui(lambda: create_vault(vault_path, pw, pw), created)
 
             new_pw.bind("<Return>", do_create)
             new_rep.bind("<Return>", do_create)
@@ -1010,12 +1023,17 @@ def run(vault: str | None = None, show: bool = False,
             entry.focus_set()
 
             def do_unlock(*_):
-                ok, note = unlock_vault(vault_path, entry.get())
+                pw = entry.get()
                 entry.delete(0, "end")        # never leave it on screen
-                panel["note"] = None if ok else note
-                if ok:
-                    states.mark(locked=False, checking=True, error=None)
-                refresh()
+
+                def unlocked(out):
+                    ok, note = ((False, f"could not unlock: {out}")
+                                if isinstance(out, Exception) else out)
+                    panel["note"] = None if ok else note
+                    if ok:
+                        states.mark(locked=False, checking=True, error=None)
+                    refresh()
+                off_ui(lambda: unlock_vault(vault_path, pw), unlocked)
 
             entry.bind("<Return>", do_unlock)
             ttk.Button(unlock_row, text="Unlock",
@@ -1085,15 +1103,13 @@ def run(vault: str | None = None, show: bool = False,
             panel["connect_note"] = f"Connecting {name}…"
             refresh()
 
-            def work():
-                try:
-                    _ok, note = integrate(vault_path, target)
-                except Exception as exc:        # noqa: BLE001
-                    note = f"could not connect: {exc}"
+            def connected(out):
                 panel["connect_busy"] = None
-                panel["connect_note"] = note
+                panel["connect_note"] = (f"could not connect: {out}"
+                                         if isinstance(out, Exception)
+                                         else out[1])
                 refresh()             # and the ticks, once that config is read
-            (panel.get("win") or root).after(50, work)
+            off_ui(lambda: integrate(vault_path, target), connected)
 
         wired = state.get("integrations") or {}
         connect_row = ttk.Frame(frame)
@@ -1147,10 +1163,11 @@ def run(vault: str | None = None, show: bool = False,
         # every state. The rest waits for a definite "unlocked".
         if state["exists"] and state["locked"] is not True:
             ttk.Button(buttons, text="Lock now",
-                       command=lambda: (states.lock(
-                                            lambda: lock_vault(vault_path)),
-                                        panel.update(note=None,
-                                                     changing=False), refresh())
+                       command=lambda: off_ui(
+                           lambda: states.lock(lambda: lock_vault(vault_path)),
+                           lambda _out: (panel.update(note=None,
+                                                      changing=False),
+                                         refresh()))
                        ).pack(side="left", padx=6)
         if state["exists"] and state["locked"] is False:
             if not panel.get("changing"):
@@ -1308,10 +1325,11 @@ def run(vault: str | None = None, show: bool = False,
                 pystray.MenuItem("Open Compartment", from_tray(show_panel),
                                  default=True),
                 pystray.MenuItem("Lock now",
-                                 from_tray(lambda: (states.lock(
-                                     lambda: lock_vault(vault_path)),
-                                                    panel.update(note=None),
-                                                    refresh()))),
+                                 from_tray(lambda: off_ui(
+                                     lambda: states.lock(
+                                         lambda: lock_vault(vault_path)),
+                                     lambda _out: (panel.update(note=None),
+                                                   refresh())))),
                 pystray.MenuItem("Open dashboard",
                                  from_tray(lambda: open_dashboard(vault_path))),
                 pystray.Menu.SEPARATOR,

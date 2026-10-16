@@ -840,6 +840,32 @@ class PanelState:
         self.view.close()
 
 
+def run_in_background(work, deliver) -> None:
+    """deliver(work()), with the work on a thread of its own: for the
+    panel's buttons that wait on the CLI.
+
+    A click's handler runs on the UI thread, and AppKit and Tk draw nothing
+    and answer nothing while it runs. Connect waited there on the agent's
+    own tool (up to five minutes), Create on all of `init` (fifteen), unlock
+    and a passphrase change on Argon2, and for that long the app was frozen,
+    Quit included. `deliver` is called from the worker thread, and hands the
+    result back to the UI thread, the only one widgets may be touched from.
+    Work that raises delivers the exception instead, so whatever the click
+    disabled is always given back."""
+    def run():
+        try:
+            out = work()
+        except Exception as exc:                        # noqa: BLE001
+            out = exc
+        try:
+            deliver(out)
+        except Exception:                               # noqa: BLE001
+            pass                # the app is quitting and its UI has gone
+
+    threading.Thread(target=run, daemon=True,
+                     name="compartment-panel-action").start()
+
+
 def fetch_state(vault: str) -> dict:
     """Everything the panel shows, read once and synchronously, for
     `compartment menubar --self-check` and anything else that wants a single
@@ -2386,6 +2412,16 @@ def run(vault: str | None = None, show: bool = False,
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "stateArrived:", None, False)
 
+        @objc.python_method
+        def _inBackground(self, work, selector):
+            """work() off the main thread, and what it returned handed to
+            `selector` back on the main one, the only thread AppKit may be
+            touched from: see run_in_background."""
+            run_in_background(
+                work,
+                lambda out: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    selector, out, False))
+
         def stateArrived_(self, _):
             """Fresh numbers are in: redraw in place - but only when the
             panel is on screen, something on it changed, and nobody is typing
@@ -2514,9 +2550,12 @@ def run(vault: str | None = None, show: bool = False,
             Wiring takes a second or two, and AppKit paints nothing while a
             handler is running. Doing the work here would freeze the panel
             for that second and then change one line, which is exactly what
-            a dead button looks like. Painting first and working on the next
-            turn of the run loop costs nothing and shows the user their click
-            landed."""
+            a dead button looks like. So the note is painted first and the
+            work goes to a thread of its own. Put off to the next turn of the
+            run loop instead, it still froze the whole app, Quit included,
+            for as long as the agent's own tool took, and Hermes setting
+            itself up takes minutes. The buttons stay disabled until the
+            answer lands in connectDone_."""
             try:
                 target, name = INTEGRATION_TARGETS[int(sender.tag())]
             except (IndexError, ValueError, AttributeError):
@@ -2526,17 +2565,15 @@ def run(vault: str | None = None, show: bool = False,
             self.connect_busy = target
             self.connect_note = f"Connecting {name}…"
             self.rebuild()
-            self.performSelector_withObject_afterDelay_(
-                "runConnect:", target, 0.05)
+            self._inBackground(lambda: integrate(vault_path, target),
+                               "connectDone:")
 
-        def runConnect_(self, target):
-            try:
-                _ok, msg = integrate(vault_path, str(target))
-            except Exception as exc:            # noqa: BLE001
-                # Never let this die silently: an exception raised inside an
-                # action is swallowed by the run loop, and the button then
-                # genuinely does nothing.
-                msg = f"could not connect: {exc}"
+        def connectDone_(self, out):
+            # Never let a failure die silently: an exception raised inside an
+            # action is swallowed by the run loop, and the button then
+            # genuinely does nothing.
+            msg = (f"could not connect: {out}" if isinstance(out, Exception)
+                   else out[1])
             self.connect_busy = None
             self.connect_note = msg
             self.rebuild()
@@ -2547,9 +2584,10 @@ def run(vault: str | None = None, show: bool = False,
 
             Seeding the starting memories and wiring the agents already on
             the machine takes a few seconds, and AppKit paints nothing while
-            a handler runs. Painting first and working on the next turn of
-            the run loop is what stops the only first-run button in the app
-            from looking dead while it succeeds."""
+            a handler runs. Painting first is what stops the only first-run
+            button in the app from looking dead while it succeeds, and doing
+            the work on a thread of its own is what keeps the app answering
+            while `init` waits on the agents' own tools."""
             if self.creating or self.new_pw is None or self.new_repeat is None:
                 return
             pw = str(self.new_pw.stringValue() or "")
@@ -2562,16 +2600,14 @@ def run(vault: str | None = None, show: bool = False,
             self.creating = True
             self.create_note = "Creating the vault…"
             self.rebuild()
-            self.performSelector_withObject_afterDelay_("runCreate:", pw, 0.05)
+            self._inBackground(lambda: create_vault(vault_path, pw, pw),
+                               "createDone:")
 
-        def runCreate_(self, passphrase):
-            pw = str(passphrase)
-            try:
-                _ok, note = create_vault(vault_path, pw, pw)
-            except Exception as exc:            # noqa: BLE001
-                # An exception raised inside an action is swallowed by the
-                # run loop, and the button then genuinely does nothing.
-                note = f"could not create the vault: {exc}"
+        def createDone_(self, out):
+            # An exception raised inside an action is swallowed by the run
+            # loop, and the button then genuinely does nothing.
+            note = (f"could not create the vault: {out}"
+                    if isinstance(out, Exception) else out[1])
             self.creating = False
             self.create_note = note
             # Clear the fields whichever way it went: a passphrase must not
@@ -2605,8 +2641,13 @@ def run(vault: str | None = None, show: bool = False,
 
         def lockNow_(self, sender):
             # With no vault view running while it happens, so that no process
-            # of ours still holds the key once the vault is locked.
-            self.panel.lock(lambda: lock_vault(vault_path))
+            # of ours still holds the key once the vault is locked. Off the
+            # main thread, like every button that waits on the CLI.
+            self._inBackground(
+                lambda: self.panel.lock(lambda: lock_vault(vault_path)),
+                "lockDone:")
+
+        def lockDone_(self, _):
             self.unlock_note = None
             self.rebuild()
             self.panel.refresh_async(force=True)    # and confirm it from disk
@@ -2619,8 +2660,14 @@ def run(vault: str | None = None, show: bool = False,
             if self.pw_field is None:
                 return
             pw = str(self.pw_field.stringValue() or "")
-            ok, note = unlock_vault(vault_path, pw)
             self.pw_field.setStringValue_("")        # never leave it on screen
+            # Argon2 takes its time on purpose; not on the main thread.
+            self._inBackground(lambda: unlock_vault(vault_path, pw),
+                               "unlockDone:")
+
+        def unlockDone_(self, out):
+            ok, note = ((False, f"could not unlock: {out}")
+                        if isinstance(out, Exception) else out)
             self.unlock_note = None if ok else note
             if ok:
                 self.panel.mark(locked=False, checking=True, error=None)
@@ -2642,11 +2689,17 @@ def run(vault: str | None = None, show: bool = False,
                 return
             new = str(self.pw_new.stringValue() or "")
             rep = str(self.pw_repeat.stringValue() or "")
-            ok, note = change_passphrase(vault_path, new, rep)
             # Clear both regardless: a passphrase must not sit in a field on
-            # screen after the attempt, successful or not.
+            # screen while the attempt runs or after it, successful or not.
             self.pw_new.setStringValue_("")
             self.pw_repeat.setStringValue_("")
+            self._inBackground(
+                lambda: change_passphrase(vault_path, new, rep),
+                "changeDone:")
+
+        def changeDone_(self, out):
+            ok, note = ((False, f"could not change the passphrase: {out}")
+                        if isinstance(out, Exception) else out)
             self.changing_pw = not ok
             self.change_note = note
             self.rebuild()

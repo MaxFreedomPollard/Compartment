@@ -425,6 +425,44 @@ def test_lock_stops_the_dashboard_the_panel_started(vault_path, quiet_agents,
         dash.wait(timeout=10)
 
 
+def test_a_slow_button_runs_off_the_thread_that_clicked():
+    """Connect waits on the agent's own tool and Create on all of `init`,
+    for up to five and fifteen minutes. Run on the UI thread, where a
+    click's handler runs, each froze the app for that long, Quit included.
+    The work goes to a thread of its own, and its answer is handed back."""
+    gate, landed = threading.Event(), threading.Event()
+    got = []
+    clicked = threading.get_ident()
+
+    def work():
+        gate.wait(10)                      # the agent's tool, still going
+        return True, "Hermes is connected."
+
+    menubar.run_in_background(work, lambda out: (
+        got.append((out, threading.get_ident())), landed.set()))
+    assert got == [], "the click waited for the work"
+    gate.set()
+    assert landed.wait(10)
+    out, where = got[0]
+    assert out == (True, "Hermes is connected.")
+    assert where != clicked
+
+
+def test_a_button_whose_work_fails_still_hears_back():
+    """The buttons are disabled until the answer lands. Work that raised
+    and never answered would leave them disabled for good."""
+    landed = threading.Event()
+    got = []
+
+    def work():
+        raise RuntimeError("hermes exited with 1")
+
+    menubar.run_in_background(work, lambda out: (got.append(out),
+                                                 landed.set()))
+    assert landed.wait(10)
+    assert isinstance(got[0], RuntimeError) and "hermes" in str(got[0])
+
+
 def test_refresh_async_reruns_once_for_requests_made_meanwhile(vault_path,
                                                                 quiet_agents):
     _open(vault_path)
