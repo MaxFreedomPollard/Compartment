@@ -386,8 +386,9 @@ def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
         keep.append(tag)
 
     proposed = sorted(set(scored) - set(keep), key=lambda t: -scored[t])
-    after_desc = keep + proposed
-    after_desc = after_desc[:MAX_TAGS_PER_RECORD]
+    # The cap is on what a pass ADDS: a record stored with more tags than
+    # that keeps them all, as a pass that removes nothing has to.
+    after_desc = keep + proposed[:max(0, MAX_TAGS_PER_RECORD - len(keep))]
 
     protected = [t for t in before if t.startswith(Store.PROTECTED_TAG_PREFIXES)]
     after = protected + after_desc

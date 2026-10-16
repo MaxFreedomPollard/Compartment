@@ -355,6 +355,25 @@ def test_no_record_accumulates_unbounded_tags(vault):
         assert len(_tags(vault, row["id"])) <= retag.MAX_TAGS_PER_RECORD
 
 
+def test_a_pass_keeps_every_tag_a_memory_was_stored_with(vault):
+    """The cap was applied to a record's own tags and the proposals
+    together, so a default pass, which removes nothing, cut a memory stored
+    with ten tags down to eight, and a search filtered on the tenth no
+    longer found it."""
+    tags = ["router", "network", "office", "admin", "wifi", "hardware",
+            "second-floor", "it-support", "passwords", "guest-access"]
+    rid = vault.store("The second floor router admin password is on the "
+                      "label under it.", caller="test", tags=tags,
+                      source="the user said so")["id"]
+    vault.store("The cafe on the corner has free wifi until 18:00.",
+                caller="test", tags=["cafe"], source="test")
+    retag.run(vault, caller="test")
+    assert _tags(vault, rid) == tags
+    found = vault.search("where is the router admin password", caller="test",
+                         tags=["guest-access"])["results"]
+    assert [r["id"] for r in found] == [rid]
+
+
 def test_record_matrix_gives_one_unit_vector_per_record(vault):
     vault.store("A short memory.", caller="test")
     vault.store("Another short memory.", caller="test")
