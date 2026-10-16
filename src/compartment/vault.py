@@ -451,7 +451,21 @@ class Vault:
                       "write was never acknowledged, so nothing confirmed was "
                       "lost. This is the expected result of a crash or power "
                       "loss during a store.", file=sys.stderr, flush=True)
-            v.save()  # compact replayed journal into the payload
+            try:
+                v.save()  # compact replayed journal into the payload
+            except OSError:
+                # Best effort: a vault on a disk this process cannot write
+                # (a backup, a mounted snapshot; on Windows, a file another
+                # process holds open) still opens, with the replayed state
+                # in RAM and the journal still on disk, as any reader of the
+                # file has it. Entries are sealed to their position, so an
+                # append from here continues the journal where it ends. With
+                # a torn tail still on disk an append would land after the
+                # torn bytes and the journal would no longer parse: that
+                # one case refuses, as it did.
+                if loaded.truncated_tail:
+                    raise
+                v._journal_seq = len(entries)
         if check_model:
             # The pin is a hash of a file, so hashing the file is the whole
             # check. Opening a vault used to build the encoder to answer this

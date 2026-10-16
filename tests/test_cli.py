@@ -176,3 +176,41 @@ def test_status_of_a_vault_with_no_credential_is_locked(vault_path,
         monkeypatch.delenv(name, raising=False)
     doc = _status(vault_path, capsys)
     assert doc["locked"] is True and doc["vault_id"] and "error" not in doc
+
+
+@pytest.fixture()
+def read_only_dir(tmp_path):
+    """A directory nothing can be created in, as on a backup disk or a
+    mounted snapshot. Writable again afterwards, so it can be removed."""
+    d = tmp_path / "read-only"
+    d.mkdir()
+    yield d
+    os.chmod(d, 0o700)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid",
+                                                       lambda: 1)() == 0,
+                    reason="Windows and root ignore a directory's permissions")
+def test_reads_work_on_a_vault_they_cannot_write(read_only_dir, tmp_path,
+                                                 passphrase_in_env, capsys):
+    """Opening compacts a journal that holds entries, so a read rewrote the
+    vault, and where it could not (a backup disk, a mounted snapshot)
+    status, search and export all died with PermissionError."""
+    vault_path = str(read_only_dir / "s.vault")
+    Vault.create(vault_path, PASS, creator="test").lock()
+    v = Vault.unlock(vault_path, passphrase=PASS)
+    v.store("The staging database runs Postgres 16", caller="user")
+    os.chmod(read_only_dir, 0o500)
+    before = open(vault_path, "rb").read()
+    status = _status(vault_path, capsys)
+    cli.main(["--vault", vault_path, "search", "which Postgres version",
+              "--json"])
+    out, err = capsys.readouterr()
+    found = json.loads(out)
+    assert "audit entry for this read was not saved" in err
+    exported = tmp_path / "export.jsonl"
+    cli.main(["--vault", vault_path, "export", str(exported), "--plaintext"])
+    assert status["organic_records"] == 1
+    assert any("Postgres 16" in r["text"] for r in found["results"])
+    assert "Postgres 16" in exported.read_text(encoding="utf-8")
+    assert open(vault_path, "rb").read() == before

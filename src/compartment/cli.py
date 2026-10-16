@@ -100,6 +100,18 @@ def _open_vault(args) -> Vault:
     return Vault.unlock(args.vault, passphrase=pw, raw_key=key, keyfile=kf)
 
 
+def _save_reads(v: Vault) -> None:
+    """Save the audit rows a read appended in RAM. On a vault this process
+    cannot write (a backup disk, a mounted snapshot) the read has already
+    answered and the rows cannot reach that disk: said on stderr, rather
+    than a traceback and a failed command for a read that worked."""
+    try:
+        v.save()
+    except OSError as exc:
+        print(f"note: the audit entry for this read was not saved ({exc})",
+              file=sys.stderr)
+
+
 def _data_dir() -> Path:
     return Path(__file__).resolve().parent / "data"
 
@@ -859,7 +871,7 @@ def cmd_recent(args) -> None:
             tags = [t for t in r.get("tags", []) if not t.startswith("id:")]
             if tags:
                 print(f"{'':>19}tags: {', '.join(tags[:6])}")
-    v.save()
+    _save_reads(v)
 
 
 def _tray_app():
@@ -966,7 +978,7 @@ def cmd_search(args) -> None:
             q = " ⚠QUARANTINED" if r.get("quarantined") else ""
             print(f"[{r['cosine']:.3f}] ({r['namespace']}){q} {r['text']}")
         print(f"-- {out['note']}")
-    v.save()
+    _save_reads(v)
 
 
 def _ts(s: str | None) -> float | None:
@@ -1007,7 +1019,7 @@ def cmd_relations(args) -> None:
         nrel = len(out["relations"])
         print(f"-- {nrel} {'relation' if nrel == 1 else 'relations'}. "
               f"{out['note']}")
-    v.save()
+    _save_reads(v)
 
 
 def cmd_unlink(args) -> None:
@@ -1018,7 +1030,7 @@ def cmd_unlink(args) -> None:
 def cmd_get(args) -> None:
     v = _open_vault(args)
     _print(v.get(args.id, caller=args.caller))
-    v.save()
+    _save_reads(v)
 
 
 def cmd_forget(args) -> None:
@@ -1039,7 +1051,7 @@ def cmd_export(args) -> None:
         print(f"exported {n} {'record' if n == 1 else 'records'} → {args.out}")
     else:
         _die("export writes plaintext; pass --plaintext to confirm you want that")
-    v.save()
+    _save_reads(v)
 
 
 def cmd_import(args) -> None:
