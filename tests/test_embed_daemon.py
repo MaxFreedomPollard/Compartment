@@ -5,6 +5,7 @@ of them end up asking one daemon for vectors, that the daemon answers with
 exactly what an in-process encoder would, that it starts itself and goes
 away on its own, and that a vault never notices when it is missing.
 """
+import contextlib
 import json
 import os
 import shutil
@@ -18,8 +19,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from compartment import cli, embed_daemon
-from compartment.embed import Embedder, get_embedder
+from compartment import cli, embed_daemon, offline_guard
+from compartment.embed import DEFAULT_MODEL, Embedder, get_embedder, model_info
 from compartment.embed_daemon import RemoteEmbedder
 from compartment.vault import Vault
 
@@ -188,6 +189,88 @@ def test_a_newer_client_replaces_an_older_daemon(daemon_env, monkeypatch):
     # daemon has been told to go.
     assert RemoteEmbedder.connect() is None
     assert _wait_until(lambda: embed_daemon.status(daemon_env).get("pid") != pid, 10)
+
+
+# ------------------------------------------------------- the offline guard --
+@pytest.fixture()
+def guarded_by_the_flag(monkeypatch):
+    """The guard on as `--assert-offline` turns it on: in this process only,
+    with nothing in the environment for a child to inherit."""
+    for name in ("COMPARTMENT_ASSERT_OFFLINE", "ENGRAM_ASSERT_OFFLINE"):
+        monkeypatch.delenv(name, raising=False)
+    was_on = offline_guard.is_active()
+    offline_guard.activate()
+    yield
+    if not was_on:
+        offline_guard.deactivate()
+
+
+def _hello(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(str(path))
+    try:
+        embed_daemon._write(s.makefile("wb"), {"op": "hello"})
+        return embed_daemon._read(s.makefile("rb"))
+    finally:
+        s.close()
+
+
+def test_the_daemon_a_guarded_process_starts_is_guarded(daemon_env,
+                                                        guarded_by_the_flag):
+    """The flag guarded the server and the CLI, and the daemon they started,
+    the process that loads onnxruntime and runs every embedding, could
+    create internet sockets. Its hello says whether its own guard is on."""
+    r = RemoteEmbedder.connect()
+    assert r is not None and r.shared
+    assert _hello(daemon_env)["offline_guard"] is True
+
+
+@contextlib.contextmanager
+def _a_daemon_answering(path, hello):
+    """Something at the daemon's socket that answers every request with
+    `hello`, while the block runs."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(4)
+    srv.settimeout(0.2)
+    done = threading.Event()
+
+    def serve():
+        while not done.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                continue
+            with conn:
+                rfile, wfile = conn.makefile("rb"), conn.makefile("wb")
+                try:
+                    while embed_daemon._read(rfile) is not None:
+                        embed_daemon._write(wfile, hello)
+                except (OSError, ValueError):
+                    pass
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        done.set()
+        t.join(5)
+        srv.close()
+
+
+def test_a_guarded_client_keeps_its_own_model_beside_an_unguarded_daemon(
+        daemon_env, guarded_by_the_flag):
+    """The daemon is shared, so a guarded server could send its texts to a
+    daemon an unguarded process had started. This one passes every other
+    check of the handshake."""
+    info = model_info(DEFAULT_MODEL)
+    unguarded = {"ok": True, "protocol": embed_daemon.PROTOCOL,
+                 "version": embed_daemon.__version__, "pid": os.getpid(),
+                 "model": DEFAULT_MODEL, "model_sha256": info.sha256,
+                 "dim": info.dim, "offline_guard": False}
+    with _a_daemon_answering(daemon_env, unguarded):
+        assert isinstance(get_embedder(), Embedder)
+        assert RemoteEmbedder.connect() is None
 
 
 # ------------------------------------------------------------ switches --

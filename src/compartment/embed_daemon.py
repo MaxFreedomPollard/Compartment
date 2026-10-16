@@ -52,7 +52,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import __version__
+from . import __version__, offline_guard
 from .embed import (CHUNK_STRIDE, CHUNK_WINDOW, DEFAULT_MODEL, MAX_CHUNKS,
                     Embedder, ModelError, model_info)
 from .home import env
@@ -405,7 +405,8 @@ class _Daemon:
                 info = model_info(model)
                 return {"ok": True, "protocol": PROTOCOL, "version": __version__,
                         "pid": os.getpid(), "model": model,
-                        "model_sha256": info.sha256, "dim": info.dim}
+                        "model_sha256": info.sha256, "dim": info.dim,
+                        "offline_guard": offline_guard.is_active()}
             if op == "embed_query":
                 return {"ok": True,
                         "vec": _pack(self._embedder(model).embed_query(req["text"]))}
@@ -528,6 +529,11 @@ def _spawn(path: Path, idle: int) -> None:
     env_ = dict(os.environ)
     env_["PYTHONPATH"] = here + (os.pathsep + env_["PYTHONPATH"]
                                  if env_.get("PYTHONPATH") else "")
+    # `--assert-offline` turns the guard on in this process only. The daemon
+    # is where the model runs, so it gets the guard too, from the
+    # environment, where the package seals it.
+    if offline_guard.is_active():
+        env_["COMPARTMENT_ASSERT_OFFLINE"] = "1"
     subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, start_new_session=True,
                      close_fds=True, cwd=str(Path.home()), env=env_)
@@ -665,6 +671,11 @@ class RemoteEmbedder:
             if hello.get("model_sha256") != self.model_sha256:
                 self._drop()
                 raise Unavailable("daemon serves a different model file")
+            if offline_guard.is_active() and not hello.get("offline_guard"):
+                # A daemon an unguarded process started: every text this
+                # process embeds would go to one free to use the network.
+                self._drop()
+                raise Unavailable("daemon is not offline-guarded")
             self._pid = int(hello.get("pid") or 0) or None
             return
         raise Unavailable("could not replace the older daemon")
