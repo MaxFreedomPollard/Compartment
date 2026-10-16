@@ -324,6 +324,67 @@ def test_tags_a_tool_call_writes_between_two_slices_are_kept(serving,
     assert "chosen-by-a-tool-call" in _tags_now(v)[late]
 
 
+def _encoders_built(monkeypatch):
+    """Every Embedder this process constructs from here on."""
+    from compartment import embed
+    built, real_init = [], embed.Embedder.__init__
+
+    def init(self, *args, **kwargs):
+        built.append(self)
+        real_init(self, *args, **kwargs)
+    monkeypatch.setattr(embed.Embedder, "__init__", init)
+    return built
+
+
+def _written_with_a_vector(vault_path, key, n):
+    """A write by another process that needs no model in this one."""
+    import numpy as np
+    vec = np.random.default_rng(n).standard_normal(384).astype(np.float32)
+    Vault.unlock(vault_path, raw_key=key).store(
+        f"Another agent wrote this, number {n}", caller="cli",
+        vec=vec / np.linalg.norm(vec))
+
+
+def test_a_reopen_after_another_process_writes_keeps_the_model(
+        serving, vault_path, monkeypatch):
+    """Without the shared daemon, which is every Windows machine, each
+    reopen after another process wrote the vault built the encoder again,
+    an ONNX session and a tokenizer, at the next search: six for five
+    foreign writes."""
+    v = serving
+    v.store("The staging database runs Postgres 16", caller="agent")
+    key = v._master
+    monkeypatch.setattr(Vault, "resolve_credential",
+                        staticmethod(lambda path, passphrase=None: (None, key)))
+    built = _encoders_built(monkeypatch)
+    handles = []
+    for n in range(5):
+        _written_with_a_vector(vault_path, key, n)
+        out = json.loads(_call(server.memory_search,
+                               "which Postgres version does staging run"))
+        assert any("Postgres 16" in r["text"] for r in out["results"])
+        handles.append(server._state["vault"])
+    assert len({id(h) for h in handles + [v]}) == 6     # five reopens
+    assert built == []
+
+
+def test_a_reopen_builds_its_own_model_when_the_pin_moved(
+        serving, vault_path, monkeypatch):
+    """Another process may have re-embedded the vault with another model,
+    and then the encoder in hand is the wrong one."""
+    v = serving
+    v.store("The staging database runs Postgres 16", caller="agent")
+    key = v._master
+    monkeypatch.setattr(Vault, "resolve_credential",
+                        staticmethod(lambda path, passphrase=None: (None, key)))
+    v._embedder.model_sha256 = "0" * 64
+    built = _encoders_built(monkeypatch)
+    _written_with_a_vector(vault_path, key, 0)
+    _call(server.memory_search, "which Postgres version does staging run")
+    assert server._state["vault"] is not v
+    assert server._state["vault"]._embedder is built[0] and len(built) == 1
+
+
 def _live_texts(vault_path, key):
     after = Vault.unlock(vault_path, raw_key=key)
     return after, sorted(strip_provenance(r["text"]) for r in

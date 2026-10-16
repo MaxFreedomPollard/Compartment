@@ -40,6 +40,7 @@ from mcp.types import ToolAnnotations
 from . import __version__, audit, gate, offline_guard, selftest, session
 from .acl import VaultConfig
 from .crypto import CryptoError, TamperError
+from .embed import DEFAULT_MODEL
 from .platforms import file_signature
 from .vault import (DATA_NOT_INSTRUCTIONS, Vault, VaultLockedError,
                     VaultStaleError, expiry_date, strip_provenance)
@@ -203,11 +204,12 @@ def _vault() -> Vault:
             v.lock()
         except Exception:                               # noqa: BLE001
             _drop_key(v)            # lock() drops the key either way
+    stale = None
     if v is not None and not v._locked and v.is_stale():
         # another process (Hermes provider, CLI, another host) wrote the
         # vault - reload so we operate on current state
         _state["vault"] = None
-        v = None
+        stale, v = v, None
     if v is None or v._locked:
         # try silent re-unlock via keychain/env (user intent persists until
         # `compartment lock` clears the credential)
@@ -240,6 +242,14 @@ def _vault() -> Vault:
             # keyfile. Each of those already names its own remedy, so surface
             # it unchanged instead of masking it.
             raise
+        # A reopen reloads the data, not the model: without the shared
+        # daemon (always on Windows) the next search built a new encoder,
+        # so the stale handle's goes on while the vault pins the same one.
+        emb = getattr(stale, "_embedder", None)
+        if (emb is not None
+                and emb.model_name == v.db.get_meta("model_name", DEFAULT_MODEL)
+                and emb.model_sha256 == v.db.get_meta("model_sha256")):
+            v._embedder = emb
         _state["vault"] = v
         _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
         _read_settings()
