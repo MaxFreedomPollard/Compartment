@@ -2097,6 +2097,11 @@ class Vault:
 # macOS Keychain integration (optional keyslot type "keychain")
 # ---------------------------------------------------------------------------
 
+#: How long a `security` call may take. The Keychain can put up a dialog,
+#: and a server or a panel helper has nobody to answer it; a lookup that
+#: waited on it held the vault open, or the tool call, for good.
+KEYCHAIN_TIMEOUT = 15
+
 def _keychain_names(path: str) -> list[tuple[str, str]]:
     """(account, service) pairs identifying this vault's Keychain item,
     current spelling first.
@@ -2121,21 +2126,30 @@ def _keychain_service(path: str) -> str:
 def keychain_store(path: str, master_key: bytes) -> None:
     if platform.system() != "Darwin":
         raise CryptoError("Keychain unlock is only available on macOS")
-    subprocess.run(
-        ["security", "add-generic-password", "-U",
-         "-a", wire.KEYCHAIN_ACCOUNT,
-         "-s", _keychain_service(path), "-w", master_key.hex()],
-        check=True, capture_output=True)
+    try:
+        subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-a", wire.KEYCHAIN_ACCOUNT,
+             "-s", _keychain_service(path), "-w", master_key.hex()],
+            check=True, capture_output=True, timeout=KEYCHAIN_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise CryptoError("the Keychain did not answer within "
+                          f"{KEYCHAIN_TIMEOUT} s") from exc
 
 
 def keychain_get(path: str) -> bytes | None:
     if platform.system() != "Darwin":
         return None
     for i, (account, service) in enumerate(_keychain_names(path)):
-        r = subprocess.run(
-            ["security", "find-generic-password", "-a", account,
-             "-s", service, "-w"],
-            capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-a", account,
+                 "-s", service, "-w"],
+                capture_output=True, text=True, timeout=KEYCHAIN_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            # `security` that does not answer (a keychain waiting on a
+            # dialog nobody can see) is no credential, not a hung unlock.
+            continue
         if r.returncode != 0:
             continue
         try:
@@ -2148,7 +2162,8 @@ def keychain_get(path: str) -> bytes | None:
             keychain_store(path, key)
             subprocess.run(
                 ["security", "delete-generic-password", "-a", account,
-                 "-s", service], capture_output=True)
+                 "-s", service], capture_output=True,
+                timeout=KEYCHAIN_TIMEOUT)
         return key
     return None
 
@@ -2158,8 +2173,12 @@ def keychain_clear(path: str) -> bool:
         return False
     cleared = False
     for account, service in _keychain_names(path):
-        r = subprocess.run(
-            ["security", "delete-generic-password", "-a", account,
-             "-s", service], capture_output=True)
+        try:
+            r = subprocess.run(
+                ["security", "delete-generic-password", "-a", account,
+                 "-s", service], capture_output=True,
+                timeout=KEYCHAIN_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            continue
         cleared = cleared or r.returncode == 0
     return cleared

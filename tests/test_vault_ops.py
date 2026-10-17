@@ -691,3 +691,23 @@ def test_a_search_for_no_results_returns_none(vault):
                                       "grants": {"hermes": "rw"}}
     with pytest.raises(AclError):
         vault.search(query, caller="hermes", namespace="main", top_k=0)
+
+
+def test_a_keychain_that_does_not_answer_is_no_credential(monkeypatch):
+    """`security` can wait on a Keychain dialog nobody can answer, and the
+    lookup used to wait with it: a server reopening the vault, or the
+    panel's helper, held for good. A call past its time is treated as no
+    item found; a store past its time says so."""
+    import subprocess
+    from compartment import vault as vault_module
+
+    def stuck(argv, **kwargs):
+        assert kwargs.get("timeout") == vault_module.KEYCHAIN_TIMEOUT, argv
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(vault_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(vault_module.subprocess, "run", stuck)
+    assert vault_module.keychain_get("/x/a.vault") is None
+    assert vault_module.keychain_clear("/x/a.vault") is False
+    with pytest.raises(vault_module.CryptoError, match="did not answer"):
+        vault_module.keychain_store("/x/a.vault", b"\x00" * 32)
