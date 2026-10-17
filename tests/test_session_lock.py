@@ -6,7 +6,7 @@ from compartment import crypto, session
 from compartment.crypto import CryptoError
 from compartment.vault import Vault
 
-from conftest import PASS
+from conftest import PASS, assert_guards_in_force
 
 
 @pytest.fixture(autouse=True)
@@ -38,17 +38,18 @@ def test_session_unlock_persists_across_processes(vault, vault_path):
     assert v2.status()["locked"] is False
 
 
-def test_restart_invalidates_session_credential(vault, vault_path, monkeypatch):
+def test_restart_invalidates_session_credential(vault, vault_path, tmp_path):
     session.store(vault_path, vault._master)
     assert session.get(vault_path) is not None
-    # simulate a reboot: the kernel reports a different boot time
-    monkeypatch.setattr(session, "_boot_time", lambda: "9999999999")
-    assert session.get(vault_path) is None          # credential dead
-    with pytest.raises(CryptoError):
-        Vault.resolve_credential(vault_path)        # locked again
+    with pytest.MonkeyPatch.context() as mp:
+        # simulate a reboot: the kernel reports a different boot time
+        mp.setattr(session, "_boot_time", lambda: "9999999999")
+        assert session.get(vault_path) is None          # credential dead
+        with pytest.raises(CryptoError):
+            Vault.resolve_credential(vault_path)        # locked again
     # and the stale file was removed - even reverting the clock can't revive it
-    monkeypatch.undo()
     assert session.get(vault_path) is None
+    assert_guards_in_force(tmp_path)
 
 
 def test_restart_relocks_even_if_the_boot_clock_repeats(vault, vault_path):

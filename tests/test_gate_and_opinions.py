@@ -3,7 +3,9 @@ update-first storage, supersede tombstones, replayable journal ops, the
 recency-heavy opinion prior, and the two curation passes."""
 import json
 import time
+import tracemalloc
 
+import numpy as np
 import pytest
 
 from compartment import curate, gate
@@ -425,6 +427,70 @@ def test_opinion_clusters_never_cross_namespaces(vault):
     for cluster in clusters:
         assert len({e["namespace"] for e in cluster}) == 1
     assert not clusters                        # 1 opinion per ns: no cluster
+
+
+def _clusters_by_the_full_matrix(ids, mat, thr):
+    """opinion_clusters' answer as the whole n x n matrix finds it, for
+    opinions stored oldest first."""
+    parent = list(range(len(ids)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, j in np.argwhere(np.triu(mat @ mat.T >= thr, k=1)):
+        parent[find(int(i))] = find(int(j))
+    groups = {}
+    for i in range(len(ids)):
+        groups.setdefault(find(i), []).append(i)
+    out = [[ids[i] for i in reversed(g)] for g in groups.values() if len(g) > 1]
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def test_opinion_clusters_are_found_in_blocks_with_the_same_answer(vault):
+    """The audit built the full similarity matrix of a namespace's opinions
+    and two boolean copies of it, so its memory grew with the square of
+    their number: 105 MB at four thousand, a projected 1.3 GB at fifteen
+    thousand. Pairs are found a block of rows at a time now, and the
+    clusters must be exactly the ones the whole matrix gives."""
+    n = 4000
+    rng = np.random.default_rng(5)
+    centres = rng.standard_normal((n // 5, 384)).astype(np.float32)
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+    ids, vecs = [], []
+    for i in range(n):
+        vec = centres[i % len(centres)] + rng.uniform(0.01, 0.05) * \
+            rng.standard_normal(384).astype(np.float32)
+        vec /= np.linalg.norm(vec)
+        vecs.append(vec)
+        ids.append(vault.db.insert(
+            record_id=None, ns="main", text=f"The user prefers option {i}.",
+            vec=vec, tags=[], importance=0.5, quarantined=False, pack=None,
+            prov={}, master_key=vault._master, created=1.7e9 + i,
+            kind="opinion"))
+    mat = np.vstack(vecs)
+    # The threshold sits in the widest gap between two pair similarities,
+    # so no rounding difference between one product and a block of it can
+    # move a pair across it.
+    sims = mat @ mat.T
+    near = np.sort(sims[(sims > 0.75) & (sims < 0.85)])
+    k = int(np.argmax(np.diff(near)))
+    assert near[k + 1] - near[k] > 1e-4
+    thr = float((near[k] + near[k + 1]) / 2)
+    del sims, near
+    expected = _clusters_by_the_full_matrix(ids, mat, thr)
+    assert len(expected) > 100
+    tracemalloc.start()
+    try:
+        got = curate.opinion_clusters(vault, threshold=thr, caller="test")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert [[e["id"] for e in c] for c in got] == expected
+    # Under what the float matrix alone took: 38 MB here against 105 MB.
+    assert peak < n * n * 4, f"{peak / 2**20:.1f} MB"
 
 
 def test_apply_plan_validates_kind_importance_and_duplicate_ids(vault):

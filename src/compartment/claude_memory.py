@@ -117,6 +117,18 @@ def parse(path: Path) -> dict:
     }
 
 
+def file_tag(path: Path | str) -> str:
+    """The tag naming the memory file a record came from, the same from the
+    importer and the capture hook: "claude-file:<project>/<file>", where the
+    project is the directory holding the memory directory. A later capture
+    of the edited file finds by it what it replaces."""
+    p = Path(path).absolute()
+    memory = next((d for d in p.parents if d.name.lower() == "memory"),
+                  p.parent)
+    inside = p.relative_to(memory).as_posix()
+    return f"claude-file:{memory.parent.name}/{inside}"
+
+
 def import_files(vault, files: list[Path], caller: str = "import-claude",
                  namespace: str | None = None, dry_run: bool = False) -> dict:
     """Store each parsed memory. Returns counts plus per-file outcomes.
@@ -133,14 +145,15 @@ def import_files(vault, files: list[Path], caller: str = "import-claude",
             failed += 1
             errors.append(f"{f.name}: {exc}")
             continue
+        tags = rec["tags"] + [file_tag(f)]
         if dry_run:
             imported += 1
             items.append({"name": rec["name"], "importance": rec["importance"],
-                          "tags": rec["tags"], "chars": len(rec["text"])})
+                          "tags": tags, "chars": len(rec["text"])})
             continue
         try:
             out = vault.store(rec["text"], caller=caller, namespace=namespace,
-                              tags=rec["tags"], importance=rec["importance"],
+                              tags=tags, importance=rec["importance"],
                               # Read off disk, not learned in conversation: the
                               # method has to say which of the two it was.
                               source=f"read from {f.name}",
@@ -186,4 +199,4 @@ def default_root_exists() -> bool:
 
 
 __all__ = ["DEFAULT_ROOT", "discover", "parse", "import_files", "pending",
-           "default_root_exists", "IMPORTANCE"]
+           "default_root_exists", "IMPORTANCE", "file_tag"]

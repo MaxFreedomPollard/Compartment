@@ -124,6 +124,9 @@ def remove(target: str) -> bool:
     if dst is None or not dst.is_file():
         return False
     try:
+        # An edited copy is the user's writing: it stays where it is.
+        if dst.read_bytes() != source().read_bytes():
+            return False
         dst.unlink()
     except OSError:
         return False

@@ -60,18 +60,24 @@ def test_a_failed_attempt_paces_the_next_one(vault_path, fast):
     assert time.monotonic() - start >= fast
 
 
-def test_the_wait_does_not_escalate(vault_path, fast):
-    """Attempt 5 waits exactly as long as attempt 2. No backoff, no lockout."""
+def test_the_wait_does_not_escalate(vault_path, fast, monkeypatch):
+    """Attempt 5 waits exactly as long as attempt 2. No backoff, no lockout.
+
+    This used to time each failed unlock whole, wait and Argon2 together,
+    so it bounded how much four Argon2 runs varied, not the wait: one run
+    0.4 s slower than another failed it with the pacing flat. So record the
+    waits the pacing asks for, as test_first_attempt_is_not_delayed does.
+    """
     Vault.create(vault_path, PASS, creator="t").lock()
-    waits = []
+    slept = []
+    monkeypatch.setattr(crypto.time, "sleep", lambda seconds: slept.append(seconds))
     for i in range(5):
-        start = time.monotonic()
         with pytest.raises((TamperError, CryptoError)):
             Vault.unlock(vault_path, passphrase=f"wrong-{i}")
-        waits.append(time.monotonic() - start)
-    later = waits[1:]
-    assert max(later) < min(later) + fast, (
-        f"the wait grew across attempts: {later}")
+    assert len(slept) == 4, f"attempts 2 to 5 must each be paced: {slept}"
+    assert max(slept) <= fast, f"a wait was longer than the interval: {slept}"
+    assert max(slept) - min(slept) < fast / 4, (
+        f"the wait changed across attempts: {slept}")
 
 
 def test_no_lockout_the_right_passphrase_still_opens_after_many_failures(
@@ -85,23 +91,26 @@ def test_no_lockout_the_right_passphrase_still_opens_after_many_failures(
     v.lock()
 
 
-def test_a_correct_attempt_clears_the_pacing(vault_path, fast):
-    Vault.create(vault_path, PASS, creator="t").lock()
-    # What an unlock costs with nothing pacing it. Argon2 and opening the
-    # file are not free, and on a loaded CI runner they can take longer than
-    # the whole test interval, so "no wait was added" has to be measured
-    # against that cost rather than against a flat number. Comparing to 0.4s
-    # made this a test of how busy the machine was.
-    start = time.monotonic()
-    Vault.unlock(vault_path, passphrase=PASS).lock()
-    baseline = time.monotonic() - start
+def test_a_correct_attempt_clears_the_pacing(vault_path, fast, monkeypatch):
+    """The unlock after a failure waits once, and the next one not at all.
 
+    Measured against a baseline unlock plus the interval, this was still a
+    test of how long Argon2 took, so it records the waits asked for instead,
+    each before its lock(): a save on Windows may sleep between retries of
+    its rename.
+    """
+    Vault.create(vault_path, PASS, creator="t").lock()
     with pytest.raises((TamperError, CryptoError)):
         Vault.unlock(vault_path, passphrase="wrong")
-    Vault.unlock(vault_path, passphrase=PASS).lock()   # pays the wait once
-    start = time.monotonic()
-    Vault.unlock(vault_path, passphrase=PASS).lock()   # and not again
-    assert time.monotonic() - start < baseline + fast
+    slept = []
+    monkeypatch.setattr(crypto.time, "sleep", lambda seconds: slept.append(seconds))
+    v = Vault.unlock(vault_path, passphrase=PASS)      # pays the wait once
+    assert len(slept) == 1 and 0 < slept[0] <= fast, slept
+    v.lock()
+    slept.clear()
+    v = Vault.unlock(vault_path, passphrase=PASS)      # and not again
+    assert slept == [], f"the correct passphrase left the pacing on: {slept}"
+    v.lock()
 
 
 def test_the_user_is_told_why_it_is_waiting(vault_path, fast, capsys):

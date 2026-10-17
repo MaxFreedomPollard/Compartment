@@ -90,6 +90,33 @@ def test_two_vaults_get_two_icons(tmp_path):
     assert first is True and second is True
 
 
+def test_two_vaults_in_one_folder_get_two_icons(tmp_path):
+    """Per vault, not per folder. The lock was one file in the vault's
+    folder, shared by every vault in it: a second vault beside the first
+    could get no panel at all, and the launchd copy started for it read the
+    other's pid out of the shared file and stopped that vault's app."""
+    memory = str(tmp_path / "memory.vault")
+    work = str(tmp_path / "work.vault")
+    holders, answers = [], []
+    try:
+        for vault in (memory, work):
+            p = subprocess.Popen(
+                [sys.executable, "-c",
+                 HOLDER.format(src=_src_dir(), vault=vault)],
+                stdout=subprocess.PIPE, text=True)
+            holders.append(p)
+            answers.append(p.stdout.readline().strip())
+        assert answers == ["HELD", "HELD"]
+        assert menubar.lock_holder_pid(work) != holders[0].pid
+        if sys.platform != "win32":       # where the lock file holds the pid
+            assert menubar.lock_holder_pid(work) == holders[1].pid
+            assert menubar.lock_holder_pid(memory) == holders[0].pid
+    finally:
+        for p in holders:
+            p.kill()
+            p.wait(timeout=10)
+
+
 def test_an_unwritable_home_still_gets_an_app(tmp_path, monkeypatch):
     """Never refuse to start because the lock could not be taken. Two icons
     is a nuisance; no icon is a broken install."""
@@ -131,15 +158,16 @@ def test_the_handle_is_kept_alive_by_the_module(tmp_path):
 def test_the_lock_lives_beside_the_vault(tmp_path):
     vault = tmp_path / "sub" / "memory.vault"
     menubar.acquire_instance_lock(str(vault))
-    assert (tmp_path / "sub" / menubar.INSTANCE_LOCK_NAME).is_file()
+    assert (tmp_path / "sub" / ".memory.vault.menubar.lock").is_file()
 
 
 def test_the_lock_name_is_hidden_and_not_the_vault_lock(tmp_path):
     """It sits in the same directory as the vault, so it must not collide
     with the vault's own flock file, and it should not clutter the folder."""
-    assert menubar.INSTANCE_LOCK_NAME.startswith(".")
-    assert "menubar" in menubar.INSTANCE_LOCK_NAME
-    assert menubar.INSTANCE_LOCK_NAME != "memory.vault.flock"
+    name = menubar._instance_lock_path(str(tmp_path / "memory.vault")).name
+    assert name.startswith(".")
+    assert "menubar" in name
+    assert name != "memory.vault.flock"
 
 
 # --- the fault that let two icons through -----------------------------------

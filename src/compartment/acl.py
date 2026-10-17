@@ -9,9 +9,11 @@ from __future__ import annotations
 import copy
 import json
 import os
+import secrets
 from dataclasses import dataclass, field
 
 from .crypto import CryptoError
+from .vaultfile import _atomic_replace
 
 # The whole grant vocabulary. Anything outside it is not a grant at all, so it
 # denies both reads and writes rather than being waved through as "not rw".
@@ -79,8 +81,25 @@ class VaultConfig:
         return cfg
 
     def save(self, vault_path: str) -> None:
-        with open(self.path_for(vault_path), "w", encoding="utf-8") as f:
-            json.dump({"callers": self.callers, "settings": self.settings}, f, indent=2)
+        # Every unlock reads this file, so it is never rewritten in place: a
+        # reader would meet it empty, and a write that fails (a full disk)
+        # would leave it cut short for good. Written beside it and renamed
+        # over it, it is always the old settings or the new ones, whole. The
+        # name is this save's own, so two saves at once never share a file.
+        path = self.path_for(vault_path)
+        tmp = f"{path}.{secrets.token_hex(8)}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"callers": self.callers, "settings": self.settings}, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            _atomic_replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     # -- ACL ---------------------------------------------------------------
 

@@ -273,8 +273,54 @@ def targets(vault, *, include_seeded: bool = False) -> list[str]:
     return out
 
 
+@dataclass
+class Snapshot:
+    """The vault-wide half of a plan, as the vault stood when it was taken:
+    every record's position and tags, the implication rules, the eligible
+    set and its patterns."""
+    ids: list[str]
+    mat: np.ndarray
+    index: dict[str, int]
+    rows: dict[str, str]
+    tags_by_id: dict[str, list[str]]
+    desc_by_id: dict[str, list[str]]
+    rules: dict[str, dict[str, float]]
+    allowed: set[str]
+    patterns: dict[str, re.Pattern]
+
+
+def snapshot(vault) -> Snapshot:
+    """What every slice of one pass is planned against. Taken once, it is
+    what makes a pass in slices give what one whole-vault plan gives: a
+    slice votes with the tags the vault had when the pass began, never with
+    what the slices before it wrote, and the setup is not repeated."""
+    db = vault.db
+    ids, mat = _record_matrix(db)
+    rows, chosen = {}, {}
+    for row in db.conn.execute("SELECT id, tags, tags_origin FROM records"):
+        rows[row["id"]] = row["tags"]
+        chosen[row["id"]] = row["tags_origin"] or row["tags"]
+
+    tags_by_id = {rid: json.loads(t) for rid, t in rows.items()}
+    # Only the tags a record was stored with vote, imply and count towards
+    # eligibility. What a pass adds is its answer; as evidence for the next
+    # pass it carried tags one hop further every interval, so a vault never
+    # settled and was rewritten each time. A record from before tags_origin
+    # existed votes with the tags it has.
+    desc_by_id = {rid: _descriptive(json.loads(t)) for rid, t in chosen.items()}
+    rules = _implications([v for v in desc_by_id.values() if v])
+    # One eligibility set, applied to every way a tag can be proposed. Filtering
+    # in only one of the three signals would let the other two reintroduce
+    # exactly what it excluded.
+    allowed = eligible_tags(desc_by_id)
+    return Snapshot(ids, mat, {rid: i for i, rid in enumerate(ids)}, rows,
+                    tags_by_id, desc_by_id, rules, allowed,
+                    _vocab_pattern(allowed))
+
+
 def plan(vault, *, include_seeded: bool = False, prune: bool = False,
-         limit: int | None = None, only: list[str] | None = None) -> list[Change]:
+         limit: int | None = None, only: list[str] | None = None,
+         context: Snapshot | None = None) -> list[Change]:
     """Work out what every record's tags should be. Writes nothing.
 
     `include_seeded` is off because a vault's starting memories are curated
@@ -282,27 +328,17 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
     re-deriving are the ones this machine learned. Seeded records still VOTE -
     they are context, and excluding them from the neighbourhood would throw
     away most of what the vault knows.
+
+    `context` is a snapshot() to plan against, taken at the start of a pass
+    that plans in slices; without one the plan takes its own.
     """
     from .vault import is_seeded            # local: vault imports this module
 
     db = vault.db
-    ids, mat = _record_matrix(db)
+    ctx = snapshot(vault) if context is None else context
+    ids, mat, index, rows = ctx.ids, ctx.mat, ctx.index, ctx.rows
     if not ids:
         return []
-    index = {rid: i for i, rid in enumerate(ids)}
-
-    rows = {}
-    for row in db.conn.execute("SELECT id, tags FROM records"):
-        rows[row["id"]] = row["tags"]
-
-    tags_by_id = {rid: json.loads(t) for rid, t in rows.items()}
-    desc_by_id = {rid: _descriptive(t) for rid, t in tags_by_id.items()}
-    rules = _implications([v for v in desc_by_id.values() if v])
-    # One eligibility set, applied to every way a tag can be proposed. Filtering
-    # in only one of the three signals would let the other two reintroduce
-    # exactly what it excluded.
-    allowed = eligible_tags(desc_by_id)
-    patterns = _vocab_pattern(allowed)
 
     # `only` slices the work; the VOTERS are always the whole vault, because a
     # neighbourhood computed from one slice would give a record different tags
@@ -313,6 +349,17 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
                and (wanted is None or rid in wanted)]
     if limit is not None:
         targets = targets[:limit]
+    before = ctx.tags_by_id
+    if context is not None:
+        # A record's own tags as they are NOW: a tool call between two slices
+        # may have changed them, and the plan must not write over it.
+        before = {}
+        for rid in targets:
+            row = db.conn.execute("SELECT tags FROM records WHERE id = ?",
+                                  (rid,)).fetchone()
+            if row is not None:
+                before[rid] = json.loads(row["tags"])
+        targets = [rid for rid in targets if rid in before]
 
     changes: list[Change] = []
     for start in range(0, len(targets), BLOCK):
@@ -321,15 +368,14 @@ def plan(vault, *, include_seeded: bool = False, prune: bool = False,
         sims = block @ mat.T                       # (chunk, all records)
         for local, rid in enumerate(chunk):
             changes.append(_plan_one(
-                rid, sims[local], ids, index, desc_by_id, tags_by_id,
-                rules, patterns, allowed, vault, prune))
+                rid, sims[local], ids, index, ctx.desc_by_id, before[rid],
+                ctx.rules, ctx.patterns, ctx.allowed, vault, prune))
     return [c for c in changes if c.is_change]
 
 
-def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
+def _plan_one(rid, sim_row, ids, index, desc_by_id, before, rules,
               patterns, allowed, vault, prune) -> Change:
-    before = tags_by_id[rid]
-    own = list(desc_by_id[rid])
+    own = _descriptive(before)
 
     # --- signal 1: what the neighbourhood is called ---------------------------
     sim = sim_row.copy()
@@ -349,8 +395,8 @@ def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
     scored: dict[str, float] = {t: s for t, s in support.items()
                                 if s >= PROPAGATE_SHARE and t in allowed}
 
-    # --- signal 2: tags this record's own tags imply --------------------------
-    for tag in own:
+    # --- signal 2: tags the record was stored with imply ----------------------
+    for tag in desc_by_id[rid]:
         for implied, conf in rules.get(tag, {}).items():
             if implied in allowed:
                 scored[implied] = max(scored.get(implied, 0.0), conf)
@@ -386,8 +432,9 @@ def _plan_one(rid, sim_row, ids, index, desc_by_id, tags_by_id, rules,
         keep.append(tag)
 
     proposed = sorted(set(scored) - set(keep), key=lambda t: -scored[t])
-    after_desc = keep + proposed
-    after_desc = after_desc[:MAX_TAGS_PER_RECORD]
+    # The cap is on what a pass ADDS: a record stored with more tags than
+    # that keeps them all, as a pass that removes nothing has to.
+    after_desc = keep + proposed[:max(0, MAX_TAGS_PER_RECORD - len(keep))]
 
     protected = [t for t in before if t.startswith(Store.PROTECTED_TAG_PREFIXES)]
     after = protected + after_desc

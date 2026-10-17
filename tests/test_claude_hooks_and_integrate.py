@@ -5,11 +5,15 @@ verified by hand on one machine, so nothing caught a platform-specific break.
 """
 import io
 import json
+import os
+import shutil
+import subprocess
+import sys
 import types
 
 import pytest
 
-from compartment import claude_hooks, claude_memory, cli
+from compartment import claude_hooks, claude_memory, cli, clients
 
 PASS = "CorrectHorse"
 
@@ -113,6 +117,18 @@ def test_install_refuses_malformed_settings(home):
         claude_hooks.install(compartment_bin="compartment")
 
 
+@pytest.mark.parametrize("raw", ["null", "[]"])
+def test_install_refuses_settings_that_are_json_but_not_an_object(home, raw):
+    """`null` or `[]` parsed, and .setdefault then failed on it with an
+    AttributeError no caller expects. Malformed settings are refused with
+    ValueError, and so are these, untouched."""
+    home.settings.parent.mkdir(parents=True, exist_ok=True)
+    home.settings.write_text(raw, encoding="utf-8")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        claude_hooks.install(compartment_bin="compartment")
+    assert home.settings.read_text(encoding="utf-8") == raw
+
+
 def test_uninstall_removes_only_ours(home):
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text(json.dumps({"hooks": {claude_hooks.EVENT: [
@@ -133,6 +149,49 @@ def test_uninstall_when_absent_is_false(home):
     home.settings.parent.mkdir(parents=True, exist_ok=True)
     home.settings.write_text("{}", encoding="utf-8")
     assert claude_hooks.uninstall() is False
+
+
+def _installed_command(settings):
+    groups = json.loads(settings.read_text(encoding="utf-8"))["hooks"][
+        claude_hooks.EVENT]
+    return [h["command"] for g in groups for h in g["hooks"]
+            if claude_hooks.is_ours(h["command"])][0]
+
+
+def test_the_capture_hook_names_a_compartment_that_exists(
+        home, vault_path, monkeypatch, tmp_path):
+    """The hook was written as a bare `compartment ... hook capture`
+    whenever `compartment` was not on the PATH of the process installing
+    it (the .app install puts it on none; an unactivated venv; a login
+    item), while the MCP registration from the same run named the resolved
+    executable. Claude Code's shell then answered "command not found" after
+    every Write and Edit of any file, and nothing was ever captured."""
+    nothing = tmp_path / "empty-bin"
+    nothing.mkdir()
+    monkeypatch.setenv("PATH", str(nothing))
+    assert shutil.which("compartment") is None
+    exe = clients.executable()
+    assert os.path.isabs(exe)
+
+    cli._install_capture_hook(vault_path)          # init, integrate claude
+    cmd = _installed_command(home.settings)
+    assert cmd == claude_hooks.hook_command(exe, vault_path)
+    assert claude_hooks.hook_command(vault=vault_path) == cmd   # hook install
+    assert f'--vault "{vault_path}"' in cmd
+
+    if os.name != "nt":                 # run it the way Claude Code does
+        edit = json.dumps({"tool_name": "Edit",
+                           "tool_input": {"file_path": str(tmp_path / "a.py")}})
+        ran = subprocess.run(["/bin/sh", "-c", cmd], input=edit, text=True,
+                             capture_output=True, timeout=60)
+        assert ran.returncode == 0, ran.stderr
+
+    # A resolved path with a space in it is still quoted for the shell.
+    monkeypatch.setattr(clients, "executable",
+                        lambda: "/Applications/My Tools/compartment")
+    assert claude_hooks.hook_command(vault="/v/m.vault") == (
+        '"/Applications/My Tools/compartment" --vault "/v/m.vault" '
+        "hook capture")
 
 
 # ------------------------------------------------------------ file filter
@@ -210,6 +269,30 @@ def test_capture_with_locked_vault_does_not_break_the_edit(home, vault_path):
     assert res == {"stored": False, "reason": "vault locked"}
 
 
+def test_capture_with_an_unreadable_vault_config_does_not_break_the_edit(
+        home, vault_path, monkeypatch):
+    """A config cut short (a save stopped by a full disk) raised
+    json.JSONDecodeError out of the unlock, which is not a CryptoError, so
+    capture() raised and `compartment hook capture` exited 1 with a
+    traceback after the user's edit."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    session.store(vault_path, v._master)
+    v.lock()
+    with open(vault_path + ".config.json", "w", encoding="utf-8") as f:
+        f.write('{\n  "callers": {\n    "*": {')
+    res = claude_hooks.capture(io.StringIO(_payload(home.memfile)),
+                               vault_path=vault_path)
+    assert res["stored"] is False
+    assert res["reason"].startswith("vault unavailable: "), res
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_payload(home.memfile)))
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["--vault", vault_path, "hook", "capture"])
+    assert exited.value.code == 0
+
+
 def test_capture_is_idempotent_on_repeated_writes(home, vault_path):
     from compartment.vault import Vault
     from compartment import session
@@ -222,6 +305,73 @@ def test_capture_is_idempotent_on_repeated_writes(home, vault_path):
                                   vault_path=vault_path)
     assert first["stored"] is True and second["duplicate"] is True
     assert Vault.unlock(vault_path, passphrase=PASS).status()["organic_records"] == 1
+
+
+STAGING = """---
+name: staging-db
+description: staging database
+metadata:
+  type: project
+---
+The staging database runs Postgres {version} behind pgbouncer on port 6432.
+"""
+
+
+def test_capture_replaces_what_it_captured_from_the_same_file(home,
+                                                              vault_path):
+    """An edited memory file was stored as a new memory with nothing
+    retired. A small correction (a version number) was a near-duplicate of
+    the captured text, so it was dropped and search kept the old value; a
+    larger one was stored beside the obsolete version."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    session.store(vault_path, v._master)
+    v.lock()
+    note = home.memdir / "staging_db.md"
+
+    def capture(version):
+        note.write_text(STAGING.format(version=version), encoding="utf-8")
+        return claude_hooks.capture(io.StringIO(_payload(note)),
+                                    vault_path=vault_path)
+
+    first = capture(15)
+    assert first["stored"] is True
+    second = capture(16)
+    assert second["stored"] is True and second["id"] != first["id"], second
+    again = capture(16)                  # an unchanged file: a duplicate
+    assert again["duplicate"] is True and again["id"] == second["id"]
+
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    hits = [h["text"] for h in v2.search(
+        "Which Postgres version does staging run?", caller="t")["results"]]
+    assert any("Postgres 16" in t for t in hits), hits
+    assert not any("Postgres 15" in t for t in hits), hits
+    old = v2.get(first["id"], caller="t")            # history, by id
+    assert old["superseded_by"] == second["id"] and "Postgres 15" in old["text"]
+    assert claude_memory.file_tag(note) in v2.get(second["id"],
+                                                  caller="t")["tags"]
+    assert v2.status()["organic_records"] == 1
+
+
+def test_capture_replaces_what_the_importer_stored_from_the_same_file(
+        home, vault_path):
+    """The importer tags what it stores with the file it read, the way the
+    hook does, so an edit captured later replaces the imported record."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    note = home.memdir / "staging_db.md"
+    note.write_text(STAGING.format(version=15), encoding="utf-8")
+    imported = claude_memory.import_files(v, [note])["items"][0]["id"]
+    session.store(vault_path, v._master)
+    v.lock()
+    note.write_text(STAGING.format(version=16), encoding="utf-8")
+    res = claude_hooks.capture(io.StringIO(_payload(note)),
+                               vault_path=vault_path)
+    assert res["stored"] is True, res
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    assert v2.get(imported, caller="t")["superseded_by"] == res["id"]
 
 
 # ------------------------------------- the whole `integrate claude` path
@@ -376,3 +526,28 @@ def test_integrate_claude_defaults_no_hooks_to_false(monkeypatch):
 def test_bare_hook_has_a_handler_instead_of_crashing(monkeypatch):
     seen = _parsed(monkeypatch, "cmd_hook", ["hook"])
     assert seen["hook_cmd"] is None
+
+
+def test_integrate_claude_goes_on_past_a_claude_md_that_is_not_utf8(
+        home, vault_path, monkeypatch, capsys):
+    """One byte that is not UTF-8 in the user's own CLAUDE.md raised
+    UnicodeDecodeError, which the OSError handler did not catch: `integrate
+    claude` died after registering the servers, before importing the
+    existing memories and before the capture hook, and init reported
+    "could not connect Claude Code" for a registration that had happened."""
+    from compartment.vault import Vault
+    from compartment import session
+    v = Vault.create(vault_path, PASS, creator="t")
+    session.store(vault_path, v._master)
+    v.lock()
+    md = home.root / ".claude" / "CLAUDE.md"
+    md.write_bytes("Prefer the caf\xe9 wifi.\n".encode("cp1252"))
+    before = md.read_bytes()
+
+    _integrate(home, vault_path, monkeypatch)
+    out = capsys.readouterr().out
+    assert "could not update CLAUDE.md: not UTF-8" in out
+    assert md.read_bytes() == before                  # never rewritten
+    assert Vault.unlock(vault_path, passphrase=PASS).status()[
+        "organic_records"] == 1                        # the import ran
+    assert claude_hooks.is_installed() is True         # and the hook

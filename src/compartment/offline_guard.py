@@ -6,6 +6,9 @@ process aborts loudly. That is three doors, not one:
 
   1. Sockets. Creating an AF_INET/AF_INET6 socket raises. AF_UNIX and every
      other local family keep working, because local IPC is not networking.
+     So does socket.socketpair, which on Windows is two AF_INET sockets on
+     loopback and which asyncio's event loop needs, for the length of that
+     call and in that thread only.
   2. Name resolution. getaddrinfo, gethostbyname, gethostbyname_ex,
      gethostbyaddr, getnameinfo, getfqdn and create_connection raise for any
      host that is not already local. A DNS lookup needs no socket object at
@@ -42,6 +45,7 @@ import _socket
 
 _original_socket_new = socket.socket.__new__
 _real_raw_socket = _socket.socket
+_original_socketpair = socket.socketpair
 _INET_FAMILIES = (socket.AF_INET, socket.AF_INET6)
 
 _RESOLVERS = ("getaddrinfo", "gethostbyname", "gethostbyname_ex",
@@ -105,7 +109,7 @@ def _reject_lookup(host: object) -> None:
 
 def _reject_inet(family: object) -> None:
     fam = family if family not in (-1, None) else socket.AF_INET
-    if fam in _INET_FAMILIES:
+    if fam in _INET_FAMILIES and not getattr(_state, "socketpair", 0):
         raise _violation(
             "something attempted to create a network socket"
         )
@@ -151,6 +155,23 @@ class _GuardedRawSocket(metaclass=_RawSocketIdentity):
         # keep working.
         _reject_inet(family)
         _real_raw_socket.__init__(self, family, type, proto, fileno)
+
+
+def _guarded_socketpair(*args, **kwargs):
+    """socket.socketpair, let through.
+
+    Where _socket has no socketpair, which is Windows, socket.socketpair is
+    CPython's pure-Python fallback: two AF_INET sockets joined through a
+    listener it binds to loopback and closes before it returns. asyncio
+    builds every event loop's self-pipe from it, so refusing it kept
+    `compartment serve` from starting under the guard there. Allowed for the
+    length of this call and in this thread only, as numeric getnameinfo is;
+    every other AF_INET socket is still refused."""
+    _state.socketpair = getattr(_state, "socketpair", 0) + 1
+    try:
+        return _original_socketpair(*args, **kwargs)
+    finally:
+        _state.socketpair -= 1
 
 
 # ---------------------------------------------------------- resolver patches
@@ -258,6 +279,7 @@ def activate(*, seal: bool = False) -> None:
         _hook_installed = True
     socket.socket.__new__ = _guarded_new
     _socket.socket = _GuardedRawSocket
+    socket.socketpair = _guarded_socketpair
     for name, fn in _GUARDED_RESOLVERS.items():
         if name in _original_resolvers:
             setattr(socket, name, fn)
@@ -286,6 +308,7 @@ def deactivate() -> bool:
         return not _active
     socket.socket.__new__ = _original_socket_new
     _socket.socket = _real_raw_socket
+    socket.socketpair = _original_socketpair
     for name, fn in _original_resolvers.items():
         setattr(socket, name, fn)
     _active = False

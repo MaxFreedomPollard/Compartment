@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
+import signal
 import sys
 import threading
 import time
@@ -29,12 +31,17 @@ try:
     # rename. Import whichever this environment has, so a single wheel runs
     # under both majors and a distro that only carries one is not stranded.
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:                                     # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer
+    from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import __version__, gate, offline_guard, selftest
+from . import __version__, audit, gate, offline_guard, selftest, session
+from .acl import VaultConfig
 from .crypto import CryptoError, TamperError
+from .embed import DEFAULT_MODEL
+from .platforms import file_signature
 from .vault import (DATA_NOT_INSTRUCTIONS, Vault, VaultLockedError,
                     VaultStaleError, expiry_date, strip_provenance)
 
@@ -104,19 +111,109 @@ except TypeError:                                       # mcp 1.x
 _state: dict = {"vault": None, "path": None, "caller": "unknown",
                 "last_op": time.time(), "auto_lock_min": 30,
                 "retag_hours": 6, "retag_prune": False,
-                "last_retag": time.time()}
+                "last_retag": time.time(), "settings_sig": None,
+                "cred_sig": None, "cred_checked": 0.0}
+
+#: How often a server holding the key looks for its credential again, so
+#: that `compartment lock`, typed or pressed in the panel, reaches it too.
+CREDENTIAL_CHECK_SECONDS = 5
+
+
+def _read_settings() -> None:
+    """auto_lock_minutes, retag_interval_hours and retag_prune from the
+    vault config, when the file has changed since the last look.
+
+    Called whenever a vault is opened and by both loops before they use
+    them, so a server that started locked (every server started after a
+    restart) and a change made in the panel while a server runs both take
+    effect. A config that cannot be read keeps the values in use: it may
+    be half written at this instant, and the next look reads it again."""
+    try:
+        sig = file_signature(VaultConfig.path_for(_state["path"]))
+        if sig == _state["settings_sig"]:
+            return
+        settings = VaultConfig.load(_state["path"]).settings
+    except Exception:                                   # noqa: BLE001
+        return
+    _state["settings_sig"] = sig
+    try:
+        _state["auto_lock_min"] = int(settings.get("auto_lock_minutes", 30))
+    except (TypeError, ValueError):
+        # a hand-edited config can put anything in there, and an int()
+        # that raises here would kill `compartment serve` before it ever
+        # reaches mcp.run(). Fall back to the documented default.
+        print("compartment: auto_lock_minutes in the vault config is not a "
+              "number; using the default of 30 minutes",
+              file=sys.stderr, flush=True)
+        _state["auto_lock_min"] = 30
+    try:
+        _state["retag_hours"] = float(settings.get("retag_interval_hours", 6))
+        _state["retag_prune"] = bool(settings.get("retag_prune", False))
+    except (TypeError, ValueError):
+        # Same reasoning as auto_lock_minutes above: a hand-edited config
+        # must not be able to kill `compartment serve` before it starts.
+        print("compartment: retag_interval_hours in the vault config is "
+              "not a number; using the default of 6 hours",
+              file=sys.stderr, flush=True)
+        _state["retag_hours"] = 6
+
+
+def _credential_signature():
+    """session.watch_signature for this vault, or None if it cannot be
+    taken."""
+    try:
+        return session.watch_signature(_state["path"])
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _credential_gone(v: Vault) -> bool:
+    """Whether the credential this server opened the vault with has gone:
+    `compartment lock`, or the panel's Lock, cleared it.
+
+    Asked the way the panel's reader asks (vaultview.check_credential): at
+    most every CREDENTIAL_CHECK_SECONDS, and with a search only when the
+    credential's files say it may have changed. A look that fails says
+    nothing either way, since a credential file that could not be read is
+    not a lock, and a passphrase in the environment is standing intent."""
+    now = time.monotonic()
+    if now - _state["cred_checked"] < CREDENTIAL_CHECK_SECONDS:
+        return False
+    _state["cred_checked"] = now
+    sig = _credential_signature()
+    if sig is None or sig == _state["cred_sig"]:
+        return False
+    try:
+        found = Vault.find_credential(_state["path"])
+    except Exception:                                   # noqa: BLE001
+        return False                # could not tell; the next look asks again
+    if found is None or (found[1] is not None and found[1] != v._master):
+        return True
+    _state["cred_sig"] = sig
+    return False
 
 
 def _vault() -> Vault:
     v = _state["vault"]
+    if v is not None and not v._locked and _credential_gone(v):
+        # Lock closes the vault: in this process too, not only at the next
+        # idle auto-lock. Flushed and sealed as any lock is, so the reads it
+        # audited are kept; the call then fails as locked, below, the way
+        # it does in a fresh process.
+        try:
+            v.lock()
+        except Exception:                               # noqa: BLE001
+            _drop_key(v)            # lock() drops the key either way
+    stale = None
     if v is not None and not v._locked and v.is_stale():
         # another process (Hermes provider, CLI, another host) wrote the
         # vault - reload so we operate on current state
         _state["vault"] = None
-        v = None
+        stale, v = v, None
     if v is None or v._locked:
         # try silent re-unlock via keychain/env (user intent persists until
         # `compartment lock` clears the credential)
+        sig = _credential_signature()
         try:
             pw, key = Vault.resolve_credential(_state["path"])
         except CryptoError as exc:
@@ -145,7 +242,17 @@ def _vault() -> Vault:
             # keyfile. Each of those already names its own remedy, so surface
             # it unchanged instead of masking it.
             raise
+        # A reopen reloads the data, not the model: without the shared
+        # daemon (always on Windows) the next search built a new encoder,
+        # so the stale handle's goes on while the vault pins the same one.
+        emb = getattr(stale, "_embedder", None)
+        if (emb is not None
+                and emb.model_name == v.db.get_meta("model_name", DEFAULT_MODEL)
+                and emb.model_sha256 == v.db.get_meta("model_sha256")):
+            v._embedder = emb
         _state["vault"] = v
+        _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
+        _read_settings()
     _state["last_op"] = time.time()
     return v
 
@@ -171,19 +278,28 @@ def _autolock_loop() -> None:
     while True:
         try:
             time.sleep(30)
-            v = _state["vault"]
-            mins = _state["auto_lock_min"]
-            if v is not None and not v._locked and mins > 0:
-                if time.time() - _state["last_op"] > mins * 60:
-                    v.lock()
+            _read_settings()
+            # Under the tool gate, like a tool call: a call either finishes
+            # first, and the vault is not idle any more, or starts after the
+            # lock and reopens through _vault(). Without it, a call arriving
+            # while the lock saved took the open handle and found it locked.
+            with _toolgate:
+                v = _state["vault"]
+                mins = _state["auto_lock_min"]
+                if v is not None and not v._locked and mins > 0:
+                    if time.time() - _state["last_op"] > mins * 60:
+                        v.lock()
         except Exception as exc:                        # noqa: BLE001
             # lock() saves, and a save raises VaultStaleError when another
             # process wrote the vault. Letting that escape would end this
             # daemon thread and with it auto-lock for the rest of the process,
             # silently. Report it and keep looping. stdout is the MCP
-            # transport, so this has to go to stderr.
-            print(f"compartment: auto-lock failed, will retry: "
-                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            # transport, so this has to go to stderr. lock() drops the key
+            # whether or not its save worked, so the vault is locked; what
+            # the failed save loses is the audit rows only RAM held.
+            print(f"compartment: auto-locked the vault, but its unflushed "
+                  f"audit rows were not saved: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
 
 
 def _retag_loop() -> None:
@@ -201,12 +317,13 @@ def _retag_loop() -> None:
     future pass, silently."""
     from . import retag
     while True:
-        hours = _state["retag_hours"]
         # A short poll rather than one long sleep: the interval is read from
         # vault config, and a sleeping thread would ignore a change to it for
         # as long as the OLD interval, which is the one case where the setting
         # looks broken.
         time.sleep(300)
+        _read_settings()
+        hours = _state["retag_hours"]
         if not hours or hours <= 0:
             continue
         if time.time() - _state["last_retag"] < hours * 3600:
@@ -219,13 +336,19 @@ def _retag_loop() -> None:
             # takes about a second and a half per thousand records, and it
             # holds the same lock every memory tool takes, so doing it in one
             # piece would stall every search an agent made for the duration.
-            # Chunked, the longest any call can wait is one slice.
-            ids = retag.targets(v)
+            # Chunked, the longest any call can wait is one slice. The listing
+            # takes the gate too: it steps a SELECT on the connection every
+            # tool call uses, and a shred's VACUUM fails while one is open.
+            # Every slice is planned against one snapshot taken with it, so
+            # the pass gives what one whole-vault plan would.
+            with _toolgate:
+                ids = retag.targets(v)
+                ctx = retag.snapshot(v) if ids else None
             changed = added = removed = 0
             for i in range(0, len(ids), RETAG_CHUNK):
                 with _toolgate:
                     ch = retag.plan(v, prune=_state["retag_prune"],
-                                    only=ids[i:i + RETAG_CHUNK])
+                                    only=ids[i:i + RETAG_CHUNK], context=ctx)
                     changed += retag.apply(v, ch, caller=_state["caller"])
                     added += sum(len(c.added) for c in ch)
                     removed += sum(len(c.removed) for c in ch)
@@ -245,10 +368,12 @@ def _retag_loop() -> None:
             _state["last_retag"] = time.time()
 
 
-class MemoryToolError(RuntimeError):
+class MemoryToolError(ToolError, RuntimeError):
     """A tool call that failed. Raising rather than returning is what marks the
     result isError at the protocol level: a failure must not be indistinguishable
-    from a success."""
+    from a success. The SDK's ToolError is what carries the reason to the
+    model: mcp 2.x reports any other exception as "Error executing tool
+    <name>" alone."""
 
 
 def _fail(exc: Exception) -> MemoryToolError:
@@ -377,23 +502,33 @@ def memory_store(text: str, source: str, namespace: str | None = None,
     return json.dumps(out)
 
 
-def _prevalidate_facts(v: Vault, facts: list) -> None:
+def _prevalidate_facts(v: Vault, facts: list, namespace: str | None = None,
+                       start: int = 0) -> None:
     """Refuse a store_many batch whole, by index, before anything is written.
 
-    Covers everything Vault.store would refuse per fact - shape, kind,
-    expiry, supersede targets - because each store journals durably the
-    moment it runs, and a batch that fails at fact 3 of 6 with two already
-    on disk gives the model a picture of the vault that is simply wrong."""
+    Covers everything Vault.store would refuse per fact - namespace grant,
+    shape, kind, expiry, supersede targets - because each store journals
+    durably the moment it runs, and a batch that fails at fact 3 of 6 with
+    two already on disk gives the model a picture of the vault that is simply
+    wrong. Facts before `start` are already stored and are not looked at."""
     limit = int(v.config.settings.get("max_memory_chars",
                                       gate.DEFAULT_MAX_CHARS))
     claimed: dict[str, int] = {}
     for i, f in enumerate(facts):
+        if i < start:
+            continue
         if not isinstance(f, dict):
             raise MemoryToolError(
                 f"facts[{i}] must be an object with a 'text' field")
         text = (f.get("text") or "")
         if not isinstance(text, str) or not text.strip():
             raise MemoryToolError(f"facts[{i}] has no 'text'")
+        try:
+            ns = (f.get("namespace") or namespace
+                  or v.config.default_namespace(_state["caller"]))
+            v.config.check(_state["caller"], ns, write=True)
+        except CryptoError as exc:
+            raise MemoryToolError(f"facts[{i}]: {exc}") from None
         reason = gate.rejection(strip_provenance(text.strip()), limit)
         if reason:
             raise MemoryToolError(f"facts[{i}]: {reason}")
@@ -467,15 +602,19 @@ def memory_store_many(facts: list[dict], source: str,
         raise MemoryToolError("facts must be a non-empty list of objects, each "
                               "with at least a 'text' field")
 
+    out: list = []
+
     def _store_all(v):
         # The WHOLE batch is validated before any fact is stored. Each store
         # journals durably as it happens, so a fact refused halfway through
         # would leave a partial batch on disk while the caller is told the
         # call failed - the worst of both. A bad entry therefore refuses the
         # batch here, by index, with nothing written.
-        _prevalidate_facts(v, facts)
-        out = []
-        for i, f in enumerate(facts):
+        # A retry after another process wrote the vault (_op) resumes at the
+        # first fact not yet stored: the ones before it are on disk, with the
+        # results they returned, and validating them again would refuse them.
+        _prevalidate_facts(v, facts, namespace, start=len(out))
+        for f in facts[len(out):]:
             text = f["text"].strip()
             out.append(v.store(
                 text, caller=_state["caller"],
@@ -679,16 +818,20 @@ def memory_selftest() -> str:
 
 
 def _drop_key(v: Vault) -> None:
-    """Drop the master key from RAM and mark the vault locked.
+    """Drop the master key and the decrypted memories from RAM and mark the
+    vault locked.
 
-    What Vault.lock() does after its save succeeds, on its own: the panic path
-    needs it even when the save fails. Dropping the last reference is the whole
+    What Vault.lock() does after its save, on its own: the panic path needs it
+    even when lock() itself fails. Dropping the last reference is the whole
     of it. Scrubbing is not possible here: the key is immutable `bytes`, so
     zeroing a bytearray copy of it would leave the original untouched and put a
     second plaintext copy of the key on the heap on the way. Vault.lock() does
     the same thing for the same reason."""
     v._master = None
     v._locked = True
+    v.db.conn.close()
+    v.index = None
+    v._id_by_ikey = {}
 
 
 @mcp.tool(title="Lock the vault", annotations=ToolAnnotations(
@@ -706,11 +849,12 @@ def memory_lock() -> str:
         try:
             v.lock()
         except Exception as exc:                        # noqa: BLE001
-            # Vault.lock() saves BEFORE dropping the key, so a failed save (say
-            # VaultStaleError, another process wrote the vault) would otherwise
-            # leave the key in RAM and the vault unlocked - the exact opposite
-            # of what a panic lock is for. Losing an unflushed write is the
-            # smaller harm, and each write was already journaled to disk.
+            # Vault.lock() drops the key even when its save fails (say
+            # VaultStaleError, another process wrote the vault). A lock() that
+            # failed outright would still leave the key in RAM and the vault
+            # unlocked - the exact opposite of what a panic lock is for. Losing
+            # an unflushed write is the smaller harm, and each write was
+            # already journaled to disk.
             problems.append(f"flush failed, key dropped anyway: "
                             f"{type(exc).__name__}: {exc}")
             try:
@@ -762,12 +906,53 @@ def memory_unlock(passphrase: str) -> str:
         # same second factor the startup path uses: without it this tool can
         # never open a two-factor vault, however explicitly it was enabled
         kf = Vault.load_keyfile_hint(_state["path"])
+        sig = _credential_signature()
         _state["vault"] = Vault.unlock(_state["path"], passphrase=passphrase,
                                        keyfile=kf)
+        # This open used no stored credential, so finding none is no lock.
+        _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
         _state["last_op"] = time.time()
         return json.dumps({"locked": False, "note": DATA_NOT_INSTRUCTIONS})
     except CryptoError as exc:
         raise _fail(exc) from exc
+
+
+def _save_on_exit() -> None:
+    """Save once as the server stops, when the session left audit rows that
+    only RAM holds: a read is audited in RAM and reaches disk with a save,
+    and without this one every search and get of a session that ended
+    before the auto-lock was lost."""
+    try:
+        with _toolgate:
+            v = _state["vault"]
+            if v is None or v._locked:
+                return
+            anchored = audit.read_anchor(v.db.conn)
+            if anchored is not None and audit.count(v.db.conn) <= anchored[1]:
+                return
+            v.save()
+    except VaultStaleError:
+        # Another process wrote the vault since this handle read it, and a
+        # stale handle cannot save. Its unsaved rows go with it.
+        pass
+    except Exception as exc:                            # noqa: BLE001
+        print(f"compartment: could not save on exit: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+def _stop(signum, frame) -> None:
+    """SIGTERM: the save a closed stdin gets, then the end SIGTERM always
+    meant. Not SystemExit raised through the event loop: anyio tells its
+    idle worker threads to stop only when the server's task ends, and the
+    interpreter waits for them on the way out, so a server ended that way
+    never exited. A second SIGTERM during the save is ignored: the process
+    ends as soon as the save is done."""
+    signal.signal(signum, signal.SIG_IGN)
+    try:
+        _save_on_exit()
+    finally:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -780,38 +965,23 @@ def main(argv: list[str] | None = None) -> None:
         offline_guard.activate()
     _state["path"] = args.vault
     _state["caller"] = args.caller
+    sig = _credential_signature()
     try:
         pw, key = Vault.resolve_credential(args.vault)
         kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
         _state["vault"] = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
                                        keyfile=kf)
-        try:
-            _state["auto_lock_min"] = int(
-                _state["vault"].config.settings.get("auto_lock_minutes", 30))
-        except (TypeError, ValueError):
-            # a hand-edited config can put anything in there, and an int()
-            # that raises here would kill `compartment serve` before it ever
-            # reaches mcp.run(). Fall back to the documented default.
-            print("compartment: auto_lock_minutes in the vault config is not a "
-                  "number; using the default of 30 minutes",
-                  file=sys.stderr, flush=True)
-            _state["auto_lock_min"] = 30
-        try:
-            settings = _state["vault"].config.settings
-            _state["retag_hours"] = float(settings.get("retag_interval_hours", 6))
-            _state["retag_prune"] = bool(settings.get("retag_prune", False))
-        except (TypeError, ValueError):
-            # Same reasoning as auto_lock_minutes above: a hand-edited config
-            # must not be able to kill `compartment serve` before it starts.
-            print("compartment: retag_interval_hours in the vault config is "
-                  "not a number; using the default of 6 hours",
-                  file=sys.stderr, flush=True)
-            _state["retag_hours"] = 6
+        _state["cred_sig"], _state["cred_checked"] = sig, time.monotonic()
+        _read_settings()
     except CryptoError:
         _state["vault"] = None  # start locked; tools will say so
     threading.Thread(target=_autolock_loop, daemon=True).start()
     threading.Thread(target=_retag_loop, daemon=True).start()
-    mcp.run()  # stdio transport
+    signal.signal(signal.SIGTERM, _stop)
+    try:
+        mcp.run()  # stdio transport
+    finally:
+        _save_on_exit()
 
 
 if __name__ == "__main__":

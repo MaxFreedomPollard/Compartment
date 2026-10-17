@@ -52,7 +52,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import __version__
+from . import __version__, offline_guard
 from .embed import (CHUNK_STRIDE, CHUNK_WINDOW, DEFAULT_MODEL, MAX_CHUNKS,
                     Embedder, ModelError, model_info)
 from .home import env
@@ -79,15 +79,36 @@ DEFAULT_IDLE = 300
 
 SOCKET_NAME = "embed.sock"
 
-#: One request line. A `store_many` of a few hundred long records is well
-#: under a megabyte; this is a sanity bound against garbage on the socket,
-#: not a limit anyone should meet.
+#: One line on the socket, a request or a reply: the daemon reads requests
+#: and the client reads replies under this bound. A `store_many` of a few
+#: hundred long records is well under a megabyte, and embed_passages goes in
+#: parts of _PASSAGES_PER_CALL texts, a 16 MiB reply; this is a sanity bound
+#: against garbage on the socket, not a limit anyone should meet.
 _MAX_LINE = 64 * 1024 * 1024
+
+#: Texts per embed_passages round trip. A reply carries 2 KB a text (384
+#: float32 in base64) and a client refuses a line over _MAX_LINE, so a long
+#: list, a whole import, goes in parts: 8,192 texts make a 16 MiB reply.
+_PASSAGES_PER_CALL = 8192
 
 #: AF_UNIX paths are short: 104 bytes on macOS and the BSDs, 108 on Linux,
 #: including the terminating NUL. A path over this goes to the temp
 #: directory instead.
 _MAX_SOCKET_PATH = 100
+
+#: How long a client waits for a daemon to answer its hello. A daemon that
+#: is alive but not serving (suspended with Ctrl-Z, stuck under a debugger)
+#: still completes connect() through the kernel backlog and never closes the
+#: connection, so a reply that is not coming is only noticed by a limit.
+_HELLO_TIMEOUT = 5.0
+
+#: How long a request may take: this, plus _TIMEOUT_PER_TEXT for each text
+#: of an embed_passages. The slowest single requests, a first one that loads
+#: the model and a record of 64 windows, take about 4 s on a current laptop,
+#: and a 448-token window about 50 ms. A request past its limit is retried
+#: once and then embedded by a model of the caller's own.
+_REQUEST_TIMEOUT = 60.0
+_TIMEOUT_PER_TEXT = 1.0
 
 
 class Unavailable(RuntimeError):
@@ -133,7 +154,9 @@ def socket_path() -> Path:
     session directory beside the unlock credential, the one private
     directory Compartment already keeps. A home directory deep enough to push
     that past the AF_UNIX limit gets a per-user file in the temp directory,
-    named after the home so two homes never share one.
+    named after the home so two homes never share one. When that is too long
+    as well no daemon can listen for this home, and the session path comes
+    back, so nothing is left in the shared temp directory for it.
     """
     explicit = env("EMBED_SOCKET")
     if explicit:
@@ -144,7 +167,8 @@ def socket_path() -> Path:
         return p
     tag = base64.urlsafe_b64encode(
         str(Path.home()).encode("utf-8")).decode("ascii").rstrip("=")[-12:]
-    return Path(tempfile.gettempdir()) / f"compartment-{os.getuid()}-{tag}.sock"
+    q = Path(tempfile.gettempdir()) / f"compartment-{os.getuid()}-{tag}.sock"
+    return q if _fits(q) else p
 
 
 def _fits(p: Path) -> bool:
@@ -291,30 +315,22 @@ class _Daemon:
         return True
 
     def _cleanup(self) -> None:
-        try:
-            if self._listener is not None:
-                self._listener.close()
-        except OSError:
-            pass
-        # Only remove the socket if it is still ours: a replacement daemon
-        # may already be listening on a new file at the same path.
-        try:
-            if self._inode is not None and os.stat(self.path).st_ino == self._inode:
-                self.path.unlink()
-        except OSError:
-            pass
-        if self._lock_fd is not None:
-            try:
-                os.ftruncate(self._lock_fd, 0)
-                os.close(self._lock_fd)         # releases the flock
-            except OSError:
-                pass
+        self._shutdown()
 
     def _shutdown(self) -> None:
         """Stop accepting: the socket file goes first, so a client that
         arrives during the last milliseconds finds nothing and starts a
-        fresh daemon rather than connecting to one that is leaving."""
+        fresh daemon rather than connecting to one that is leaving, and the
+        lock straight after it, so that the fresh daemon can take over at
+        once. Only the first call does anything: once the lock is let go a
+        replacement may be listening on a new file at the same path, whose
+        inode can be the one this daemon's file had, and nothing here may
+        touch it."""
         self._stop.set()
+        with self._state:
+            fd, self._lock_fd = self._lock_fd, None
+        if fd is None:
+            return
         try:
             if self._inode is not None and os.stat(self.path).st_ino == self._inode:
                 self.path.unlink()
@@ -325,6 +341,11 @@ class _Daemon:
                 self._listener.close()
             except OSError:
                 pass
+        try:
+            os.ftruncate(fd, 0)
+            os.close(fd)                    # releases the flock
+        except OSError:
+            pass
 
     def _watch(self) -> None:
         """Exit when idle, and when the socket file is no longer ours: a
@@ -405,7 +426,8 @@ class _Daemon:
                 info = model_info(model)
                 return {"ok": True, "protocol": PROTOCOL, "version": __version__,
                         "pid": os.getpid(), "model": model,
-                        "model_sha256": info.sha256, "dim": info.dim}
+                        "model_sha256": info.sha256, "dim": info.dim,
+                        "offline_guard": offline_guard.is_active()}
             if op == "embed_query":
                 return {"ok": True,
                         "vec": _pack(self._embedder(model).embed_query(req["text"]))}
@@ -506,14 +528,14 @@ def _connect(path: Path, timeout: float = 5.0) -> socket.socket | None:
     except OSError:
         s.close()
         return None
-    # Requests block for as long as a batch takes to embed; a dead daemon
-    # closes the connection and readline returns EOF, which is the signal
-    # the client acts on. No timeout here.
-    s.settimeout(None)
+    # The timeout stays on. A dead daemon closes the connection, but one
+    # that is stopped or wedged never does, and without a limit the reader
+    # waits for it forever. RemoteEmbedder sets its own limits on the hello
+    # and on each request.
     return s
 
 
-def _spawn(path: Path, idle: int) -> None:
+def _spawn(path: Path, idle: int) -> subprocess.Popen:
     """Start the daemon detached: its own session, so neither the MCP
     client's process-group cleanup nor a closing terminal takes it down,
     and no inherited stdio, because stdout of an MCP server IS the
@@ -528,9 +550,15 @@ def _spawn(path: Path, idle: int) -> None:
     env_ = dict(os.environ)
     env_["PYTHONPATH"] = here + (os.pathsep + env_["PYTHONPATH"]
                                  if env_.get("PYTHONPATH") else "")
-    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True,
-                     close_fds=True, cwd=str(Path.home()), env=env_)
+    # `--assert-offline` turns the guard on in this process only. The daemon
+    # is where the model runs, so it gets the guard too, from the
+    # environment, where the package seals it.
+    if offline_guard.is_active():
+        env_["COMPARTMENT_ASSERT_OFFLINE"] = "1"
+    return subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            close_fds=True, cwd=str(Path.home()), env=env_)
 
 
 def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
@@ -562,7 +590,7 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
         if s is not None:
             return s
         try:
-            _spawn(path, idle)
+            child = _spawn(path, idle)
         except OSError:
             return None
         while time.monotonic() < deadline:
@@ -570,6 +598,10 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
             s = _connect(path)
             if s is not None:
                 return s
+            if child.poll() is not None:
+                # It exited without listening: it could not bind the
+                # socket, or another daemon holds the lock.
+                return None
         return None
     finally:
         try:
@@ -622,7 +654,9 @@ class RemoteEmbedder:
             return None
         try:
             return cls(model_name, path or socket_path(), spawn=spawn, wait=wait)
-        except Unavailable:
+        except (Unavailable, OSError):
+            # OSError: the session directory or the lock files cannot be
+            # made here (a read-only home), which is no daemon either.
             return None
 
     # -- properties the vault reports --------------------------------------
@@ -643,6 +677,7 @@ class RemoteEmbedder:
                 raise Unavailable(f"no embedding daemon at {self._path}")
             self._sock, self._rfile, self._wfile = s, s.makefile("rb"), s.makefile("wb")
             try:
+                s.settimeout(_HELLO_TIMEOUT)
                 _write(self._wfile, {"op": "hello", "model": self.model_name})
                 hello = _read(self._rfile)
             except (OSError, ValueError) as exc:
@@ -665,6 +700,11 @@ class RemoteEmbedder:
             if hello.get("model_sha256") != self.model_sha256:
                 self._drop()
                 raise Unavailable("daemon serves a different model file")
+            if offline_guard.is_active() and not hello.get("offline_guard"):
+                # A daemon an unguarded process started: every text this
+                # process embeds would go to one free to use the network.
+                self._drop()
+                raise Unavailable("daemon is not offline-guarded")
             self._pid = int(hello.get("pid") or 0) or None
             return
         raise Unavailable("could not replace the older daemon")
@@ -676,12 +716,17 @@ class RemoteEmbedder:
         except (OSError, ValueError):
             pass
         self._drop()
+        # Gone means its socket no longer answers and its lock is free. A
+        # daemon of an earlier release keeps the lock for up to a second
+        # after its socket file goes, and one started before then finds it
+        # held and exits.
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             probe = _connect(self._path, timeout=0.5)
-            if probe is None:
+            if probe is not None:
+                probe.close()
+            elif _locked_pid(self._path) is None:
                 return
-            probe.close()
             time.sleep(0.05)
 
     def _drop(self) -> None:
@@ -700,11 +745,13 @@ class RemoteEmbedder:
 
     def _call(self, op: str, **fields) -> dict:
         """One round trip, reconnecting once if the daemon went away."""
+        limit = _REQUEST_TIMEOUT + _TIMEOUT_PER_TEXT * len(fields.get("texts", ()))
         with self._lock:
             for attempt in (1, 2):
                 try:
                     if self._sock is None:
                         self._open()
+                    self._sock.settimeout(limit)
                     _write(self._wfile, {"op": op, "model": self.model_name, **fields})
                     resp = _read(self._rfile)
                     if resp is None:
@@ -718,7 +765,12 @@ class RemoteEmbedder:
                     return resp
                 if resp.get("kind") == "ModelError":
                     raise ModelError(resp.get("error", "model error"))
-                raise Unavailable(resp.get("error", "daemon error"))
+                # The daemon is there and answered: what failed is this
+                # request, and its input would fail the same way in a model
+                # of this process's own.
+                raise ValueError(f"the shared embedding process failed: "
+                                 f"{resp.get('kind', 'error')}: "
+                                 f"{resp.get('error', '')}")
         raise Unavailable("unreachable")
 
     def _fallback(self) -> Embedder:
@@ -742,8 +794,11 @@ class RemoteEmbedder:
             return np.zeros((0, self.dim), np.float32)
         if self._local is None:
             try:
-                return _unpack(self._call("embed_passages", texts=texts,
-                                          batch=int(batch))["vecs"])
+                return np.concatenate([
+                    _unpack(self._call("embed_passages",
+                                       texts=texts[i:i + _PASSAGES_PER_CALL],
+                                       batch=int(batch))["vecs"])
+                    for i in range(0, len(texts), _PASSAGES_PER_CALL)])
             except Unavailable:
                 pass
         return self._fallback().embed_passages(texts, batch=batch)

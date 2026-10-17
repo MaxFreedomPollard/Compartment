@@ -24,7 +24,9 @@ Design notes:
 """
 from __future__ import annotations
 
+import csv
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,14 +35,17 @@ from pathlib import Path
 
 from .home import env, home
 
-from .menubar import (AUTO_LOCK_CHOICES, INTEGRATION_TARGETS, RECENT_COUNT,
+from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
+                      RECENT_COUNT,
                       acquire_instance_lock, auto_lock_label,
                       change_passphrase, claim_first_run, create_vault,
-                      default_vault, integrate, lock_vault,
+                      default_vault, integrate, lock_holder_pid, lock_vault,
                       open_dashboard, stop_dashboard,
-                      release_instance_lock, self_check,
-                      set_setting, starter_note, summarise, unlock_vault,
+                      offers_settings, release_instance_lock,
+                      run_in_background, self_check,
+                      starter_note, summarise, unlock_vault,
                       PanelState)
+from .menubar import quit_running as _stop_lock_holder
 
 PANEL_WIDTH = 360
 PANEL_MAX_HEIGHT = 640
@@ -114,18 +119,20 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
         if state["locked"] is False:
             rows.append(("change", "Change password"))
     s = state["settings"]
-    rows.append(("heading", "SETTINGS"))
-    rows.append(("toggle:capture_hook",
-                 "Create memories automatically: "
-                 f"{'on' if s['capture_hook'] else 'off'}"))
-    rows.append(("toggle:search_starter_facts",
-                 f"Search starter facts: "
-                 f"{'on' if s['search_starter_facts'] else 'off'}"))
-    rows.append(("toggle:expire_memories",
-                 f"Forget memories when they expire: "
-                 f"{'on' if s.get('expire_memories', True) else 'off'}"))
-    rows.append(("choice:auto_lock_minutes",
-                 f"Auto-lock: {auto_lock_label(s['auto_lock_minutes'])}"))
+    # Not before there is a vault: see offers_settings.
+    if offers_settings(state):
+        rows.append(("heading", "SETTINGS"))
+        rows.append(("toggle:capture_hook",
+                     "Create memories automatically: "
+                     f"{'on' if s['capture_hook'] else 'off'}"))
+        rows.append(("toggle:search_starter_facts",
+                     f"Search starter facts: "
+                     f"{'on' if s['search_starter_facts'] else 'off'}"))
+        rows.append(("toggle:expire_memories",
+                     f"Forget memories when they expire: "
+                     f"{'on' if s.get('expire_memories', True) else 'off'}"))
+        rows.append(("choice:auto_lock_minutes",
+                     f"Auto-lock: {auto_lock_label(s['auto_lock_minutes'])}"))
     # Installing leaves you with a vault that nothing is using until an agent
     # is wired to it. One button per agent, so that step is not a terminal
     # command someone has to know about.
@@ -887,6 +894,14 @@ def run(vault: str | None = None, show: bool = False,
     states.refresh(include_vault=False)               # local files: instant
     states.on_change = lambda: root.after(0, landed)
 
+    def off_ui(work, then) -> None:
+        """work() on a thread of its own, then then(its result) back on Tk's
+        thread: see run_in_background. A click's handler runs on Tk's
+        thread, and one that waited on the CLI there froze the panel - and,
+        through after(), the tray icon's menu - for as long as the CLI took.
+        """
+        run_in_background(work, lambda out: root.after(0, lambda: then(out)))
+
     def _content(frame, state) -> None:
         """Everything the panel shows. Packs into `frame`, never sizes it -
         deciding how tall the window gets is build()'s job, below."""
@@ -910,12 +925,19 @@ def run(vault: str | None = None, show: bool = False,
             new.focus_set()
 
             def do_change(*_):
-                ok, note = change_passphrase(vault_path, new.get(), rep.get())
+                first, again = new.get(), rep.get()
                 new.delete(0, "end")          # never leave one on screen
                 rep.delete(0, "end")
-                panel["changing"] = not ok
-                panel["change_note"] = note
-                refresh()
+
+                def changed(out):
+                    ok, note = ((False, "could not change the passphrase: "
+                                        f"{out}")
+                                if isinstance(out, Exception) else out)
+                    panel["changing"] = not ok
+                    panel["change_note"] = note
+                    refresh()
+                off_ui(lambda: change_passphrase(vault_path, first, again),
+                       changed)
 
             new.bind("<Return>", do_change)
             rep.bind("<Return>", do_change)
@@ -971,18 +993,16 @@ def run(vault: str | None = None, show: bool = False,
                 panel["create_note"] = "Creating the vault…"
                 refresh()
 
-                def work():
-                    try:
-                        _ok, note = create_vault(vault_path, pw, pw)
-                    except Exception as exc:      # noqa: BLE001
-                        note = f"could not create the vault: {exc}"
+                def created(out):
                     panel["creating"] = False
-                    panel["create_note"] = note
+                    panel["create_note"] = (
+                        f"could not create the vault: {out}"
+                        if isinstance(out, Exception) else out[1])
                     if os.path.exists(vault_path):
                         states.mark(exists=True, locked=None, checking=True,
                                     error=None)
                     refresh()
-                (panel.get("win") or root).after(50, work)
+                off_ui(lambda: create_vault(vault_path, pw, pw), created)
 
             new_pw.bind("<Return>", do_create)
             new_rep.bind("<Return>", do_create)
@@ -1006,12 +1026,17 @@ def run(vault: str | None = None, show: bool = False,
             entry.focus_set()
 
             def do_unlock(*_):
-                ok, note = unlock_vault(vault_path, entry.get())
+                pw = entry.get()
                 entry.delete(0, "end")        # never leave it on screen
-                panel["note"] = None if ok else note
-                if ok:
-                    states.mark(locked=False, checking=True, error=None)
-                refresh()
+
+                def unlocked(out):
+                    ok, note = ((False, f"could not unlock: {out}")
+                                if isinstance(out, Exception) else out)
+                    panel["note"] = None if ok else note
+                    if ok:
+                        states.mark(locked=False, checking=True, error=None)
+                    refresh()
+                off_ui(lambda: unlock_vault(vault_path, pw), unlocked)
 
             entry.bind("<Return>", do_unlock)
             ttk.Button(unlock_row, text="Unlock",
@@ -1023,46 +1048,53 @@ def run(vault: str | None = None, show: bool = False,
             ttk.Label(frame, text="Stays unlocked until restart or Lock",
                       foreground="#666").pack(anchor="w")
 
-        ttk.Separator(frame).pack(fill="x", pady=10)
-        ttk.Label(frame, text="SETTINGS",
-                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        # Not before there is a vault: see offers_settings.
+        if offers_settings(state):
+            ttk.Separator(frame).pack(fill="x", pady=10)
+            ttk.Label(frame, text="SETTINGS",
+                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
 
-        hook = tk.BooleanVar(value=s["capture_hook"])
-        starter = tk.BooleanVar(value=s["search_starter_facts"])
-        expiring = tk.BooleanVar(value=s.get("expire_memories", True))
+            hook = tk.BooleanVar(value=s["capture_hook"])
+            starter = tk.BooleanVar(value=s["search_starter_facts"])
+            expiring = tk.BooleanVar(value=s.get("expire_memories", True))
 
-        def toggle(key, var):
-            states.set_settings(set_setting(vault_path, key, bool(var.get())))
-            refresh()
+            def toggle(key, var):
+                # One that could not be saved says why; a refresh now would
+                # read the vault again and clear the reason off the panel.
+                if states.change_setting(key, bool(var.get())):
+                    refresh()
+                else:
+                    redraw()
 
-        ttk.Checkbutton(frame, text="Create memories automatically",
-                        variable=hook,
-                        command=lambda: toggle("capture_hook", hook)
-                        ).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(frame, text="Search starter facts", variable=starter,
-                        command=lambda: toggle("search_starter_facts", starter)
-                        ).pack(anchor="w")
-        ttk.Checkbutton(frame, text="Forget memories when they expire",
-                        variable=expiring,
-                        command=lambda: toggle("expire_memories", expiring)
-                        ).pack(anchor="w")
+            ttk.Checkbutton(frame, text="Create memories automatically",
+                            variable=hook,
+                            command=lambda: toggle("capture_hook", hook)
+                            ).pack(anchor="w", pady=(6, 0))
+            ttk.Checkbutton(frame, text="Search starter facts", variable=starter,
+                            command=lambda: toggle("search_starter_facts", starter)
+                            ).pack(anchor="w")
+            ttk.Checkbutton(frame, text="Forget memories when they expire",
+                            variable=expiring,
+                            command=lambda: toggle("expire_memories", expiring)
+                            ).pack(anchor="w")
 
-        row = ttk.Frame(frame)
-        row.pack(fill="x", pady=(8, 0))
-        ttk.Label(row, text="Auto-lock").pack(side="left")
-        choice = tk.StringVar(value=auto_lock_label(s["auto_lock_minutes"]))
+            row = ttk.Frame(frame)
+            row.pack(fill="x", pady=(8, 0))
+            ttk.Label(row, text="Auto-lock").pack(side="left")
+            choice = tk.StringVar(value=auto_lock_label(s["auto_lock_minutes"]))
 
-        def set_lock(label):
-            for m in AUTO_LOCK_CHOICES:
-                if auto_lock_label(m) == label:
-                    states.set_settings(set_setting(vault_path,
-                                                    "auto_lock_minutes", m))
-                    break
-            refresh()
+            def set_lock(label):
+                for m in AUTO_LOCK_CHOICES:
+                    if auto_lock_label(m) == label:
+                        if not states.change_setting("auto_lock_minutes", m):
+                            redraw()              # keep the reason on screen
+                            return
+                        break
+                refresh()
 
-        ttk.OptionMenu(row, choice, choice.get(),
-                       *[auto_lock_label(m) for m in AUTO_LOCK_CHOICES],
-                       command=set_lock).pack(side="right")
+            ttk.OptionMenu(row, choice, choice.get(),
+                           *[auto_lock_label(m) for m in AUTO_LOCK_CHOICES],
+                           command=set_lock).pack(side="right")
 
         ttk.Separator(frame).pack(fill="x", pady=10)
         ttk.Label(frame, text="CONNECT AN AGENT",
@@ -1081,15 +1113,13 @@ def run(vault: str | None = None, show: bool = False,
             panel["connect_note"] = f"Connecting {name}…"
             refresh()
 
-            def work():
-                try:
-                    _ok, note = integrate(vault_path, target)
-                except Exception as exc:        # noqa: BLE001
-                    note = f"could not connect: {exc}"
+            def connected(out):
                 panel["connect_busy"] = None
-                panel["connect_note"] = note
+                panel["connect_note"] = (f"could not connect: {out}"
+                                         if isinstance(out, Exception)
+                                         else out[1])
                 refresh()             # and the ticks, once that config is read
-            (panel.get("win") or root).after(50, work)
+            off_ui(lambda: integrate(vault_path, target), connected)
 
         wired = state.get("integrations") or {}
         connect_row = ttk.Frame(frame)
@@ -1143,10 +1173,11 @@ def run(vault: str | None = None, show: bool = False,
         # every state. The rest waits for a definite "unlocked".
         if state["exists"] and state["locked"] is not True:
             ttk.Button(buttons, text="Lock now",
-                       command=lambda: (states.lock(
-                                            lambda: lock_vault(vault_path)),
-                                        panel.update(note=None,
-                                                     changing=False), refresh())
+                       command=lambda: off_ui(
+                           lambda: states.lock(lambda: lock_vault(vault_path)),
+                           lambda _out: (panel.update(note=None,
+                                                      changing=False),
+                                         refresh()))
                        ).pack(side="left", padx=6)
         if state["exists"] and state["locked"] is False:
             if not panel.get("changing"):
@@ -1304,10 +1335,11 @@ def run(vault: str | None = None, show: bool = False,
                 pystray.MenuItem("Open Compartment", from_tray(show_panel),
                                  default=True),
                 pystray.MenuItem("Lock now",
-                                 from_tray(lambda: (states.lock(
-                                     lambda: lock_vault(vault_path)),
-                                                    panel.update(note=None),
-                                                    refresh()))),
+                                 from_tray(lambda: off_ui(
+                                     lambda: states.lock(
+                                         lambda: lock_vault(vault_path)),
+                                     lambda _out: (panel.update(note=None),
+                                                   refresh())))),
                 pystray.MenuItem("Open dashboard",
                                  from_tray(lambda: open_dashboard(vault_path))),
                 pystray.Menu.SEPARATOR,
@@ -1330,34 +1362,54 @@ def run(vault: str | None = None, show: bool = False,
     return 0
 
 
+#: Every process on Windows with the command line that started it, as CSV.
+_WINDOWS_PROCESSES = ("Get-CimInstance Win32_Process | Select-Object "
+                      "ProcessId, ParentProcessId, CommandLine | "
+                      "ConvertTo-Csv -NoTypeInformation")
+
+#: A Windows command line that is the panel: the CLI, then its subcommand.
+_WINDOWS_APP = re.compile(r"compartment.*\s(menubar|panel|tray)(\s|$)",
+                          re.IGNORECASE)
+
+
 def running_pids() -> list[int]:
     """Every other panel copy on this machine.
 
-    Windows answers through tasklist. It used to answer with an empty list,
-    which is worse than not asking: every caller reads that as "nothing is
-    running", so the install waited fifteen seconds for an app that was
-    already up and then started a second one. A check that can never succeed
-    is not a check.
+    Windows answers from each process's command line. It used to answer with
+    an empty list, which is worse than not asking: every caller reads that as
+    "nothing is running", so the install waited fifteen seconds for an app
+    that was already up and then started a second one. A check that can
+    never succeed is not a check. Nor is one that always succeeds: by image
+    name, which is what tasklist went by, every console script is a
+    compartment.exe - each agent's MCP server, and the launcher of the very
+    update asking - so the app was "running" whenever any agent was. This
+    process and its launcher are never counted.
     """
     if sys.platform == "win32":
         try:
             out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq compartment.exe",
-                 "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=30).stdout
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 _WINDOWS_PROCESSES],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30).stdout
         except (OSError, subprocess.SubprocessError):
             return []
-        me, pids = os.getpid(), []
-        for line in (out or "").splitlines():
-            parts = [p.strip('" ') for p in line.split('","')]
-            # tasklist says "INFO: No tasks are running..." on no match, and
-            # that line has no second field to misread as a pid.
-            if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) != me:
-                pids.append(int(parts[1]))
+        mine, pids = {os.getpid(), os.getppid()}, []
+        # Anything that is not a row - the header, a message instead of a
+        # table - has no pid in its first field to misread.
+        for row in csv.reader((out or "").splitlines()):
+            if (len(row) > 2 and row[0].isdigit()
+                    and int(row[0]) not in mine
+                    and _WINDOWS_APP.search(row[2])):
+                pids.append(int(row[0]))
         return pids
+    # The app's own command line and this user's processes, as on macOS:
+    # see menubar.APP_COMMAND.
+    uid = getattr(os, "getuid", None)
     try:
         out = subprocess.run(
-            ["pgrep", "-f", "compartment.*(panel|tray|menubar)"],
+            ["pgrep", *(["-u", str(uid())] if uid else []), "-f",
+             APP_COMMAND],
             capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
         return []
@@ -1373,8 +1425,9 @@ def running_pids() -> list[int]:
     return pids
 
 
-def quit_running(timeout: float = 10.0) -> bool:
-    """Stop a running panel before an update or uninstall replaces it.
+def quit_running(vault: str | None = None, timeout: float = 10.0) -> bool:
+    """Stop the panel running for this vault before an update or uninstall
+    replaces it.
 
     Reports whether the app actually went, not whether a signal was sent.
     The caller's next move is to start the replacement, and it must not do
@@ -1383,8 +1436,15 @@ def quit_running(timeout: float = 10.0) -> bool:
     while looking at the build it was meant to replace.
     """
     if sys.platform == "win32":
+        # The one process this vault's lock names, and only while it is
+        # still the panel: Windows soon gives a dead process's pid to another.
+        # `taskkill /IM compartment.exe` also stopped every agent's MCP server
+        # and the launcher of the update or uninstall running this.
+        pid = lock_holder_pid(vault or default_vault())
+        if pid is None or pid not in running_pids():
+            return False
         try:
-            r = subprocess.run(["taskkill", "/F", "/IM", "compartment.exe"],
+            r = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                capture_output=True, timeout=30)
         except (OSError, subprocess.SubprocessError):
             return False
@@ -1392,21 +1452,9 @@ def quit_running(timeout: float = 10.0) -> bool:
         # stop anything - it is nothing to stop. Anything else that is not
         # zero means the copy is still there.
         return r.returncode == 0
-    import signal
-    pids = running_pids()
-    if not pids:
-        return False
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not running_pids():
-            return True
-        time.sleep(0.1)
-    return not running_pids()
+    # Only the process this vault's lock names, as on macOS: signalling
+    # every pgrep match took an editor or a pager open on systray.py with it.
+    return _stop_lock_holder(vault, timeout)
 
 
 __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",

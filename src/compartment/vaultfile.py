@@ -77,6 +77,34 @@ class VaultHeader:
 
     @staticmethod
     def from_json(d: dict) -> "VaultHeader":
+        # The header is plaintext, so a damaged or edited one has to fail
+        # here, as a corrupt header, and not as a TypeError deep inside an
+        # unlock that no caller recognises. Only the fields this build relies
+        # on are checked; unknown ones stay allowed (FORMAT.md section 3).
+        def is_int(x):
+            return isinstance(x, int) and not isinstance(x, bool)
+        problem = None
+        if not isinstance(d, dict):
+            problem = "it is not a JSON object"
+        elif not isinstance(d.get("vault_id"), str):
+            problem = "vault_id is not a string"
+        elif "created" not in d:
+            problem = "created is missing"
+        elif not is_int(d.get("payload_len")) or d["payload_len"] < 0:
+            problem = "payload_len is not a non-negative integer"
+        elif not isinstance(d.get("keyslots"), list) or \
+                not all(isinstance(s, dict) for s in d["keyslots"]):
+            problem = "keyslots is not a list of objects"
+        elif not isinstance(d.get("model"), dict) or \
+                not is_int(d["model"].get("dim")) or d["model"]["dim"] < 1:
+            problem = "model.dim is not a positive integer"
+        elif not isinstance(d.get("extra", {}), dict):
+            problem = "extra is not an object"
+        elif "wire" in d.get("extra", {}) and not is_int(d["extra"]["wire"]):
+            problem = "extra.wire is not an integer"
+        if problem:
+            raise VaultFormatError(
+                f"Vault header is corrupt (modified or damaged): {problem}")
         return VaultHeader(
             vault_id=d["vault_id"],
             created=d["created"],
@@ -169,10 +197,10 @@ class LoadedVaultFile:
     #: decrypting the whole payload again.
     journal_start: int = 0
     journal_end: int = 0
-    #: (mtime in ns, size) of the file as it was read - taken before the read,
-    #: from the same open file. What an opener compares against to learn that
-    #: another process wrote while it was reading. See Vault.unlock.
-    disk_state: tuple[int, int] | None = None
+    #: (inode, size, mtime in ns) of the file as it was read - taken before the
+    #: read, from the same open file. What an opener compares against to learn
+    #: that another process wrote while it was reading. See Vault.unlock.
+    disk_state: tuple[int, int, int] | None = None
 
 
 def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
@@ -236,7 +264,7 @@ def read_vault_file(path: str) -> LoadedVaultFile:
         st = os.fstat(f.fileno())
         raw = f.read()
     loaded = parse_vault_bytes(raw, path)
-    loaded.disk_state = (st.st_mtime_ns, st.st_size)
+    loaded.disk_state = (st.st_ino, st.st_size, st.st_mtime_ns)
     return loaded
 
 
@@ -324,32 +352,53 @@ def write_vault_file(
     # the vault's mode after the rename below, so creating it at the umask
     # default (commonly 0644) reopens the vault to every local account on
     # every save, including one the user had chmod'd to 0600.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, VAULT_MODE)
-    with os.fdopen(fd, "wb") as f:
-        f.write(MAGIC)
-        f.write(struct.pack(">H", FORMAT_VERSION))
-        f.write(struct.pack(">I", len(hjson)))
-        f.write(hjson)
-        f.write(payload_ct)
-        f.flush()
-        os.fsync(f.fileno())
-    # O_CREAT only sets the mode when it actually creates the file, so a temp
-    # left behind by an earlier run keeps its old mode. Set it either way.
-    os.chmod(tmp, VAULT_MODE)
-    _atomic_replace(tmp, path)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, VAULT_MODE)
+        with os.fdopen(fd, "wb") as f:
+            f.write(MAGIC)
+            f.write(struct.pack(">H", FORMAT_VERSION))
+            f.write(struct.pack(">I", len(hjson)))
+            f.write(hjson)
+            f.write(payload_ct)
+            f.flush()
+            os.fsync(f.fileno())
+        # O_CREAT only sets the mode when it actually creates the file, so a temp
+        # left behind by an earlier run keeps its old mode. Set it either way.
+        os.chmod(tmp, VAULT_MODE)
+        _atomic_replace(tmp, path)
+    except BaseException:
+        # The vault itself is untouched on every way this can fail, so the
+        # copy is all there is to clean up: a full sealed copy when the
+        # replace was refused, part of one on a full disk.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, master_key: bytes) -> None:
-    ct = crypto.seal(
+    append_journal_entries(path, header, seq, [entry], master_key)
+
+
+def append_journal_entries(path: str, header: VaultHeader, seq: int,
+                           entries: list[dict], master_key: bytes) -> None:
+    """Append entries at journal positions seq, seq+1, ... with one fsync.
+
+    All are sealed before anything is written, and each is framed exactly as
+    on its own, in the order given, so a crash part-way keeps the complete
+    entries before the torn one."""
+    cts = [crypto.seal(
         master_key,
         crypto.canonical_json(entry),
-        aad=_journal_aad(header.vault_id, seq),
-    )
-    length = struct.pack(">I", len(ct))
+        aad=_journal_aad(header.vault_id, seq + i),
+    ) for i, entry in enumerate(entries)]
     with open(path, "ab") as f:
-        f.write(length)
-        f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
-        f.write(ct)
+        for ct in cts:
+            length = struct.pack(">I", len(ct))
+            f.write(length)
+            f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
+            f.write(ct)
         f.flush()
         os.fsync(f.fileno())
 

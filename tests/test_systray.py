@@ -99,6 +99,47 @@ def test_no_vault_does_not_tell_you_to_unlock_one():
     assert not any("unlock" in t for k, t in rows if k == "empty")
 
 
+def test_no_vault_offers_no_settings_to_lose():
+    """The switches change the vault's config file, and Create writes a fresh
+    one over it: a choice made beside the Create button was undone by it,
+    with nothing said. So they wait for the vault. A locked vault keeps
+    them, since the config needs no passphrase."""
+    from compartment import menubar
+    rows = systray.panel_rows(_state(exists=False, recent=[]))
+    assert ("heading", "SETTINGS") not in rows
+    assert not [k for k in _kinds(rows) if k.startswith(("toggle:", "choice:"))]
+    locked = _kinds(systray.panel_rows(_state(locked=True, recent=[])))
+    assert "toggle:search_starter_facts" in locked
+    # The rule both panels draw by, the macOS one included.
+    assert menubar.offers_settings({"exists": False}) is False
+    assert menubar.offers_settings({"exists": True, "locked": True}) is True
+    assert menubar.offers_settings({"exists": True, "locked": None}) is True
+
+
+def test_both_panels_ask_before_drawing_the_switches():
+    """The macOS and Tk front ends cannot be drawn in CI, so this checks they
+    build their SETTINGS block only under the shared rule."""
+    import inspect
+    from compartment import menubar
+    assert "if offers_settings(st):" in inspect.getsource(menubar.run)
+    assert "if offers_settings(state):" in inspect.getsource(systray.run)
+    assert "if offers_settings(state):" in inspect.getsource(
+        systray.panel_rows)
+
+
+def test_the_macos_hook_switch_says_when_it_could_not_be_saved():
+    """toggleHook_ passed over any error from installing or removing the
+    capture hook, so the switch moved and nothing said why, where every
+    other switch, on both panels, reports it through change_setting. The
+    macOS front end cannot be drawn in CI, so this reads it."""
+    import inspect
+    from compartment import menubar
+    src = inspect.getsource(menubar.run)
+    hook = src.split("def toggleHook_(", 1)[1].split("\n        def ", 1)[0]
+    assert 'self.panel.change_setting("capture_hook"' in hook
+    assert "except" not in hook
+
+
 def test_missing_vault_and_errors_are_shown_not_raised():
     rows = systray.panel_rows(_state(exists=False, recent=[],
                                      error="no vault yet - run: compartment init"))

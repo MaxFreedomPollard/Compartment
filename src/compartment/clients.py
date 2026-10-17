@@ -34,10 +34,13 @@ put it, which is all the auto-writing ones do anyway, minus the typing.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
+import secrets
 import shutil
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -134,8 +137,12 @@ class Client:
 
         The config file itself often does not exist until the user adds their
         first server, so the directory it would live in is the real signal.
+        A bare filename (LibreChat, Open WebUI) has no directory of its own:
+        its parent is wherever the command runs, so only the file counts.
         """
         p = self.config_path()
+        if not p.is_absolute():
+            return p.exists()
         return p.exists() or p.parent.is_dir()
 
 
@@ -322,34 +329,63 @@ def _read_json(path: Path) -> dict:
 
     An empty or missing file is a fresh start. Anything that will not parse
     is somebody's work that we do not understand, and the only safe move is
-    to stop.
+    to stop. So is JSON that is not an object (null, a list).
     """
     if not path.exists():
         return {}
     try:
         text = path.read_text(encoding="utf-8").strip()
-        return json.loads(text) if text else {}
+        data = json.loads(text) if text else {}
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         raise ValueError(f"{path} is not valid JSON ({exc}); "
                          "refusing to touch it") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
+    return data
 
 
-def _backup(path: Path) -> Path | None:
-    """A byte-exact copy beside the original, before we change it."""
-    if not path.exists():
-        return None
-    dest = path.with_suffix(path.suffix + BACKUP_SUFFIX)
-    shutil.copy2(path, dest)
-    return dest
+def write_config(path: Path, text: str) -> Path | None:
+    """Replace a file the user or another program owns with `text`. Returns
+    the byte-exact backup taken first, beside it, or None when there was no
+    file yet.
 
-
-def _write_atomic(path: Path, text: str) -> None:
-    """Write via a temporary file, so an interrupted write cannot truncate
-    somebody's configuration."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    The text goes to a temporary file beside the file itself, flushed to
+    disk, and is renamed over it, so a write cut short (a full disk, a kill)
+    leaves the old file whole instead of truncated. A symlink is followed:
+    the file it points at is replaced and the link stays a link. The file
+    keeps its permission bits, and one this cannot write, or that sits in a
+    directory this cannot write, is refused before anything is touched, as
+    writing it in place would be.
+    """
+    from .vaultfile import _atomic_replace
+    path = Path(path)
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    if not (os.access(target.parent, os.W_OK)
+            and (not existed or os.access(target, os.W_OK))):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES),
+                              str(target))
+    backup = None
+    if existed:
+        backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
+        shutil.copy2(target, backup)
+    tmp = target.with_name(f"{target.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            if existed and os.name != "nt":
+                shutil.copymode(target, tmp)    # before any text is in it
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        _atomic_replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return backup
 
 
 def _toml_value(v) -> str:
@@ -367,6 +403,81 @@ def _toml_block(entry: dict) -> str:
     return "\n".join(lines)
 
 
+def _toml_has_ours(client: Client, text: str) -> bool:
+    """Whether a TOML document defines our server, as TOML reads it rather
+    than by the look of a line: a commented-out header is not one, a header
+    with a comment after it is. Raises tomllib.TOMLDecodeError when the
+    document does not parse."""
+    servers = tomllib.loads(text).get(client.root)
+    return isinstance(servers, dict) and NAME in servers
+
+
+def _toml_statements(text: str) -> list[tuple[str, dict]] | None:
+    """The document as its statements, each with what it parses to alone:
+    a table header, a key and its value however many lines the value spans,
+    a comment or a blank line. A line joins the statement before it until
+    that parses, so a line inside a multi-line string or array is never
+    taken for a header. None when the text ends inside a statement."""
+    out, buf = [], ""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        buf += line + ("\n" if i < len(lines) - 1 else "")
+        if not buf:
+            continue
+        try:
+            out.append((buf, tomllib.loads(buf)))
+        except tomllib.TOMLDecodeError:
+            continue
+        buf = ""
+    return None if buf else out
+
+
+def _toml_header(statement: tuple[str, dict]) -> tuple[str, ...] | None:
+    """The key path of a table header statement, None for anything else."""
+    text, node = statement
+    if not text.lstrip().startswith("["):
+        return None
+    path = []
+    while isinstance(node, dict) and len(node) == 1:
+        key, node = next(iter(node.items()))
+        path.append(key)
+    return tuple(path)
+
+
+def _toml_without_ours(client: Client, text: str) -> str | None:
+    """`text` with our table taken out: its header, every key in it, values
+    over several lines included, and every [<root>.compartment.*] table
+    under it. Comments and blank lines inside it go with it; the ones after
+    its last key stay, since a comment just above the next table documents
+    that table. Nothing else changes. None when that would not parse, or
+    would still hold our server (an inline table, dotted keys), which is
+    the check that matters more than any of the rest."""
+    stmts = _toml_statements(text)
+    if stmts is None:
+        return None
+    ours = (client.root, NAME)
+    heads = [_toml_header(s) for s in stmts]
+    keep = [True] * len(stmts)
+    i = 0
+    while i < len(stmts):
+        if heads[i] is None or heads[i][:2] != ours:
+            i += 1
+            continue
+        last, j = i, i + 1
+        while j < len(stmts) and (heads[j] is None or heads[j][:2] == ours):
+            if stmts[j][0].strip() and not stmts[j][0].lstrip().startswith("#"):
+                last = j
+            j += 1
+        for k in range(i, last + 1):
+            keep[k] = False
+        i = j
+    out = "".join(s for (s, _), k in zip(stmts, keep) if k)
+    try:
+        return None if _toml_has_ours(client, out) else out
+    except tomllib.TOMLDecodeError:
+        return None
+
+
 def is_registered(client: Client, path: Path | None = None) -> bool:
     """Whether compartment is already in this client's server list."""
     p = Path(path) if path else client.config_path()
@@ -374,8 +485,8 @@ def is_registered(client: Client, path: Path | None = None) -> bool:
         return False
     if client.kind == "toml":
         try:
-            return f"[{client.root}.{NAME}]" in p.read_text(encoding="utf-8")
-        except OSError:
+            return _toml_has_ours(client, p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):    # unreadable, not UTF-8, not TOML
             return False
     if client.kind != "json":
         return False
@@ -414,14 +525,19 @@ def register(client: Client, vault: str, caller: str | None = None,
         out["snippet"] = snippet(client, vault, caller)
         return out
 
-    out["backup"] = str(_backup(p) or "") or None
     servers = data.setdefault(client.root, {})
     if not isinstance(servers, dict):
         out["reason"] = f"{client.root} in {p} is not an object"
         out["snippet"] = snippet(client, vault, caller)
         return out
     servers[NAME] = entry                       # refresh rather than duplicate
-    _write_atomic(p, json.dumps(data, indent=2) + "\n")
+    try:
+        backup = write_config(p, json.dumps(data, indent=2) + "\n")
+    except OSError as exc:
+        out["reason"] = f"cannot write {p} ({exc})"
+        out["snippet"] = snippet(client, vault, caller)
+        return out
+    out["backup"] = str(backup) if backup else None
     out["written"] = True
     return out
 
@@ -432,24 +548,35 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
     So the whole edit is appending one table, which leaves every comment,
     every ordering and every hand-made formatting decision in the file
     exactly as its owner left it. Re-registering rewrites nothing: an entry
-    that is already there is reported, not duplicated.
+    that is already there is reported, not duplicated. A file that does
+    not parse is refused, as a JSON one is.
     """
     block = _toml_block(entry)
     try:
         existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        registered = _toml_has_ours(client, existing)
     except (OSError, UnicodeDecodeError) as exc:
         out["reason"] = f"cannot read {p} ({exc})"
         out["snippet"] = block
         return out
+    except tomllib.TOMLDecodeError as exc:
+        out["reason"] = f"{p} is not valid TOML ({exc}); refusing to touch it"
+        out["snippet"] = block
+        return out
 
-    if f"[{client.root}.{NAME}]" in existing:
+    if registered:
         out["reason"] = "already registered; left as it is"
         out["snippet"] = block
         return out
 
-    out["backup"] = str(_backup(p) or "") or None
     joiner = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
-    _write_atomic(p, existing + joiner + block + "\n")
+    try:
+        backup = write_config(p, existing + joiner + block + "\n")
+    except OSError as exc:
+        out["reason"] = f"cannot write {p} ({exc})"
+        out["snippet"] = block
+        return out
+    out["backup"] = str(backup) if backup else None
     out["written"] = True
     return out
 
@@ -461,23 +588,16 @@ def unregister(client: Client, path: Path | None = None) -> bool:
         return False
 
     if client.kind == "toml":
-        text = p.read_text(encoding="utf-8")
-        header = f"[{client.root}.{NAME}]"
-        if header not in text:
+        try:
+            text = p.read_text(encoding="utf-8")
+            if not _toml_has_ours(client, text):
+                return False
+        except ValueError:          # not UTF-8 or not TOML: not ours to guess at
             return False
-        # A TOML table runs until the next table header or the end of file.
-        out_lines, dropping = [], False
-        for line in text.splitlines(keepends=True):
-            stripped = line.strip()
-            if stripped == header:
-                dropping = True
-                continue
-            if dropping and stripped.startswith("["):
-                dropping = False
-            if not dropping:
-                out_lines.append(line)
-        _backup(p)
-        _write_atomic(p, "".join(out_lines))
+        rest = _toml_without_ours(client, text)
+        if rest is None:            # left for the user to take out by hand
+            return False
+        write_config(p, rest)
         return True
 
     try:
@@ -488,9 +608,8 @@ def unregister(client: Client, path: Path | None = None) -> bool:
     if not isinstance(servers, dict) or NAME not in servers:
         return False
     del servers[NAME]
-    _backup(p)
     data[client.root] = servers
-    _write_atomic(p, json.dumps(data, indent=2) + "\n")
+    write_config(p, json.dumps(data, indent=2) + "\n")
     return True
 
 
@@ -512,4 +631,4 @@ def status() -> list[dict]:
 
 __all__ = ["NAME", "CLIENTS", "ALIASES", "Client", "resolve", "executable",
            "server_args", "entry_for", "snippet", "is_registered", "register",
-           "unregister", "detected", "status"]
+           "unregister", "detected", "status", "write_config"]

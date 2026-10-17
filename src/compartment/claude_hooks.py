@@ -20,11 +20,10 @@ from __future__ import annotations
 from .home import env, home
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
-from . import claude_memory
+from . import claude_memory, clients
 
 SETTINGS = Path.home() / ".claude" / "settings.json"
 # Identifies OUR entries. Both tokens, not one literal string: the command
@@ -44,8 +43,12 @@ def _entry(command: str) -> dict:
 
 
 def hook_command(compartment_bin: str | None = None, vault: str | None = None) -> str:
-    """The exact shell command the hook runs."""
-    exe = compartment_bin or shutil.which("compartment") or "compartment"
+    """The exact shell command the hook runs.
+
+    The compartment beside this interpreter, as every MCP registration
+    names it: a bare name only works where `compartment` is on the PATH
+    Claude Code's shell gets, and the .app install puts it on none."""
+    exe = compartment_bin or clients.executable()
     if " " in exe:
         exe = f'"{exe}"'
     vault_part = f' --vault "{vault}"' if vault else ""
@@ -72,9 +75,12 @@ def _read(path: Path) -> dict:
         return {}
     try:
         text = path.read_text(encoding="utf-8").strip()
-        return json.loads(text) if text else {}
+        data = json.loads(text) if text else {}
     except (json.JSONDecodeError, OSError):
         raise ValueError(f"{path} is not valid JSON; refusing to touch it")
+    if not isinstance(data, dict):          # null, a list: not settings
+        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
+    return data
 
 
 def install(compartment_bin: str | None = None, vault: str | None = None,
@@ -82,10 +88,6 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
     """Add (or refresh) compartment's capture hook. Never removes anyone else's."""
     path = Path(settings) if settings else SETTINGS
     data = _read(path)                                  # raises on malformed
-    backup = None
-    if path.exists():
-        backup = path.with_suffix(path.suffix + ".compartment-backup")
-        shutil.copy2(path, backup)
 
     hooks = data.setdefault("hooks", {})
     groups = hooks.setdefault(EVENT, [])
@@ -101,10 +103,9 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
     kept.append(_entry(hook_command(compartment_bin, vault)))
     hooks[EVENT] = kept
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # Backed up first, replaced whole, and through a symlink to the file
+    # it points at, so settings kept in dotfiles stay there.
+    backup = clients.write_config(path, json.dumps(data, indent=2) + "\n")
     return {"settings": str(path), "backup": str(backup) if backup else None,
             "event": EVENT, "matcher": MATCHER}
 
@@ -129,11 +130,7 @@ def uninstall(settings: Path | None = None) -> bool:
     # Same care as install(): keep a recovery copy, then swap the new file in
     # atomically. A crash or a full disk mid-write must not cost the user every
     # other hook, permission and env var in this file.
-    if path.exists():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".compartment-backup"))
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    clients.write_config(path, json.dumps(data, indent=2) + "\n")
     return True
 
 
@@ -162,6 +159,25 @@ def is_memory_file(path: str | Path) -> bool:
         return False
     parts = [x.lower() for x in p.parts]
     return "memory" in parts and ".claude" in parts
+
+
+def _earlier_versions(v, tag: str, ns: str, text: str) -> list[str] | None:
+    """The live records in `ns` stored from the memory file `tag` names,
+    when any of them says something other than `text`: what a capture of
+    `text` replaces. None when there are none, or when all of them already
+    say it. Found by the tags each record was born with, which retagging
+    never changes."""
+    from .vault import strip_provenance
+    claim = strip_provenance(text.strip())
+    ids, changed = [], False
+    for row in v.db.conn.execute(
+            "SELECT * FROM records WHERE superseded_by IS NULL AND pack IS NULL"
+            " AND ns = ? AND instr(tags_origin, ?) > 0", (ns, json.dumps(tag))):
+        if tag in json.loads(row["tags_origin"]):
+            ids.append(row["id"])
+            changed = changed or strip_provenance(
+                v.db.decrypt_text(row, v._master)) != claim
+    return ids if changed else None
 
 
 def capture(stream=None, vault_path: str | None = None) -> dict:
@@ -199,13 +215,26 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
         # A locked vault is the user's choice, not an error worth shouting
         # about mid-edit; the next import-claude sweeps up whatever was missed.
         return {"stored": False, "reason": "vault locked"}
+    except Exception as exc:                            # noqa: BLE001
+        # A config cut short, a vault file this cannot read: no reason to
+        # fail the edit either.
+        return {"stored": False, "reason": f"vault unavailable: {exc}"}
+    caller = "claude-code-hook"
     try:
         rec = claude_memory.parse(p)
-        out = v.store(rec["text"], caller="claude-code-hook",
-                      tags=rec["tags"], importance=rec["importance"],
+        tag = claude_memory.file_tag(p)
+        # An edited file replaces what was stored from it, so a small
+        # correction is not taken for a near-duplicate of the old text and a
+        # large one does not sit beside it. An unchanged file is the
+        # duplicate it always was.
+        replaces = _earlier_versions(v, tag, v.config.default_namespace(caller),
+                                     rec["text"])
+        out = v.store(rec["text"], caller=caller,
+                      tags=rec["tags"] + [tag], importance=rec["importance"],
                       # Captured from the conversation as it happened, which is
                       # the truthful method for anything the user said.
                       source="from chat",
+                      supersedes=replaces,
                       # Verbatim capture: a hook cannot rephrase the user's
                       # turn to satisfy the shape gate, and dropping a consent
                       # decision because it ran long would be worse than a

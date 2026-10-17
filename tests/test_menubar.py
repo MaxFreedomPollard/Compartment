@@ -187,6 +187,32 @@ def test_a_creation_that_cannot_run_the_cli_says_so(tmp_path, monkeypatch):
     assert ok is False and "could not run the CLI" in msg
 
 
+def test_a_creation_that_ran_out_of_time_after_making_the_vault_says_so(
+        tmp_path, monkeypatch):
+    """init writes the vault and stores its session in its first seconds,
+    then connects the agents installed here, which waits on their own
+    programs. When that ran past the 900 s cap, the panel said "could not
+    create the vault" about a vault that existed and was open."""
+    vault = tmp_path / "v.vault"
+
+    def slow(args, **kw):
+        vault.write_bytes(b"made")
+        raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+    monkeypatch.setattr(subprocess, "run", slow)
+    ok, msg = menubar.create_vault(str(vault), PASS, PASS)
+    assert ok is True, msg
+    assert "Vault created" in msg and "did not finish" in msg
+
+
+def test_a_creation_that_ran_out_of_time_with_no_vault_still_fails(
+        tmp_path, monkeypatch):
+    def slow(args, **kw):
+        raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+    monkeypatch.setattr(subprocess, "run", slow)
+    ok, msg = menubar.create_vault(str(tmp_path / "v.vault"), PASS, PASS)
+    assert ok is False and "timed out" in msg
+
+
 def test_stderr_noise_cannot_hide_the_vault_status(monkeypatch):
     """A CLI child that answers on stdout while a library warns on stderr is
     still an answer. onnxruntime's device discovery does exactly that on
@@ -578,3 +604,44 @@ def test_a_dash_that_does_not_start_gives_no_url(monkeypatch, tmp_path):
     menubar._DASH.update(proc=None, url=None)
     assert menubar.open_dashboard(str(tmp_path / "x.vault")) is None
     assert menubar._DASH["proc"] is None
+
+
+def test_a_dash_that_never_says_where_it_serves_is_given_up_on(monkeypatch,
+                                                                tmp_path):
+    """The Dashboard button waits on the UI thread for the line `compartment
+    dash` prints first. A dash that never printed it froze the whole app for
+    as long as it ran, Quit included, and a force quit of the frozen app left
+    it serving. The wait is bounded, and the child goes with it."""
+    import sys
+    import threading
+    from compartment import menubar
+    script = ("import time\n"
+              "print('starting up', flush=True)\n"     # not the announcement
+              "time.sleep(30)\n")
+    monkeypatch.setattr(menubar, "_cli_argv",
+                        lambda: [sys.executable, "-c", script])
+    monkeypatch.setattr(menubar, "DASH_START_TIMEOUT", 0.5, raising=False)
+    started = []
+    real_popen = menubar.subprocess.Popen
+
+    def recording(*a, **k):
+        started.append(real_popen(*a, **k))
+        return started[-1]
+    monkeypatch.setattr(menubar.subprocess, "Popen", recording)
+    menubar._DASH.update(proc=None, url=None)
+    out = {}
+    clicked = threading.Thread(target=lambda: out.update(
+        url=menubar.open_dashboard(str(tmp_path / "x.vault"))), daemon=True)
+    clicked.start()
+    clicked.join(timeout=15)
+    try:
+        assert not clicked.is_alive(), "the panel was still waiting on dash"
+        assert out["url"] is None
+        assert started and started[0].poll() is not None, "dash left running"
+        assert menubar._DASH["proc"] is None
+    finally:
+        for p in started:
+            if p.poll() is None:
+                p.kill()
+            p.wait(timeout=10)
+        clicked.join(timeout=10)

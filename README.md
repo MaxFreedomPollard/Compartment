@@ -141,8 +141,8 @@ you learn that the client wants figures before conclusions. The agent tags
 the memory `northwind`. Two years later the same client, now called Harbour,
 hires you again, and the agent searches with the tag `harbour`. The memory
 is still true, but a tag filter cannot find it. So a background pass gives
-every memory the tags its nearest neighbours in embedding space carry,
-weighted by similarity: as Harbour memories accumulate near that old one, it
+every memory the tags its nearest neighbours in embedding space were stored
+with, weighted by similarity: as Harbour memories accumulate near that old one, it
 picks up the `harbour` tag. Two more signals run alongside: tags that almost
 always occur together imply each other, and an existing tag whose phrase
 appears in a memory's text is attached. The pass writes only tags, never
@@ -564,8 +564,9 @@ Registers the MCP server with the Claude Code CLI (user scope, all
 projects), imports the memories Claude Code has already written to its
 memory files (copy-only and repeatable; `--no-import` skips it), installs the
 capture hook (`--no-hooks` skips it), installs the `/compartmentalize` skill,
-writes a managed block into `CLAUDE.md`, and prints the Claude Desktop config
-block. The server also describes itself in the MCP handshake, telling the
+writes a managed block into `CLAUDE.md`, and, when Claude Desktop is
+installed, registers the server in Claude Desktop's config file, backed up
+first. The server also describes itself in the MCP handshake, telling the
 model to recall before answering and to store durable facts, credentials,
 names and decisions, so Claude uses Compartment as its memory without any
 manual instruction.

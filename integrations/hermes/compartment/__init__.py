@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from agent.memory_provider import MemoryProvider
@@ -38,6 +39,9 @@ _NAMESPACE = "hermes"
 _PREFETCH_TOP_K = 4
 _PREFETCH_MIN_COSINE = 0.45
 _TURN_CHAR_LIMIT = 700
+#: How often an open vault's stored credential is looked for again, so that
+#: `compartment lock`, typed or pressed in the panel, reaches this provider.
+_CREDENTIAL_CHECK_SECONDS = 5
 
 
 def _vault_path() -> str:
@@ -56,12 +60,24 @@ def _vault_path() -> str:
     return str(current / "memory.vault")
 
 
+def _credential_signature():
+    """compartment's session.watch_signature for the vault, or None when it
+    cannot be taken: an engine older than 4.11.0 does not have it."""
+    try:
+        from compartment import session
+        return session.watch_signature(_vault_path())
+    except Exception:
+        return None
+
+
 class CompartmentMemoryProvider(MemoryProvider):
     """Encrypted, fully offline vector memory (Compartment vault)."""
 
     def __init__(self):
         self._vault = None
         self._session_id = ""
+        self._cred_sig = None
+        self._cred_checked = 0.0
 
     # -- identity / availability -------------------------------------------
 
@@ -90,13 +106,47 @@ class CompartmentMemoryProvider(MemoryProvider):
 
     # -- lifecycle ----------------------------------------------------------
 
+    def _credential_gone(self, v) -> bool:
+        """Whether the credential the vault was opened with has gone:
+        `compartment lock`, or the panel's Lock, cleared it. Looked for at
+        most every _CREDENTIAL_CHECK_SECONDS, and searched for only when its
+        files have changed. A look that fails says nothing (a credential
+        that could not be read is not a lock), and a passphrase in the
+        environment is standing intent."""
+        now = time.monotonic()
+        if now - self._cred_checked < _CREDENTIAL_CHECK_SECONDS:
+            return False
+        self._cred_checked = now
+        sig = _credential_signature()
+        if sig is None or sig == self._cred_sig:
+            return False
+        try:
+            from compartment.vault import Vault
+            found = Vault.find_credential(_vault_path())
+        except Exception:
+            return False
+        if found is None or (found[1] is not None and found[1] != v._master):
+            return True
+        self._cred_sig = sig
+        return False
+
     def _open(self):
         from compartment.vault import Vault
-        if self._vault is not None and not self._vault._locked \
-                and not self._vault.is_stale():
-            return self._vault
+        v = self._vault
+        if v is not None and not v._locked and self._credential_gone(v):
+            # Lock closes the vault here too. lock() drops the key whether
+            # or not its save works.
+            try:
+                v.lock()
+            except Exception as exc:
+                logger.warning("compartment: locking after the credential "
+                               "was cleared: %s", exc)
+        if v is not None and not v._locked and not v.is_stale():
+            return v
+        sig = _credential_signature()
         pw, key = Vault.resolve_credential(_vault_path())
         self._vault = Vault.unlock(_vault_path(), passphrase=pw, raw_key=key)
+        self._cred_sig, self._cred_checked = sig, time.monotonic()
         return self._vault
 
     def initialize(self, session_id: str, **kwargs) -> None:

@@ -87,6 +87,7 @@ from pathlib import Path
 from . import crypto, wire
 from .crypto import CryptoError, TamperError
 from .platforms import IS_WINDOWS, boot_time, file_signature, machine_id
+from .vaultfile import _atomic_replace
 
 # Session file format. Anything else on disk is not ours and is discarded:
 # a credential can only ever be opened by the boot that wrote it, so there is
@@ -249,6 +250,18 @@ def _posix_secret(name: str, create: bool) -> bytes | None:
             if secret is not None:
                 return secret
         if time.monotonic() > deadline:
+            if state == "pending":
+                # Still unwritten after all that time: its creator died
+                # between sizing it and writing it, and it would stay this
+                # way until a restart, failing every unlock and lookup. No
+                # credential can depend on it (store() keys one only with a
+                # secret that was written), so it goes, as at a restart.
+                _posix_forget(name)
+                if not create:
+                    return None
+                secret = _posix_create(name)
+                if secret is not None:
+                    return secret
             raise CryptoError(
                 f"Timed out waiting for another process to finish creating "
                 f"this boot's secret ({name}).")
@@ -464,19 +477,36 @@ def watch_signature(vault_path: str) -> tuple:
 
 
 def _write_private(p: Path, text: str) -> None:
-    """Create the file 0600 from the start.
+    """Create the file 0600 from the start, and replace the old one whole.
 
     Not write_text-then-chmod: that publishes the file at whatever the umask
     allows and narrows it afterwards, and anything reading in between wins.
-    The fchmod then covers a file that already existed with a wider mode, and
-    a umask that would strip owner-write out of the create mode."""
-    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    The fchmod then covers a umask that would strip owner-write out of the
+    create mode, and a credential that already existed with a wider mode is
+    replaced by this file, mode and all.
+
+    Not in place either: a get() that read between the truncate and the
+    write found an empty file, took it for a dead credential and deleted it,
+    so `compartment unlock` reported success with nothing stored. Written
+    beside it and renamed over it, the credential is the old one or the new
+    one, whole, and a write that fails leaves the old one as it was."""
+    tmp = p.with_name(f"{p.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        if hasattr(os, "fchmod"):        # POSIX; on Windows the ACL is used
-            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        os.write(fd, text.encode("utf-8"))
-    finally:
-        os.close(fd)
+        try:
+            if hasattr(os, "fchmod"):        # POSIX; on Windows the ACL is used
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            os.write(fd, text.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _atomic_replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _discard(p: Path) -> None:

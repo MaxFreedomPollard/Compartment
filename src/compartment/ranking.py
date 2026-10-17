@@ -141,6 +141,7 @@ from __future__ import annotations
 import math
 import re
 import time
+import unicodedata
 
 # --- reading a cosine as a probability ---------------------------------------
 # Below the floor a match is noise; above the ceiling it is as certain as this
@@ -272,12 +273,18 @@ def p_from_cosine(cos: float | None) -> float:
 # denominator. A raw `in` test then never credits it, and ending a question
 # with a question mark halved the lexical evidence for a perfect match.
 # The same test also matched inside longer words, so "key" scored full
-# conclusive-literal-evidence against "my keyboard is loud".
+# conclusive-literal-evidence against "my keyboard is loud". The tokenizer
+# folds accents away too, so "Zurich" counts the memory about "Zürich" in
+# the denominator, and coverage has to credit it in the numerator.
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def _tokens(s: str) -> list[str]:
-    """Alphanumeric runs, lowercased: how FTS5's unicode61 tokenizer splits."""
+    """Alphanumeric runs, accents folded, lowercased: how FTS5's unicode61
+    tokenizer splits."""
+    if not s.isascii():
+        s = "".join(c for c in unicodedata.normalize("NFKD", s)
+                    if not unicodedata.combining(c))
     return _TOKEN_RE.findall(s.lower())
 
 
@@ -372,7 +379,10 @@ def prior(importance: float, created: float, now: float | None = None,
     `now`, `kind` and `affirmed` stay in the signature for the opinion
     branch, whose recency runs from the last re-affirmation on the shorter,
     heavier opinion constants above."""
-    centred = 2.0 * float(importance) - 1.0        # 0.5 default -> exactly 0
+    # 0.5 default -> exactly 0. Clamped to the 0..1 the weight is built for,
+    # which only the server's tools enforce on the way in: past it a record
+    # stored at 50 outranked every match and one at -3 was never found.
+    centred = 2.0 * min(1.0, max(0.0, float(importance))) - 1.0
     if kind == "opinion":
         now = time.time() if now is None else now
         ref = float(affirmed or created)

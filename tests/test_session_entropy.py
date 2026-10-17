@@ -12,6 +12,7 @@ Windows) and are never written to any filesystem. These tests hold both ends
 of that: the public values must be useless without the secret, and the secret
 must genuinely die with the boot.
 """
+import errno
 import hashlib
 import os
 import pathlib
@@ -228,6 +229,61 @@ def test_a_read_error_does_not_destroy_a_valid_credential(monkeypatch):
     assert session.get(VAULT) == KEY
 
 
+class _OsWith:
+    """The session module's `os`, with one function replaced."""
+
+    def __init__(self, **replaced):
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+def test_a_lookup_during_an_unlock_never_deletes_the_credential(
+        isolated_store, monkeypatch):
+    """store() truncated the credential in place and then wrote it. A get()
+    in another process that looked in between found an empty file, took it
+    for one written by an older build and deleted it; the writer finished
+    into the deleted file, and `compartment unlock` reported success with
+    nothing stored. The reader here looks at the moment the credential is
+    written."""
+    p = session.store(VAULT, KEY)
+    files = sorted(f.name for f in isolated_store.iterdir())
+    new_key = bytes(range(32, 64))
+    seen = []
+
+    def write(fd, data):
+        if not seen:
+            seen.append(session.get(VAULT))
+        return os.write(fd, data)
+
+    with monkeypatch.context() as m:
+        m.setattr(session, "os", _OsWith(write=write))
+        assert session.store(VAULT, new_key) == p
+    assert seen == [KEY], "a reader in the window must find the old credential"
+    assert session.get(VAULT) == new_key
+    assert sorted(f.name for f in isolated_store.iterdir()) == files
+
+
+def test_a_credential_write_that_fails_keeps_the_old_one(isolated_store,
+                                                         monkeypatch):
+    """A write that failed part way (a full disk) left the credential
+    truncated, and the next lookup deleted it: the vault relocked without a
+    word. The old credential has to stay, with nothing left beside it."""
+    session.store(VAULT, KEY)
+    files = sorted(f.name for f in isolated_store.iterdir())
+
+    def write(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setattr(session, "os", _OsWith(write=write))
+        with pytest.raises(OSError, match="No space left"):
+            session.store(VAULT, bytes(range(32, 64)))
+    assert session.get(VAULT) == KEY
+    assert sorted(f.name for f in isolated_store.iterdir()) == files
+
+
 def test_no_boot_clock_is_a_cryptoerror_not_a_stray_runtimeerror(monkeypatch):
     """Callers only handle CryptoError. A RuntimeError out of boot_time()
     used to sail past them, and out of get() it also deleted the file."""
@@ -309,3 +365,97 @@ def test_a_platform_with_no_holder_refuses_to_store(monkeypatch):
     monkeypatch.setattr(session, "_libc", no_shm)
     with pytest.raises(CryptoError):
         session.store(VAULT, KEY)
+
+
+def _leave_a_half_made_holder():
+    """What a first unlock killed between sizing this boot's holder and
+    filling it leaves behind: an object of the right size, all zero."""
+    fd = session._shm_open(session._holder(),
+                           os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.ftruncate(fd, session.SECRET_LEN)
+    finally:
+        os.close(fd)
+    assert session._posix_read(session._holder())[0] == "pending"
+
+
+@pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")
+def test_a_half_made_holder_does_not_block_every_unlock(monkeypatch):
+    """Every later unlock took the all-zero holder for another process still
+    writing it, waited the race timeout and failed, and so did every lookup,
+    until a restart: the vault could not be unlocked at all."""
+    monkeypatch.setattr(session, "_RACE_TIMEOUT", 0.05)
+    _leave_a_half_made_holder()
+    session.store(VAULT, KEY)
+    assert session.get(VAULT) == KEY
+
+
+@pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")
+def test_a_lookup_that_meets_a_half_made_holder_answers_locked(monkeypatch):
+    """No credential can be keyed with an all-zero holder, so a lookup that
+    finds one is looking at a dead credential, as after a restart."""
+    p = session.store(VAULT, KEY)
+    session._forget_boot_secret()               # the secret it was keyed with
+    _leave_a_half_made_holder()                 # and a creator that died
+    monkeypatch.setattr(session, "_RACE_TIMEOUT", 0.05)
+    assert session.get(VAULT) is None
+    assert not p.exists()
+    session.store(VAULT, KEY)
+    assert session.get(VAULT) == KEY
+
+
+# --- a test run leaves nothing in the kernel --------------------------------
+
+#: Two tests that each store a credential: one in the session store the
+#: suite gives every test, one in a store of its own. Each writes down which
+#: store it used.
+_TWO_TESTS = '''
+import os
+from compartment import session
+
+
+def _store_and_say_where(tmp_path):
+    session.store(str(tmp_path / "v.vault"), bytes(32))
+    assert session._boot_secret(create=False) is not None
+    with open(os.environ["STORES_SEEN"], "a", encoding="utf-8") as f:
+        f.write(os.environ["COMPARTMENT_SESSION_DIR"] + "\\n")
+
+
+def test_in_the_store_the_suite_gives_it(tmp_path):
+    _store_and_say_where(tmp_path)
+
+
+def test_in_a_store_of_its_own(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "own"))
+    _store_and_say_where(tmp_path)
+'''
+
+
+def test_a_test_that_stores_a_credential_leaves_no_secret_behind(
+        tmp_path, monkeypatch):
+    """The secret is in the kernel, not under tmp_path, so every test that
+    stored a credential left one there until the next restart: about forty
+    a run, each named for a session store pytest had already deleted. The
+    suite's own fixtures, loaded into a run of two tests, destroy the one in
+    the store they give a test and the one in a store a test chose."""
+    (tmp_path / "test_two.py").write_text(_TWO_TESTS, encoding="utf-8")
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    seen = tmp_path / "stores-seen"
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "conftest", "-c", str(tmp_path / "pytest.ini"),
+         "--basetemp", str(tmp_path / "run"), str(tmp_path / "test_two.py")],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": str(pathlib.Path(__file__).parent),
+             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "STORES_SEEN": str(seen)})
+    assert run.returncode == 0, run.stdout + run.stderr
+    stores = seen.read_text(encoding="utf-8").splitlines()
+    assert len(stores) == 2 and stores[1].endswith("own")
+    left = []
+    for store in stores:
+        monkeypatch.setattr(session, "_session_dir",
+                            lambda store=store: pathlib.Path(store))
+        if session._boot_secret(create=False) is not None:
+            left.append(store)
+            session._forget_boot_secret()       # not left for a restart
+    assert left == []

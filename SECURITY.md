@@ -140,7 +140,7 @@ if you want every single open to need both factors, run `compartment unlock
 
 Several agent processes (Hermes provider, Claude via MCP, the CLI) may
 share one vault: an advisory file lock serializes every journal append and
-save, and each process detects foreign writes (mtime/size) and reloads
+save, and each process detects foreign writes (inode/size/mtime) and reloads
 before proceeding - a stale writer gets a loud VaultStaleError, never
 silent corruption. Namespace ACLs are per-caller; `--caller` identity is
 declarative (see the hostile-host limitation above).
@@ -181,7 +181,9 @@ running as the same user is already inside the trust boundary - it can read
 the session credential and open the vault directly - so the socket gives
 that user nothing they did not have. It is not a network listener:
 `--assert-offline` allows AF_UNIX and forbids everything else, exactly as
-before.
+before. The one AF_INET exception is the loopback pair that
+`socket.socketpair` is on Windows, which asyncio's event loop needs, and it
+is allowed only while that call runs.
 
 `COMPARTMENT_EMBED_DAEMON=0`, or `embed_daemon: false` in the vault's
 settings, keeps the model inside each process instead. Windows has no
@@ -191,3 +193,7 @@ AF_UNIX in Python and always does.
 
 Report vulnerabilities privately to the maintainer. No telemetry exists in
 this product; nothing phones home, so nothing can be recalled remotely.
+The ONNX runtime the encoder runs on keeps telemetry of its own by default
+(a device id and an event queue on disk, with an uploader in the same
+library), so Compartment sets `ORT_DISABLE_TELEMETRY=1` before loading it,
+leaving a value you set yourself as it is.

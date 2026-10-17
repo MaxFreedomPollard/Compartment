@@ -1,16 +1,24 @@
+import errno
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import textwrap
+import threading
+import time
+import types
 
+import numpy as np
 import pytest
 
-from compartment import audit
+from compartment import audit, crypto, store as store_mod, vaultfile
+from compartment.acl import AclError
 from compartment.crypto import CryptoError
-from compartment.vault import Vault, VaultLockedError
+from compartment.store import Store
+from compartment.vault import Vault, VaultLockedError, VaultStaleError
 
-from conftest import PASS, SRC
+from conftest import PASS, SRC, statements_run, table_walks
 
 
 def test_store_search_get_forget(vault):
@@ -40,6 +48,48 @@ def test_journal_replay_after_abandon(vault, vault_path):
     assert "survive" in v2.get(r["id"], caller="test")["text"]
     ok, _, msg = audit.verify(v2.db.conn)
     assert ok, msg
+
+
+def test_an_open_builds_the_search_index_once(vault, vault_path, monkeypatch):
+    """Opening built the vector index twice: in the constructor, from the
+    payload as it was read, and again after the journal replay. Nothing in
+    between reads the index, so the first build was thrown away unused; at
+    20,000 records and above (HNSW) it was about half of every open, paid by
+    each process on each reopen."""
+    vault.store("The router admin page is on port 8080", caller="test")
+    vault.save()
+    vault.store("The spare charger is in the hall drawer", caller="test")
+    builds = []
+    real = Vault._rebuild_index
+
+    def counted(self):
+        builds.append(self)
+        real(self)
+    monkeypatch.setattr(Vault, "_rebuild_index", counted)
+    Vault.unlock(vault_path, passphrase=PASS)
+    assert len(builds) == 1
+
+
+def test_the_index_an_open_builds_holds_what_the_journal_replayed(
+        vault, vault_path):
+    """The one build an open keeps is the one after the replay, so a memory
+    that lives only in the journal is in the index, and the index is what a
+    fresh rebuild of the opened vault gives."""
+    vault.store("The router admin page is on port 8080", caller="test")
+    vault.save()
+    late = vault.store("The spare charger is in the hall drawer",
+                       caller="test")                       # journal only
+    v2 = Vault.unlock(vault_path, passphrase=PASS)
+    assert set(v2.db.vector_keys(late["id"])) <= set(v2._id_by_ikey)
+    query = "where is the spare charger"
+    first = [(h["id"], h["score"])
+             for h in v2.search(query, caller="test")["results"]]
+    keys, rows = dict(v2._id_by_ikey), len(v2.index)
+    v2._rebuild_index()
+    assert (v2._id_by_ikey, len(v2.index)) == (keys, rows)
+    again = [(h["id"], h["score"])
+             for h in v2.search(query, caller="test")["results"]]
+    assert again == first and first[0][0] == late["id"]
 
 
 def test_kill9_crash_recovery(tmp_path):
@@ -103,6 +153,50 @@ def test_export_import_roundtrip(vault, tmp_path):
     assert v2.import_jsonl(data) == 2
     hit = v2.search("beta", caller="user")["results"][0]
     assert hit.get("quarantined") is True
+
+
+_FACTS = ("The office router admin page is at 192.168.8.1.",
+          "The guest wifi password rotates every Monday.",
+          "Backups run nightly at 02:00 to the NAS in the hall closet.",
+          "The staging database is Postgres 15 on port 5433.",
+          "Max prefers Fastmail for custom domains.",
+          "The printer on the second floor needs the HP Universal driver.",
+          "Invoices are due on the 5th of each month.",
+          "The VPN uses WireGuard with the config in ~/vpn/wg0.conf.",
+          "The CI runners are self-hosted on two Mac minis.",
+          "The domain compartment.dev renews on 14 March.",
+          "The team standup is at 09:30 on weekdays.",
+          "Docker Desktop is limited to 6 GB of RAM on the laptop.")
+
+
+def test_importing_a_vaults_own_export_stores_nothing_new(vault):
+    """An import embedded each exported text with its provenance clause,
+    which store() leaves out, and the clause moved the vector below the
+    duplicate threshold: re-importing a vault's own export stored most of
+    its lines a second time."""
+    for fact in _FACTS:
+        vault.store(fact, caller="test", source="web search",
+                    discovered="2026-09-01")
+    assert vault.import_jsonl(vault.export_jsonl(), caller="test") == 0
+    assert vault.db.count() == len(_FACTS)
+
+
+def test_an_imported_long_memory_keeps_every_window(vault, tmp_path):
+    """An import embedded the first 512 tokens of each record, so a long
+    memory came back with one window and its later parts could no longer be
+    found by meaning."""
+    long_text = " ".join(
+        f"Paragraph {i}: the migration plan moves service {i} from the old "
+        f"cluster to the new one after its health checks pass for a full day."
+        for i in range(40)) + (" The final step is that the payroll exporter "
+                               "writes its CSV to the finance share.")
+    rid = vault.store(long_text, caller="test", source="the incident log",
+                      _gate=False)["id"]
+    windows = vault.db.vector_counts()[rid]
+    assert windows >= 3
+    v2 = Vault.create(str(tmp_path / "second.vault"), PASS)
+    assert v2.import_jsonl(vault.export_jsonl(), caller="test") == 1
+    assert list(v2.db.vector_counts().values()) == [windows]
 
 
 def test_rekey(vault, vault_path):
@@ -191,6 +285,148 @@ def test_document_frequencies_are_refreshed_after_a_delete(vault):
     assert vault.db.doc_frequency("quokkas") == 0
 
 
+def test_forgetting_a_memory_does_not_walk_the_whole_vault(vault):
+    """forget() deleted the full-text row with WHERE id = ?, and fts5 keeps
+    id UNINDEXED, so SQLite read every row of the table to find it; then it
+    looked for the records this one had superseded by superseded_by, which
+    has no index: a second walk. At 20,000 records the two were about 6 ms
+    of every forget and of every expired memory, under the vault lock. The
+    first removal after an open reads where the rows are, once; after that
+    a removal walks nothing."""
+    ids = [vault.store(text, caller="test")["id"] for text in (
+        "The shed key hangs by the back door",
+        "The boiler was serviced in March",
+        "The library card renews every spring")]
+    vault.forget(ids[0], caller="test")
+    with statements_run(vault.db.conn) as ran:
+        vault.forget(ids[1], caller="test")
+    assert table_walks(vault.db.conn, ran) == []
+
+
+def _old_delete(db, rid, shred=False):
+    """Store.delete as it was: the full-text row found by its id."""
+    cur = db.conn.execute("DELETE FROM records WHERE id = ?", (rid,))
+    db.conn.execute("DELETE FROM fts WHERE id = ?", (rid,))
+    db.conn.execute("DELETE FROM vecs WHERE id = ?", (rid,))
+    if cur.rowcount and shred:
+        db.conn.execute("VACUUM")
+
+
+def _old_tombstone(db, rid, by):
+    db.conn.execute("UPDATE records SET superseded_by = ? WHERE id = ?",
+                    (by, rid))
+    db.conn.execute("DELETE FROM fts WHERE id = ?", (rid,))
+
+
+def _old_restore_children(db, rid, key):
+    for r in db.conn.execute("SELECT id FROM records WHERE superseded_by = ?",
+                             (rid,)).fetchall():
+        db.conn.execute("UPDATE records SET superseded_by = NULL WHERE id = ?",
+                        (r["id"],))
+        db.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
+                        (r["id"], db.decrypt_text(db.get_row(r["id"]), key)))
+
+
+@pytest.mark.parametrize("opened", [False, True],
+                         ids=["created here", "opened from an image"])
+def test_removals_leave_the_image_a_delete_by_id_left(opened, monkeypatch):
+    """A removal now finds a record's full-text rows by rowid, from a map
+    kept in RAM, and skips the superseded_by lookup when nothing is
+    superseded. The serialized image is the vault's payload, so it must
+    come out byte for byte as the old statements left it, after each kind
+    of removal: a plain one, a record with two full-text rows (an older
+    vault's leftover), tombstones and their restore, a record with no
+    full-text row, rows written after the map was read, a shred and its
+    VACUUM, and an id that does not exist. A store created in this process
+    and one opened from an image are both checked, because SQLite writes
+    the first page's header of the two differently."""
+    monkeypatch.setattr(crypto, "secrets",
+                        types.SimpleNamespace(token_bytes=lambda n: bytes(n)))
+    monkeypatch.setattr(store_mod, "time",
+                        types.SimpleNamespace(time=lambda: 1.7e9))
+    key = bytes(32)
+    words = ("garden", "router", "kitchen", "lease", "port", "invoice")
+
+    def insert(db, rid, i, **kw):
+        db.insert(record_id=rid, ns="main",
+                  text=f"Note {i} about the {words[i % 6]} and port {i % 7}",
+                  vec=np.full(8, i, np.float32), tags=[], importance=0.5,
+                  quarantined=False, pack=None, prov={}, master_key=key,
+                  created=1.7e9 + i, **kw)
+
+    def build():
+        db = Store()
+        for i in range(300):
+            insert(db, f"r{i:03d}", i)
+        db.conn.execute("INSERT INTO fts (id, text) VALUES "
+                        "('r007', 'a stray second row about the garden')")
+        return db
+
+    if opened:
+        image = build().serialize()
+        new, old = Store(image), Store(image)
+    else:
+        new, old = build(), build()
+    assert new.serialize() == old.serialize()
+
+    steps = [
+        ("a plain delete",
+         lambda db: db.delete("r010", shred=False),
+         lambda db: _old_delete(db, "r010")),
+        ("a record with two full-text rows",
+         lambda db: db.delete("r007", shred=False),
+         lambda db: _old_delete(db, "r007")),
+        ("a tombstone", lambda db: db.tombstone("r020", "r021"),
+         lambda db: _old_tombstone(db, "r020", "r021")),
+        ("a second tombstone by the same record",
+         lambda db: db.tombstone("r022", "r021"),
+         lambda db: _old_tombstone(db, "r022", "r021")),
+        ("bringing back what a record replaced",
+         lambda db: db.restore_children("r021", key),
+         lambda db: _old_restore_children(db, "r021", key)),
+        ("a record whose full-text row came back after the map was read",
+         lambda db: db.delete("r020", shred=False),
+         lambda db: _old_delete(db, "r020")),
+        ("a tombstone and its delete, with no full-text row left",
+         lambda db: (db.tombstone("r030", "r031"),
+                     db.delete("r030", shred=False)),
+         lambda db: (_old_tombstone(db, "r030", "r031"),
+                     _old_delete(db, "r030"))),
+        ("a record inserted after the map was read",
+         lambda db: (insert(db, "r900", 900), db.delete("r900", shred=False)),
+         lambda db: (insert(db, "r900", 900), _old_delete(db, "r900"))),
+        ("a record born superseded, brought back, then deleted",
+         lambda db: (insert(db, "r901", 901, superseded_by="r040"),
+                     db.restore_children("r040", key),
+                     db.delete("r901", shred=False)),
+         lambda db: (insert(db, "r901", 901, superseded_by="r040"),
+                     _old_restore_children(db, "r040", key),
+                     _old_delete(db, "r901"))),
+        ("a shred, its VACUUM, and a delete after it",
+         lambda db: (db.delete("r050", shred=True),
+                     db.delete("r051", shred=False)),
+         lambda db: (_old_delete(db, "r050", shred=True),
+                     _old_delete(db, "r051"))),
+        ("an id that does not exist",
+         lambda db: db.delete("nope", shred=False),
+         lambda db: _old_delete(db, "nope")),
+        ("the last row loaded", lambda db: db.delete("r299", shred=False),
+         lambda db: _old_delete(db, "r299")),
+    ]
+    for label, now, before in steps:
+        now(new)
+        before(old)
+        assert new.serialize() == old.serialize(), label
+    rows = "SELECT rowid, id FROM fts ORDER BY rowid"
+    assert (list(map(tuple, new.conn.execute(rows)))
+            == list(map(tuple, old.conn.execute(rows))))
+    old._df_cache.clear()
+    for query in ("garden", "router port", "note about the lease"):
+        assert new.fts_search(query, 50) == old.fts_search(query, 50)
+        assert new.doc_frequency(query.split()[0]) == \
+            old.doc_frequency(query.split()[0])
+
+
 def test_writing_into_a_deleted_vault_file_is_refused(vault, vault_path):
     """is_stale() ANDed in an existence test, so a missing file read as "not
     stale". _journal then appended with open(path, "ab"), recreating it as
@@ -206,3 +442,272 @@ def test_writing_into_a_deleted_vault_file_is_refused(vault, vault_path):
     assert "gone" in str(exc.value).lower()
     assert not os.path.exists(vault_path), \
         "the refused write recreated the file anyway"
+
+
+def _assert_holds_no_plaintext(v):
+    """A locked vault keeps neither the decrypted database, whose full-text
+    table holds every memory in plain text, nor the vectors and the index."""
+    with pytest.raises(sqlite3.ProgrammingError):
+        v.db.conn.execute("SELECT text FROM fts")
+    assert v.index is None and v._id_by_ikey == {}
+
+
+def test_a_locked_vault_holds_no_decrypted_memories(vault, vault_path):
+    """lock() dropped the key and nothing else: the in-RAM database stayed
+    open with every memory's text in it, readable without any key, for as
+    long as the object lived. In the server that is the whole idle period
+    auto-lock exists for."""
+    r = vault.store("The VPN password hint is the dog's name", caller="test")
+    vault.search("VPN password hint", caller="test")    # audited in RAM only
+    vault.lock()
+    _assert_holds_no_plaintext(vault)
+    with pytest.raises(VaultLockedError):
+        vault.get(r["id"], caller="test")
+    # The lock still saved before it let go: the search's audit row is on disk.
+    again = Vault.unlock(vault_path, passphrase=PASS)
+    ops = [row["op"] for row in again.db.conn.execute(
+        "SELECT op FROM audit ORDER BY seq")]
+    assert ops[-1] == "search"
+
+
+def test_a_lock_whose_save_fails_still_locks(vault, vault_path):
+    """lock() saved first and dropped the key only if the save worked. Once
+    another process had written the file, every save raised VaultStaleError,
+    so the server's auto-lock retried on the same handle every 30 seconds
+    and the key stayed in RAM for as long as the server stayed idle."""
+    vault.store("stored before the server went idle", caller="test")
+    other = Vault.unlock(vault_path, raw_key=vault._master)
+    other.store("stored by another process meanwhile", caller="test")
+    with pytest.raises(VaultStaleError):
+        vault.lock()
+    assert vault._locked and vault._master is None
+    _assert_holds_no_plaintext(vault)
+    with pytest.raises(VaultLockedError):
+        vault.search("stored", caller="test")
+
+
+class _With:
+    """A module as one other module sees it, with some functions replaced."""
+
+    def __init__(self, module, **replaced):
+        self._module = module
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+def test_a_save_that_cannot_replace_the_vault_leaves_no_copy_beside_it(
+        vault, vault_path, monkeypatch):
+    """On Windows a reader, an indexer or an antivirus scan holding the
+    vault open past the replace's retries made save fail, and the full
+    sealed copy it had just written stayed beside the vault as .tmp."""
+    vault.store("A memory that has to outlive a failed save.", caller="test")
+    tries, naps = [], []
+
+    def replace(src, dst):
+        tries.append(dst)
+        raise PermissionError(13, "The process cannot access the file "
+                                  "because it is being used by another "
+                                  "process", dst)
+
+    def nap(seconds):
+        naps.append(seconds)
+        assert len(naps) <= 100, "the replace has to give up"
+
+    with monkeypatch.context() as m:
+        m.setattr(vaultfile, "os", _With(os, name="nt", replace=replace))
+        m.setattr(vaultfile, "time", _With(time, sleep=nap))
+        with pytest.raises(PermissionError):
+            vault.save()
+    assert len(tries) == 20, "the Windows retries all ran"
+    assert not os.path.exists(vault_path + ".tmp")
+    assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 1
+
+
+class _DiskFillsUp:
+    """A file that takes 1000 bytes, the header among them, and then
+    reports the disk full part way through the payload."""
+
+    def __init__(self, f):
+        self._f, self._room = f, 1000
+
+    def write(self, b):
+        if len(b) > self._room:
+            self._f.write(b[:self._room])
+            self._room = 0
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self._room -= len(b)
+        return self._f.write(b)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+def test_a_save_that_runs_out_of_disk_leaves_no_partial_copy(
+        vault, vault_path, monkeypatch):
+    """The partial copy stayed, and with it the space it had taken, until
+    the next save that worked."""
+    vault.store("A memory that has to outlive a failed save.", caller="test")
+    real_fdopen = os.fdopen
+
+    def fdopen(fd, *args, **kwargs):
+        return _DiskFillsUp(real_fdopen(fd, *args, **kwargs))
+
+    with monkeypatch.context() as m:
+        m.setattr(vaultfile, "os", _With(os, fdopen=fdopen))
+        with pytest.raises(OSError, match="No space left"):
+            vault.save()
+    assert not os.path.exists(vault_path + ".tmp")
+    assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 1
+
+
+def test_a_save_still_syncs_its_copy_before_the_rename(vault, vault_path,
+                                                       monkeypatch):
+    """What the cleanup must leave alone on the way that works: the copy is
+    synced before it is renamed over the vault, and the vault stays 0600."""
+    vault.store("A memory saved the ordinary way.", caller="test")
+    order = []
+
+    def fsync(fd):
+        order.append("fsync")
+        return os.fsync(fd)
+
+    def replace(src, dst):
+        order.append("replace")
+        return os.replace(src, dst)
+
+    with monkeypatch.context() as m:
+        m.setattr(vaultfile, "os", _With(os, fsync=fsync, replace=replace))
+        vault.save()
+    assert order == ["fsync", "replace"]
+    assert not os.path.exists(vault_path + ".tmp")
+    if os.name != "nt":
+        assert os.stat(vault_path).st_mode & 0o777 == 0o600
+
+
+class _ContendedLock:
+    """A vault's operation lock that says when a second thread had to wait
+    for it, which is how the tests below order two threads without sleeping."""
+
+    def __init__(self, contended: threading.Event):
+        self._lock = threading.RLock()
+        self._contended = contended
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self._contended.set()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+def test_get_finishes_before_a_lock_takes_the_key(vault, monkeypatch):
+    """get() was the one public operation outside the vault's lock. The
+    server's auto-lock could drop the key between get() reading the row and
+    decrypting it, and the decrypt with no key was reported as tampering."""
+    rid = vault.store("The spare key is under the blue flowerpot",
+                      caller="test")["id"]
+    go = threading.Event()             # the lock is waiting, or has finished
+    vault._oplock = _ContendedLock(go)
+    row_read = threading.Event()
+    real_get_row = vault.db.get_row
+
+    def get_row(record_id):
+        row = real_get_row(record_id)
+        if threading.current_thread().name == "getter":
+            row_read.set()
+            go.wait(10)
+        return row
+    monkeypatch.setattr(vault.db, "get_row", get_row)
+    out = {}
+
+    def getter():
+        try:
+            out["text"] = vault.get(rid, caller="test")["text"]
+        except Exception as exc:                        # noqa: BLE001
+            out["error"] = f"{type(exc).__name__}: {exc}"
+    t = threading.Thread(target=getter, name="getter")
+    t.start()
+    assert row_read.wait(10)
+    vault.lock()
+    go.set()
+    t.join(10)
+    assert "flowerpot" in out.get("text", ""), out
+
+
+def test_get_and_store_on_two_threads_keep_one_audit_chain(vault, monkeypatch):
+    """get() appended its audit row without the vault's lock, and an append
+    reads the head before it inserts. A store on another thread in between
+    linked to the same head: a forked chain, saved into the vault file, that
+    every later verify reports as a break."""
+    rid = vault.store("The boiler was serviced in May", caller="test")["id"]
+    go = threading.Event()             # the store is waiting, or has finished
+    vault._oplock = _ContendedLock(go)
+    head_read = threading.Event()
+    real_entry_hash = audit._entry_hash
+
+    def entry_hash(prev, ts, caller, op, detail):
+        if threading.current_thread().name == "getter" and op == "get":
+            head_read.set()            # get() holds the head it will link to
+            go.wait(10)
+        return real_entry_hash(prev, ts, caller, op, detail)
+    monkeypatch.setattr(audit, "_entry_hash", entry_hash)
+    t = threading.Thread(target=lambda: vault.get(rid, caller="test"),
+                         name="getter")
+    t.start()
+    assert head_read.wait(10)
+    vault.store("The chimney was swept in June", caller="test")
+    go.set()
+    t.join(10)
+    ok, _, msg = audit.verify(vault.db.conn)
+    assert ok, msg
+
+
+def test_a_search_for_no_results_returns_none(vault):
+    """The survivor loop kept a record before comparing the count with top_k,
+    so a top_k of 0, or a negative one, still handed back the best match.
+    recent() already treats an empty window as empty."""
+    for text in ("The staging database runs Postgres 16",
+                 "Production runs Postgres 15 behind pgbouncer"):
+        vault.store(text, caller="test")
+    query = "which Postgres version do we run"
+    for k in (0, -3):
+        assert vault.search(query, caller="test", top_k=k)["results"] == []
+    assert len(vault.search(query, caller="test", top_k=1)["results"]) == 1
+    # Each was audited as a search, and the access check still comes first.
+    details = [r["detail"] for r in vault.db.conn.execute(
+        "SELECT detail FROM audit WHERE op = 'search' ORDER BY seq")]
+    assert [d.rsplit("hits=", 1)[1] for d in details] == ["0", "0", "1"]
+    vault.config.callers["hermes"] = {"default_namespace": "hermes",
+                                      "grants": {"hermes": "rw"}}
+    with pytest.raises(AclError):
+        vault.search(query, caller="hermes", namespace="main", top_k=0)
+
+
+def test_a_keychain_that_does_not_answer_is_no_credential(monkeypatch):
+    """`security` can wait on a Keychain dialog nobody can answer, and the
+    lookup used to wait with it: a server reopening the vault, or the
+    panel's helper, held for good. A call past its time is treated as no
+    item found; a store past its time says so."""
+    import subprocess
+    from compartment import vault as vault_module
+
+    def stuck(argv, **kwargs):
+        assert kwargs.get("timeout") == vault_module.KEYCHAIN_TIMEOUT, argv
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(vault_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(vault_module.subprocess, "run", stuck)
+    assert vault_module.keychain_get("/x/a.vault") is None
+    assert vault_module.keychain_clear("/x/a.vault") is False
+    with pytest.raises(vault_module.CryptoError, match="did not answer"):
+        vault_module.keychain_store("/x/a.vault", b"\x00" * 32)

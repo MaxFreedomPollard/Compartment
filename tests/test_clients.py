@@ -10,11 +10,20 @@ in has not integrated with anything.
 Every case here starts from a config that already has another server in it,
 because that is the state every real machine is in.
 """
+import builtins
+import contextlib
+import errno
+import io
 import json
+import os
+import stat
+import threading
+import tomllib
+import types
 
 import pytest
 
-from compartment import clients
+from compartment import claude_desktop, claude_hooks, cli, clients
 
 
 VAULT = "/v/memory.vault"
@@ -198,6 +207,119 @@ def test_codex_unregister_takes_only_our_table(tmp_path):
     assert 'command = "x"' in text
 
 
+#: Configs with our table in them, what Codex must read once it is taken
+#: out (None: no mcp_servers left at all), and text that must survive.
+_CODEX_REMOVALS = {
+    # A comment block just above the next table documents that table.
+    "a neighbour's comment": (
+        'model = "o3"\n\n[mcp_servers.compartment]\ncommand = "compartment"\n'
+        'args = ["--vault", "/v", "serve"]\n\n'
+        "# Bob's server, do not remove\n"
+        '[mcp_servers.other]\ncommand = "x"\n',
+        {"other": {"command": "x"}},
+        ["# Bob's server, do not remove", 'model = "o3"']),
+    "an env subtable": (
+        '[mcp_servers.compartment]\ncommand = "/x/compartment"\n'
+        'args = ["serve"]\n\n'
+        '[mcp_servers.compartment.env]\nCOMPARTMENT_EMBED_DAEMON = "0"\n',
+        None, []),
+    "a comment on the header line": (
+        '[mcp_servers.compartment]  # memory\ncommand = "/x/compartment"\n'
+        'args = ["serve"]\n\n[mcp_servers.other]\ncommand = "x"\n',
+        {"other": {"command": "x"}}, ['[mcp_servers.other]']),
+    "a blank line inside our table": (
+        '[mcp_servers.other]\ncommand = "x"\n\n[mcp_servers.compartment]\n'
+        'command = "/x/compartment"\n\nargs = ["--vault", "/v", "serve"]\n',
+        {"other": {"command": "x"}}, []),
+    "a comment inside our table": (
+        '[mcp_servers.other]\ncommand = "x"\n\n[mcp_servers.compartment]\n'
+        '# memory server\ncommand = "/x/compartment"\nargs = ["serve"]\n',
+        {"other": {"command": "x"}}, []),
+    "a value over several lines": (
+        '[mcp_servers.compartment]\ncommand = "/x/compartment"\nargs = [\n'
+        '  "--vault",\n  "/v",\n  "serve",\n]\n'
+        '[mcp_servers.other]\ncommand = "x"\n',
+        {"other": {"command": "x"}}, []),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CODEX_REMOVALS))
+def test_codex_unregister_takes_out_exactly_our_table(case, tmp_path):
+    """Removal dropped lines by their shape, from our header to the next
+    line starting with "[": it took the next table's comment with it, left
+    a [mcp_servers.compartment.env] subtable behind as a server with no
+    command, and matched the header only as an exact line, so one with a
+    comment after it was never removed while removal still reported
+    success."""
+    text, servers, kept = _CODEX_REMOVALS[case]
+    codex = clients.CLIENTS["codex"]
+    p = tmp_path / "config.toml"
+    p.write_text(text, encoding="utf-8")
+    assert clients.is_registered(codex, path=p) is True
+
+    assert clients.unregister(codex, path=p) is True
+    after = p.read_text(encoding="utf-8")
+    assert tomllib.loads(after).get("mcp_servers") == servers
+    for line in kept:
+        assert line in after
+    assert clients.is_registered(codex, path=p) is False
+
+
+def test_a_codex_header_inside_another_servers_string_is_not_ours(tmp_path):
+    """A line that only looks like our header, inside a neighbour's
+    multi-line string, counted as a registration, and removal cut the file
+    from there to the next "[" line, so the string never closed and Codex
+    could read none of its servers."""
+    codex = clients.CLIENTS["codex"]
+    p = tmp_path / "config.toml"
+    text = ('[mcp_servers.other]\ncommand = "x"\nnotes = """\n'
+            '[mcp_servers.compartment]\nwas here once\n"""\n')
+    p.write_text(text, encoding="utf-8")
+    assert clients.is_registered(codex, path=p) is False
+    assert clients.unregister(codex, path=p) is False
+    assert p.read_text(encoding="utf-8") == text
+
+
+def test_a_commented_out_codex_header_is_not_a_registration(tmp_path):
+    """`# [mcp_servers.compartment]` counted as registered, so register
+    refused with "already registered; left as it is" and wired nothing."""
+    codex = clients.CLIENTS["codex"]
+    p = tmp_path / "config.toml"
+    p.write_text("# [mcp_servers.compartment] disabled for now\n",
+                 encoding="utf-8")
+    assert clients.is_registered(codex, path=p) is False
+
+    res = clients.register(codex, VAULT, path=p)
+    assert res["written"] is True
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith("# [mcp_servers.compartment] disabled for now\n")
+    assert "compartment" in tomllib.loads(text)["mcp_servers"]
+
+
+def test_a_codex_entry_that_cannot_be_taken_out_cleanly_is_left_for_the_user(
+        tmp_path, monkeypatch, capsys):
+    """An entry written as an inline table under [mcp_servers] has no table
+    of its own to take out. Removal is refused rather than guessed at: the
+    file is left as it is and the entry is shown for the user to remove,
+    where the command used to say it was never there."""
+    monkeypatch.setattr(clients.Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    codex = clients.CLIENTS["codex"]
+    p = codex.config_path()
+    p.parent.mkdir(parents=True)
+    text = ('[mcp_servers]\ncompartment = { command = "/x/compartment", '
+            'args = ["serve"] }\nother = { command = "x" }\n')
+    p.write_text(text, encoding="utf-8")
+
+    assert clients.unregister(codex, path=p) is False
+    cli._integrate_client(codex, types.SimpleNamespace(remove=True,
+                                                       vault=VAULT))
+    out = capsys.readouterr().out
+    assert "left as it is" in out and "was not in" not in out
+    assert "[mcp_servers.compartment]" in out          # what to take out
+    assert p.read_text(encoding="utf-8") == text
+
+
 # ----------------------------------------------------------------- removal
 
 def test_unregister_removes_only_ours(tmp_path):
@@ -255,6 +377,91 @@ def test_status_has_a_row_for_every_client():
     assert {r["key"] for r in rows} == set(clients.CLIENTS)
 
 
+def _clients_live_in(home, monkeypatch):
+    """Every client's directory under `home`: HOME-based ones, the XDG ones
+    (the conftest already moved XDG_CONFIG_HOME) and, on Windows, APPDATA."""
+    monkeypatch.setattr(clients.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("APPDATA", str(home / "AppData"))
+
+
+@pytest.mark.parametrize("raw", ["null\n", "[]\n"])
+def test_a_config_that_is_json_but_not_an_object_is_refused(raw, tmp_path,
+                                                            monkeypatch,
+                                                            capsys):
+    """`null` or `[]` in another program's config parsed, and .get and
+    .setdefault then failed on it: `integrate --list`, a read-only report,
+    died with AttributeError, and `integrate --all` stopped at that client,
+    so every one after it in the table (Gemini CLI after Cursor) was never
+    wired."""
+    _clients_live_in(tmp_path, monkeypatch)
+    cursor = tmp_path / ".cursor" / "mcp.json"
+    cursor.parent.mkdir()
+    cursor.write_text(raw, encoding="utf-8")
+    gemini = tmp_path / ".gemini" / "settings.json"
+    gemini.parent.mkdir()
+    gemini.write_text('{"theme": "dark"}\n', encoding="utf-8")
+
+    cli.main(["integrate", "--list"])
+    listed = capsys.readouterr().out
+    assert "Cursor" in listed and "installed, not connected" in listed
+
+    cli.main(["--vault", VAULT, "integrate", "--all"])
+    out = capsys.readouterr().out
+    assert "is not a JSON object; refusing to touch it" in out
+    assert cursor.read_text(encoding="utf-8") == raw          # untouched
+    settings = json.loads(gemini.read_text(encoding="utf-8"))
+    assert settings["theme"] == "dark" and "compartment" in settings[
+        "mcpServers"]
+    c = clients.CLIENTS["cursor"]
+    assert clients.is_registered(c, path=cursor) is False
+    assert clients.unregister(c, path=cursor) is False
+
+
+def test_a_client_known_by_a_bare_filename_is_not_found_everywhere(
+        tmp_path, monkeypatch, capsys):
+    """LibreChat and Open WebUI are named by a file relative to wherever the
+    command runs, and the parent of a bare filename is ".", which always
+    exists: `integrate --list` called both installed on every machine, and
+    `--all` printed their blocks on every run."""
+    _clients_live_in(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    cli.main(["integrate", "--list"])
+    assert f"{len(clients.CLIENTS)} clients known, 0 installed here" in (
+        capsys.readouterr().out)
+
+    # Where the file is, the client is found, and it stays in the table:
+    # `integrate librechat` still prints the block to paste.
+    (tmp_path / "librechat.yaml").write_text("version: 1\n", encoding="utf-8")
+    assert clients.CLIENTS["librechat"].present() is True
+    assert clients.CLIENTS["open-webui"].present() is False
+    cli.main(["--vault", VAULT, "integrate", "librechat"])
+    assert '"mcpServers"' in capsys.readouterr().out
+
+
+def test_one_client_that_fails_does_not_stop_integrate_all(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    """Nothing in the --all loop caught what one client raised, so a single
+    unreadable config ended the run for all the clients after it."""
+    _clients_live_in(tmp_path, monkeypatch)
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".gemini").mkdir()
+    real_register = clients.register
+
+    def register(client, *a, **k):
+        if client.key == "cursor":
+            raise RuntimeError("something nobody planned for")
+        return real_register(client, *a, **k)
+
+    monkeypatch.setattr(clients, "register", register)
+    cli.main(["--vault", VAULT, "integrate", "--all"])
+    out = capsys.readouterr().out
+    assert "Cursor" in out and "something nobody planned for" in out
+    assert "compartment" in json.loads((tmp_path / ".gemini" / "settings.json")
+                                       .read_text(encoding="utf-8"))[
+                                           "mcpServers"]
+
+
 # ---------------------------------------------------------- the command itself
 
 def test_the_written_command_is_an_absolute_path(tmp_path, monkeypatch):
@@ -296,3 +503,349 @@ def test_the_command_falls_back_to_path_then_to_the_bare_name(tmp_path,
     assert clients.executable() == "/opt/bin/compartment"
     monkeypatch.setattr(clients.shutil, "which", lambda n: None)
     assert clients.executable() == "compartment"
+
+
+# ------------------------------------------ CLAUDE.md and OpenClaw's config
+
+class _DiskFillsUp:
+    """A text file that takes 4,096 characters and then reports the disk
+    full, the way a write ends on a disk with no room left."""
+
+    def __init__(self, f):
+        self._f, self._room = f, 4096
+
+    def write(self, s):
+        if len(s) > self._room:
+            self._f.write(s[:self._room])
+            self._room = 0
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self._room -= len(s)
+        return self._f.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+@contextlib.contextmanager
+def _disk_full_in(directory, monkeypatch):
+    """Every text file opened for writing in `directory` fills the disk after
+    4,096 characters, whether the code opens it with open() or a Path
+    method."""
+    real_open, where = io.open, os.path.abspath(directory)
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if ("w" in mode and "b" not in mode
+                and isinstance(file, (str, os.PathLike))
+                and os.path.dirname(os.path.abspath(file)) == where):
+            return _DiskFillsUp(f)
+        return f
+
+    with monkeypatch.context() as m:
+        m.setattr(io, "open", opening)
+        m.setattr(builtins, "open", opening)
+        yield
+
+
+def _claude_md(tmp_path, monkeypatch):
+    """40 KB of the user's own rules and last version's block."""
+    md = tmp_path / ".claude" / "CLAUDE.md"
+    md.parent.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_MD", str(md))
+    rules = "".join(f"- my own rule {i}: explain the trade-off before "
+                    "acting.\n" for i in range(640))
+    md.write_text(rules + "\n" + cli._CLAUDE_MD_BEGIN + "\nlast version's "
+                  "block\n" + cli._CLAUDE_MD_END + "\n", encoding="utf-8")
+    return md, rules
+
+
+def _symlink_or_skip(link, target):
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"no symlinks here ({exc})")
+
+
+def test_a_claude_md_rewrite_cut_short_leaves_it_whole_with_a_backup(
+        tmp_path, monkeypatch):
+    """The block was written back through a truncating open with no backup,
+    so a write that stopped partway (a full disk, a kill) during `update`,
+    `integrate claude` or init left the user's CLAUDE.md cut short: 40 KB of
+    their own rules became 4 KB, and nothing kept a copy."""
+    md, rules = _claude_md(tmp_path, monkeypatch)
+    if os.name != "nt":
+        md.chmod(0o600)
+    before = md.read_bytes()
+
+    with _disk_full_in(md.parent, monkeypatch):
+        with pytest.raises(OSError):
+            cli._write_managed_claude_md()
+    assert md.read_bytes() == before                   # whole, not cut short
+    backup = md.with_name(md.name + clients.BACKUP_SUFFIX)
+    assert backup.read_bytes() == before
+    assert sorted(p.name for p in md.parent.iterdir()) == sorted(
+        [md.name, backup.name])                         # no temp file left
+
+    # With room on the disk the block is replaced and nothing else moves.
+    cli._write_managed_claude_md()
+    text = md.read_text(encoding="utf-8")
+    assert text.startswith(rules) and "last version's block" not in text
+    assert text.count(cli._CLAUDE_MD_BEGIN) == 1
+    assert backup.read_bytes() == before
+    if os.name != "nt":                                 # a private file stays
+        assert stat.S_IMODE(md.stat().st_mode) == 0o600  # private
+
+
+def test_an_openclaw_write_cut_short_leaves_its_config_whole_with_a_backup(
+        tmp_path, monkeypatch, capsys):
+    """`integrate openclaw` took its backup and then wrote openclaw.json in
+    place, through a truncating open, so a write cut short left the config,
+    with every other server in it, cut short as well."""
+    home = tmp_path / "openclaw-home"
+    home.mkdir()
+    monkeypatch.setenv("OPENCLAW_HOME", str(home))
+    cfg = home / "openclaw.json"
+    cfg.write_text(json.dumps({"mcpServers": {f"server-{i}": OTHER
+                                              for i in range(100)}},
+                              indent=2), encoding="utf-8")
+    before = cfg.read_bytes()
+    args = types.SimpleNamespace(target="openclaw", vault=VAULT)
+
+    with _disk_full_in(home, monkeypatch):
+        cli._integrate_target(args)
+    assert "could not edit" in capsys.readouterr().out
+    assert cfg.read_bytes() == before
+    backup = cfg.with_name(cfg.name + clients.BACKUP_SUFFIX)
+    assert backup.read_bytes() == before
+
+    cli._integrate_target(args)
+    servers = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
+    assert "compartment" in servers and servers["server-99"] == OTHER
+    assert backup.read_bytes() == before
+
+
+@pytest.mark.parametrize("raw", ["null\n", "[]\n"])
+def test_an_openclaw_config_that_is_json_but_not_an_object_is_refused(
+        raw, tmp_path, monkeypatch, capsys):
+    """`integrate openclaw` parsed `null` or `[]` and then called
+    .setdefault on it, so it died with AttributeError, where the other
+    readers leave such a file alone and the user gets the block to paste."""
+    home = tmp_path / "openclaw-home"
+    home.mkdir()
+    monkeypatch.setenv("OPENCLAW_HOME", str(home))
+    cfg = home / "openclaw.json"
+    cfg.write_text(raw, encoding="utf-8")
+    cli._integrate_target(types.SimpleNamespace(target="openclaw",
+                                                vault=VAULT))
+    out = capsys.readouterr().out
+    assert "could not edit" in out and "not a JSON object" in out
+    assert '"compartment": {' in out                  # the block to paste
+    assert cfg.read_text(encoding="utf-8") == raw     # untouched
+    assert not cfg.with_name(cfg.name + clients.BACKUP_SUFFIX).exists()
+
+
+def test_two_writes_of_one_config_at_once_each_leave_it_whole(tmp_path,
+                                                             monkeypatch):
+    """write_config wrote <file>.tmp, one name for every writer, so two at
+    the same moment (`integrate --all` and the panel's Connect) shared one
+    file: the second's open emptied what the first had written, the first
+    rename moved whatever was there into place, and the second found
+    nothing to rename. Here both have written before either renames."""
+    from compartment import vaultfile
+    # No file yet, so neither write takes the backup first: two backups of
+    # one file at once are a race of their own, not this one.
+    cfg = tmp_path / "client" / "mcp.json"
+    both_written = threading.Barrier(2, timeout=10)
+    real = vaultfile._atomic_replace
+
+    def replace(tmp, path):
+        both_written.wait()
+        real(tmp, path)
+    monkeypatch.setattr(vaultfile, "_atomic_replace", replace)
+    texts = [json.dumps({"mcpServers": {"someone-elses": OTHER,
+                                        f"writer-{i}": {"command": "x"}}},
+                        indent=2) for i in (1, 2)]
+    errors = []
+
+    def write(text):
+        try:
+            clients.write_config(cfg, text)
+        except Exception as exc:                        # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+    writers = [threading.Thread(target=write, args=(t,)) for t in texts]
+    for t in writers:
+        t.start()
+    for t in writers:
+        t.join(timeout=30)
+    assert errors == []
+    assert cfg.read_text(encoding="utf-8") in texts    # one of them, whole
+    assert [p.name for p in cfg.parent.iterdir() if p.suffix == ".tmp"] == []
+
+
+@pytest.mark.parametrize("name", ["CLAUDE.md", "openclaw.json"])
+def test_a_claude_md_or_openclaw_config_kept_in_dotfiles_stays_a_link(
+        name, tmp_path, monkeypatch):
+    """Both files were written in place, through the link. A replacement
+    renamed into place has to go beside the file the link points at, or it
+    turns the link into a plain copy that the dotfiles no longer reach."""
+    dot = tmp_path / "dotfiles"
+    dot.mkdir()
+    real = dot / name
+    if name == "CLAUDE.md":
+        link = tmp_path / ".claude" / name
+        monkeypatch.setenv("CLAUDE_MD", str(link))
+        real.write_text("# kept in my dotfiles\n", encoding="utf-8")
+        write = cli._write_managed_claude_md
+    else:
+        link = tmp_path / "openclaw-home" / name
+        monkeypatch.setenv("OPENCLAW_HOME", str(link.parent))
+        real.write_text(json.dumps({"mcpServers": {"theirs": OTHER}}),
+                        encoding="utf-8")
+        write = lambda: cli._integrate_target(  # noqa: E731
+            types.SimpleNamespace(target="openclaw", vault=VAULT))
+    before = real.read_bytes()
+    _symlink_or_skip(link, real)
+
+    write()
+    assert link.is_symlink()
+    assert os.path.samefile(link, real)
+    text = real.read_text(encoding="utf-8")
+    assert ("kept in my dotfiles" in text and cli._CLAUDE_MD_BEGIN in text
+            if name == "CLAUDE.md"
+            else set(json.loads(text)["mcpServers"]) == {"theirs",
+                                                          "compartment"})
+    backup = link.with_name(link.name + clients.BACKUP_SUFFIX)
+    assert backup.read_bytes() == before
+    assert os.listdir(dot) == [name]            # nothing left beside it
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root may write a read-only file")
+def test_a_claude_md_the_user_made_read_only_is_left_alone(tmp_path,
+                                                          monkeypatch):
+    """Written in place, a read-only CLAUDE.md refused the write. Renaming a
+    new copy over it would not ask, so the write has to."""
+    md, _ = _claude_md(tmp_path, monkeypatch)
+    before = md.read_bytes()
+    md.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            cli._write_managed_claude_md()
+        assert md.read_bytes() == before
+        assert os.listdir(md.parent) == [md.name]   # no backup, no temp
+    finally:
+        md.chmod(0o644)
+
+
+# ------------------------------------------- configs kept in dotfiles
+
+#: Each writer and its remover, the file it writes, what is in that file
+#: already, and a part of it that has to survive both.
+_LINKED_WRITERS = {
+    "cursor": (".cursor/mcp.json",
+               '{"mcpServers": {"theirs": {"command": "x"}}}\n', '"theirs"',
+               lambda p: clients.register(clients.CLIENTS["cursor"], VAULT,
+                                          path=p),
+               lambda p: clients.unregister(clients.CLIENTS["cursor"],
+                                            path=p)),
+    "codex": (".codex/config.toml", 'model = "o3"\n', 'model = "o3"',
+              lambda p: clients.register(clients.CLIENTS["codex"], VAULT,
+                                         path=p),
+              lambda p: clients.unregister(clients.CLIENTS["codex"], path=p)),
+    "claude-code-hook": (".claude/settings.json",
+                         '{"permissions": {"allow": ["Bash"]}}\n',
+                         '"permissions"',
+                         lambda p: claude_hooks.install(
+                             compartment_bin="compartment", vault=VAULT,
+                             settings=p),
+                         lambda p: claude_hooks.uninstall(settings=p)),
+    "claude-desktop": ("Claude/claude_desktop_config.json",
+                       '{"mcpServers": {"theirs": {"command": "x"}}}\n',
+                       '"theirs"',
+                       lambda p: claude_desktop.register(
+                           "compartment", ["serve"], path=p),
+                       lambda p: claude_desktop.unregister(path=p)),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(_LINKED_WRITERS))
+def test_every_writer_keeps_a_symlinked_config_a_link(writer, tmp_path):
+    """os.replace renamed the new file over the link itself, so after a
+    write ~/.cursor/mcp.json, Claude Code's settings.json or Codex's
+    config.toml was a plain copy and the file in the user's dotfiles (a
+    stow tree, a home-manager path) no longer reached the program. Init
+    did this to ~/.claude/settings.json without being asked."""
+    rel, content, theirs, add, remove = _LINKED_WRITERS[writer]
+    dot = tmp_path / "dotfiles"
+    dot.mkdir()
+    real = dot / os.path.basename(rel)
+    real.write_text(content, encoding="utf-8")
+    link = tmp_path / "home" / rel
+    _symlink_or_skip(link, real)
+
+    add(link)
+    assert link.is_symlink()
+    assert os.path.samefile(link, real)
+    text = real.read_text(encoding="utf-8")
+    assert "compartment" in text and theirs in text
+    backup = link.with_name(link.name + clients.BACKUP_SUFFIX)
+    assert backup.read_text(encoding="utf-8") == content
+
+    remove(link)
+    assert link.is_symlink()
+    assert os.path.samefile(link, real)
+    text = real.read_text(encoding="utf-8")
+    assert "compartment" not in text and theirs in text
+    assert os.listdir(dot) == [real.name]       # no temp file left there
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid")
+                                        and os.geteuid() == 0),
+                    reason="a directory's mode does not stop this user "
+                           "writing in it")
+def test_a_config_linked_into_a_directory_this_cannot_write_is_refused(
+        tmp_path):
+    """A link into a read-only tree (a Nix store path) cannot be written
+    through. Renaming over the link "worked" by detaching it; now the
+    clients get the block to paste and the other writers fail as they do
+    for any file they cannot write, with the link and its file untouched."""
+    store = tmp_path / "store"
+    store.mkdir()
+    home = tmp_path / "home"
+    links = {}
+    for rel in (".cursor/mcp.json", ".codex/config.toml",
+                ".claude/settings.json", "Claude/claude_desktop_config.json"):
+        real = store / os.path.basename(rel)
+        real.write_text("", encoding="utf-8")
+        links[rel] = home / rel
+        _symlink_or_skip(links[rel], real)
+    store.chmod(0o555)
+    try:
+        for rel in (".cursor/mcp.json", ".codex/config.toml"):
+            client = clients.CLIENTS["cursor" if "cursor" in rel else "codex"]
+            res = clients.register(client, VAULT, path=links[rel])
+            assert res["written"] is False, rel
+            assert "compartment" in res["snippet"]
+            assert "cannot write" in res["reason"]
+        with pytest.raises(OSError):
+            claude_hooks.install(compartment_bin="compartment",
+                                 settings=links[".claude/settings.json"])
+        with pytest.raises(OSError):
+            claude_desktop.register(
+                "compartment", ["serve"],
+                path=links["Claude/claude_desktop_config.json"])
+        for rel, link in links.items():
+            assert link.is_symlink(), rel
+            assert link.read_text(encoding="utf-8") == ""
+            assert os.listdir(link.parent) == [link.name]   # no backup
+        assert sorted(os.listdir(store)) == sorted(
+            os.path.basename(r) for r in links)             # no temp file
+    finally:
+        store.chmod(0o755)

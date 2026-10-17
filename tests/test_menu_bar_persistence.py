@@ -32,6 +32,8 @@ which copy of the app owns the menu bar.
 """
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 
@@ -150,27 +152,166 @@ def test_turning_it_off_is_fine_when_nothing_was_loaded(fake_home,
 
 # --- stopping the app means it stopped --------------------------------------
 
-def test_quit_running_waits_for_the_process_to_actually_go(monkeypatch):
+def test_quit_running_waits_for_the_process_to_actually_go(tmp_path,
+                                                           monkeypatch):
     """It used to report success for a signal it had sent. The caller's next
     move is to start the new build, and that must not happen while the old
     copy still holds the lock."""
-    monkeypatch.setattr(menubar, "running_pids", lambda: [4242])
+    monkeypatch.setattr(menubar, "lock_holder_pid", lambda vault: 4242)
+    monkeypatch.setattr(menubar, "_instance_lock_held", lambda vault: True)
     monkeypatch.setattr(menubar.os, "kill", lambda *a: None)
-    assert menubar.quit_running(timeout=0.3) is False
+    assert menubar.quit_running(str(tmp_path / "memory.vault"),
+                                timeout=0.3) is False
 
 
-def test_quit_running_reports_success_once_it_is_gone(monkeypatch):
-    seen = []
-    monkeypatch.setattr(menubar, "running_pids",
-                        lambda: [] if seen else (seen.append(1), [4242])[1])
-    monkeypatch.setattr(menubar.os, "kill", lambda *a: None)
-    assert menubar.quit_running(timeout=5) is True
+def test_quit_running_reports_success_once_it_is_gone(tmp_path, monkeypatch):
+    gone = []
+    monkeypatch.setattr(menubar, "lock_holder_pid", lambda vault: 4242)
+    monkeypatch.setattr(menubar, "_instance_lock_held",
+                        lambda vault: not gone)
+    monkeypatch.setattr(menubar.os, "kill", lambda pid, sig: gone.append(pid))
+    assert menubar.quit_running(str(tmp_path / "memory.vault"),
+                                timeout=5) is True
+    assert gone == [4242]
+
+
+def test_a_pid_left_by_a_copy_that_has_quit_is_not_signalled(tmp_path,
+                                                             monkeypatch):
+    """The lock file keeps the pid of the last copy that held it after that
+    copy has gone, and by then the number may belong to anything. It is
+    believed only while the lock it describes is held."""
+    vault = str(tmp_path / "memory.vault")
+    menubar._pid_file(menubar._instance_lock_path(vault)).write_text(
+        "4242\n", encoding="utf-8")
+    monkeypatch.setattr(menubar.os, "kill", lambda *a: pytest.fail(
+        "signalled a pid that nobody holds the lock for"))
+    assert menubar.quit_running(vault) is False
 
 
 def test_running_pids_never_counts_this_process(monkeypatch):
     monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: type(
         "R", (), {"stdout": f"{os.getpid()}\n77\n"})())
     assert menubar.running_pids() == [77]
+
+
+#: Stands in for the status bar app: takes the vault's lock, as the app
+#: does first, and waits. Run as `<python> <bin>/compartment --vault V
+#: menubar`, which is how the app's console script runs.
+APP_STAND_IN = """
+import sys, time
+sys.path.insert(0, {src!r})
+from compartment import menubar
+vault = sys.argv[sys.argv.index("--vault") + 1]
+handle, only = menubar.acquire_instance_lock(vault)
+print("HELD" if only else "STOOD-DOWN", flush=True)
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("pgrep"),
+                    reason="pgrep, tail and POSIX signals")
+def test_only_the_app_itself_is_counted_and_stopped(tmp_path, monkeypatch):
+    """`pgrep -f "compartment.*menubar"` matched any command line naming
+    compartment and later menubar: an editor, a pager or `tail -f` open on
+    src/compartment/menubar.py, and on Linux systray.py too. quit_running
+    sent each of them SIGTERM, and the come-up checks took one for the app.
+    """
+    src = tmp_path / "src" / "compartment"
+    src.mkdir(parents=True)
+    exe = tmp_path / "bin" / "compartment"
+    exe.parent.mkdir()
+    exe.write_text(APP_STAND_IN.format(
+        src=str(Path(menubar.__file__).resolve().parents[1])),
+        encoding="utf-8")
+    vault = str(tmp_path / "memory.vault")
+    real_kill = os.kill            # the cleanup below must get past the guard
+    procs = []
+    try:
+        for name in ("menubar.py", "systray.py"):     # what an editor shows
+            (src / name).write_text("", encoding="utf-8")
+            procs.append(subprocess.Popen(["tail", "-f", str(src / name)],
+                                          stdout=subprocess.DEVNULL))
+        decoys = {p.pid for p in procs}
+        app = subprocess.Popen([sys.executable, str(exe), "--vault", vault,
+                                "menubar"], stdout=subprocess.PIPE, text=True)
+        procs.append(app)
+        assert app.stdout.readline().strip() == "HELD"
+        refused = []
+
+        def only_the_stand_in(pid, sig):
+            if pid != app.pid:
+                refused.append((pid, sig))            # signal nothing else
+                return None
+            return real_kill(pid, sig)
+        monkeypatch.setattr(menubar.os, "kill", only_the_stand_in)
+        for counted in (menubar.running_pids(), systray.running_pids()):
+            assert app.pid in counted
+            assert not decoys & set(counted), "an open file counted as the app"
+        assert menubar.quit_running(vault, timeout=10) is True
+        assert app.wait(timeout=10) != 0              # SIGTERM, not an exit
+        assert refused == []
+        assert all(p.poll() is None for p in procs if p.pid in decoys)
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                real_kill(p.pid, signal.SIGKILL)
+            p.wait(timeout=10)
+
+
+#: Says it is up and waits: stands in for any process whose command line
+#: is the point, the app or something that only looks like it.
+WAITS = "import time; print('UP', flush=True); time.sleep(60)\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("pgrep"),
+                    reason="pgrep and tail")
+def test_a_copy_for_a_vault_in_a_folder_with_a_space_is_counted(tmp_path):
+    """The pattern took the vault for one word, `--vault [^ ]+`, so a copy
+    running for a vault in a folder such as "My Vaults" was never matched,
+    and the come-up checks never saw the new copy start. A server for the
+    same vault, a command whose text names a panel, and an editor or a
+    pager open on menubar.py or systray.py in such a folder, are still not
+    the app."""
+    folder = tmp_path / "My Vaults"
+    (folder / "src" / "compartment").mkdir(parents=True)
+    vault = str(folder / "memory.vault")
+    exe = tmp_path / "bin" / "compartment"         # the console script
+    exe.parent.mkdir()
+    exe.write_text(WAITS, encoding="utf-8")
+    other = tmp_path / "other.py"                  # the -m form's arguments
+    other.write_text(WAITS, encoding="utf-8")
+    apps = [[sys.executable, str(exe), "--vault", vault, "menubar"],
+            [sys.executable, str(exe), "--vault", vault, "tray", "--show"],
+            [sys.executable, str(other), "-m", "compartment.cli", "--vault",
+             vault, "panel"]]
+    look_alike = [[sys.executable, str(exe), "--vault", vault, "serve"],
+                  [sys.executable, str(exe), "--vault", vault, "dash"],
+                  [sys.executable, str(exe), "store",
+                   "Move the settings panel to the left"]]
+    procs = []
+    try:
+        for argv in apps + look_alike:
+            procs.append(subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                          text=True))
+        for name in ("menubar.py", "systray.py"):     # what an editor shows
+            path = folder / "src" / "compartment" / name
+            path.write_text("", encoding="utf-8")
+            procs.append(subprocess.Popen(["tail", "-f", str(path)],
+                                          stdout=subprocess.DEVNULL))
+        for p in procs[:len(apps) + len(look_alike)]:
+            assert p.stdout.readline().strip() == "UP"
+        app_pids = {p.pid for p in procs[:len(apps)]}
+        decoys = {p.pid for p in procs[len(apps):]}
+        for counted in (menubar.running_pids(), systray.running_pids()):
+            assert app_pids <= set(counted), "a copy of the app missed"
+            assert not decoys & set(counted), "something else counted"
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait(timeout=10)
+            if p.stdout:
+                p.stdout.close()
 
 
 # --- which copy owns the menu bar -------------------------------------------
@@ -192,13 +333,13 @@ def test_the_lock_names_the_process_holding_it(tmp_path):
     than killing every icon on a machine that runs two vaults."""
     vault = str(tmp_path / "memory.vault")
     menubar.acquire_instance_lock(vault)
-    body = (tmp_path / menubar.INSTANCE_LOCK_NAME).read_text(encoding="utf-8")
+    body = menubar._instance_lock_path(vault).read_text(encoding="utf-8")
     assert body.strip() == str(os.getpid())
 
 
 @pytest.mark.skipif(sys.platform == "win32",
-                    reason="no pid is recorded on Windows; see "
-                           "_record_lock_holder")
+                    reason="not yet run on Windows, which keeps the pid in "
+                           "a file of its own beside the lock; see _pid_file")
 def test_the_holder_pid_is_read_back(tmp_path, monkeypatch):
     vault = str(tmp_path / "memory.vault")
     mine = os.getpid()
@@ -213,8 +354,8 @@ def test_eviction_touches_only_the_process_that_holds_this_vault(tmp_path,
                                                                  monkeypatch):
     vault = str(tmp_path / "memory.vault")
     (tmp_path).mkdir(parents=True, exist_ok=True)
-    (tmp_path / menubar.INSTANCE_LOCK_NAME).write_text("4242\n",
-                                                       encoding="utf-8")
+    menubar._pid_file(menubar._instance_lock_path(vault)).write_text(
+        "4242\n", encoding="utf-8")
     killed = []
 
     def fake_kill(pid, sig):
@@ -232,7 +373,8 @@ def test_an_incumbent_that_never_said_who_it_is_is_left_alone(tmp_path,
     Standing down costs an icon until the next login; killing a process
     picked by guesswork costs more."""
     vault = str(tmp_path / "memory.vault")
-    (tmp_path / menubar.INSTANCE_LOCK_NAME).write_text("", encoding="utf-8")
+    menubar._pid_file(menubar._instance_lock_path(vault)).write_text(
+        "", encoding="utf-8")
     monkeypatch.setattr(menubar.os, "kill",
                         lambda *a: pytest.fail("killed something unidentified"))
     assert menubar.evict_unsupervised(vault) is False
@@ -546,8 +688,9 @@ def test_windows_can_see_a_running_panel(monkeypatch):
     running, which is worse than not asking: the install waited fifteen
     seconds for an app that was already up, then started a second one."""
     _as_windows(monkeypatch)
-    rows = ('"compartment.exe","8412","Console","1","54,321 K"\n'
-            f'"compartment.exe","{os.getpid()}","Console","1","54,321 K"\n')
+    rows = _windows_process_table([
+        (8412, 900, "compartment.exe", f'"{WINDOWS_EXE}" tray'),
+        (os.getpid(), 900, "python.exe", f'"{WINDOWS_EXE}" tray')])
     monkeypatch.setattr(systray.subprocess, "run",
                         lambda *a, **k: type("R", (), {"stdout": rows})())
     assert systray.running_pids() == [8412], "and never this process"
@@ -610,16 +753,22 @@ def test_an_install_still_says_so_when_nothing_is_running(monkeypatch,
     assert "not running" in capsys.readouterr().out
 
 
-def test_windows_quit_running_reports_what_taskkill_said(monkeypatch):
+def test_windows_quit_running_reports_what_taskkill_said(monkeypatch,
+                                                         tmp_path):
     """It returned True whatever happened, so an update could be told the old
     build had gone while it was still holding the lock."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(systray.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 1})())
-    assert systray.quit_running() is False
-    monkeypatch.setattr(systray.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0})())
-    assert systray.quit_running() is True
+    _as_windows(monkeypatch)
+    vault = str(tmp_path / "memory.vault")
+    menubar._pid_file(menubar._instance_lock_path(vault)).write_text(
+        "8412\n", encoding="utf-8")
+    table = _windows_process_table(
+        [(8412, 900, "compartment.exe", f'"{WINDOWS_EXE}" tray')])
+    for code, stopped in ((1, False), (0, True)):
+        monkeypatch.setattr(systray.subprocess, "run", lambda argv, *a, **k: (
+            subprocess.CompletedProcess(argv, code, "", "")
+            if argv[0] == "taskkill"
+            else subprocess.CompletedProcess(argv, 0, table, "")))
+        assert systray.quit_running(vault) is stopped
 
 
 # --- Linux supervision: a systemd user service ------------------------------
@@ -798,6 +947,87 @@ def _as_windows(monkeypatch, exe=WINDOWS_EXE):
     monkeypatch.setattr(systray, "shutil",
                         type("S", (), {"which": staticmethod(lambda n: exe)}))
     return exe
+
+
+def _windows_process_table(rows):
+    """What `Get-CimInstance Win32_Process | Select-Object ProcessId,
+    ParentProcessId, CommandLine | ConvertTo-Csv -NoTypeInformation` prints
+    for these (pid, parent pid, image name, command line) rows."""
+    def field(value):
+        return '"' + str(value).replace('"', '""') + '"'
+    lines = ['"ProcessId","ParentProcessId","CommandLine"']
+    lines += [",".join((field(pid), field(ppid), field(cmd)))
+              for pid, ppid, _image, cmd in rows]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _tasklist(rows):
+    """What `tasklist /FI "IMAGENAME eq compartment.exe" /FO CSV /NH` prints
+    for the same rows."""
+    return "".join(f'"{image}","{pid}","Console","1","20,000 K"\r\n'
+                   for pid, _ppid, image, _cmd in rows
+                   if image == "compartment.exe")
+
+
+def test_windows_stops_only_the_tray_app(monkeypatch, tmp_path):
+    """Every console script on Windows runs as a compartment.exe: the tray
+    app's launcher, each agent's MCP server, and the launcher of the very
+    `compartment update` or `uninstall` that is asking. `taskkill /F /IM
+    compartment.exe` stopped all of them, and since they are all a
+    compartment.exe, the check that the app came up always said yes."""
+    _as_windows(monkeypatch)
+    exe = WINDOWS_EXE
+    python = "C:\\Program Files\\Python312\\python.exe"
+    vault_arg = '--vault "C:\\Users\\u\\.compartment\\memory.vault"'
+    me, parent = os.getpid(), os.getppid()
+    tray = [(4100, 900, "compartment.exe", f'"{exe}" {vault_arg} tray'),
+            (4104, 4100, "python.exe", f'"{python}" "{exe}" {vault_arg} tray')]
+    others = [
+        (5200, 7000, "compartment.exe",
+         f'"{exe}" {vault_arg} --caller claude-desktop serve'),
+        (5204, 5200, "python.exe",
+         f'"{python}" "{exe}" {vault_arg} --caller claude-desktop serve'),
+        (5300, 7100, "compartment.exe",
+         f'"{exe}" {vault_arg} --caller claude-code serve'),
+        (parent, 300, "compartment.exe", f'"{exe}" update'),
+        (me, parent, "python.exe", f'"{python}" "{exe}" update'),
+    ]
+    table = tray + others
+    ran = []
+
+    def fake_run(argv, *a, **k):
+        ran.append(list(argv))
+        out = {"powershell": _windows_process_table(table),
+               "tasklist": _tasklist(table)}.get(argv[0], "")
+        return subprocess.CompletedProcess(argv, 0, out, "")
+    monkeypatch.setattr(systray.subprocess, "run", fake_run)
+
+    assert systray.running_pids() == [4100, 4104], \
+        "only the tray app: not the servers, the update, or this process"
+    table = others
+    assert systray.running_pids() == [], "no app is running, and it says so"
+
+    # The tray app, pid 4104, leaves its pid where another process can read
+    # it back. (msvcrt's lock itself cannot be taken off Windows.)
+    vault = str(tmp_path / "memory.vault")
+    with monkeypatch.context() as m:
+        m.setattr(menubar.os, "getpid", lambda: 4104)
+        with open(menubar._instance_lock_path(vault), "a+b") as fh:
+            menubar._record_lock_holder(fh)
+    assert menubar.lock_holder_pid(vault) == 4104
+
+    table = tray + others
+    ran.clear()
+    assert systray.quit_running(vault) is True
+    assert [c for c in ran if c[0] == "taskkill"] == [
+        ["taskkill", "/F", "/PID", "4104"]]
+
+    # The tray app has gone, and Windows has given its pid to another
+    # program: the pid left in the file is not the app any more.
+    table = others + [(4104, 999, "notepad.exe", "C:\\Windows\\notepad.exe")]
+    ran.clear()
+    assert systray.quit_running(vault) is False
+    assert not [c for c in ran if c[0] == "taskkill"]
 
 
 def test_the_task_restarts_a_panel_that_failed(monkeypatch):

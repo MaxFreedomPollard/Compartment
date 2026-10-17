@@ -6,6 +6,7 @@ length leaves a prefix that fails its own checksum. The reader used to have to
 guess between the two, and guessing "crash" meant silently discarding every
 acknowledged entry after the damage, then compacting the loss away.
 """
+import json
 import struct
 import zlib
 
@@ -49,6 +50,75 @@ def test_a_torn_final_write_is_discarded_and_the_rest_survives(vault_path):
 
     v = Vault.unlock(vault_path, passphrase=PASS)
     assert v.status()["organic_records"] == 6, "acknowledged writes survive"
+
+
+def test_the_torn_write_notice_stays_out_of_what_a_command_prints(
+        vault_path, monkeypatch, capsys):
+    """The notice went to stdout: in front of the JSON every command prints,
+    and into the MCP server's JSON-RPC stream. Every other notice in the
+    package goes to stderr."""
+    from compartment import cli
+    from compartment import vault as vault_module
+    _vault_with_journal(vault_path, 2)
+    with open(vault_path, "ab") as f:            # a crash mid append, as above
+        payload = b"\x00" * 500
+        length = struct.pack(">I", len(payload))
+        f.write(length)
+        f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
+        f.write(payload[:200])
+    monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
+    monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", PASS)
+    capsys.readouterr()
+    cli.main(["--vault", vault_path, "status"])
+    out, err = capsys.readouterr()
+    assert json.loads(out)["organic_records"] == 2
+    assert "unfinished write" in err
+
+
+def _rename_refused(monkeypatch):
+    """A save's final rename refused, as on Windows while another process
+    holds the vault open, or on a disk this process cannot write. Appends
+    to the file itself still work, which is the dangerous combination."""
+    def refused(tmp, path):
+        raise PermissionError(13, "the file is in use by another process",
+                              path)
+    monkeypatch.setattr(vaultfile, "_atomic_replace", refused)
+
+
+def test_a_vault_that_cannot_be_compacted_opens_and_takes_writes(
+        vault_path, monkeypatch):
+    """Opening compacts the journal, and an open whose compaction failed
+    died with the error. It now opens with the journal left on disk; a
+    write from that handle then continues the journal where it ends,
+    sealed to its own position, or the next open would refuse the vault
+    as tampered."""
+    _vault_with_journal(vault_path, 3)
+    real = vaultfile._atomic_replace
+    _rename_refused(monkeypatch)
+    v = Vault.unlock(vault_path, passphrase=PASS)
+    assert v.status()["organic_records"] == 3
+    v.store("stored while the vault could not be compacted", caller="t")
+    monkeypatch.setattr(vaultfile, "_atomic_replace", real)
+    again = Vault.unlock(vault_path, passphrase=PASS)
+    assert again.status()["organic_records"] == 4
+
+
+def test_a_torn_tail_that_cannot_be_compacted_away_still_refuses(
+        vault_path, monkeypatch):
+    """With the torn bytes still on disk, an append would land after them
+    and the journal would no longer parse. That one case keeps failing as
+    it did, rather than open a handle that can write."""
+    _vault_with_journal(vault_path, 2)
+    with open(vault_path, "ab") as f:            # a crash mid append
+        payload = b"\x00" * 500
+        length = struct.pack(">I", len(payload))
+        f.write(length)
+        f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
+        f.write(payload[:200])
+    _rename_refused(monkeypatch)
+    with pytest.raises(PermissionError):
+        Vault.unlock(vault_path, passphrase=PASS)
 
 
 def test_a_corrupt_length_prefix_refuses_to_open(vault_path):

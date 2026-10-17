@@ -1,15 +1,23 @@
 """Regression cover for ACL grant precedence, vocabulary and isolation.
 
-Four defects are pinned here:
+Six defects are pinned here:
   1. wildcard grants resolved first-match-wins in dict order
   2. non-"rw" grants ("none", typos) still permitted reads
   3. an empty caller entry fell back to the "*" entry and was promoted
   4. VaultConfig instances shared the module default's inner dicts
+  5. a save rewrote the file in place, so an open could meet half of it
+  6. a save's temporary file had one name for every save, and a save that
+     failed left it behind
 """
 import copy
+import errno
+import json
+import pathlib
+import threading
 
 import pytest
 
+from compartment import acl
 from compartment.acl import DEFAULT_CONFIG, AclError, VaultConfig
 
 
@@ -207,6 +215,147 @@ def test_saved_and_reloaded_config_keeps_its_own_state(tmp_path):
     with pytest.raises(AclError):
         loaded.grant_for("scoped", "main")
     assert VaultConfig().grant_for("scoped", "main") == "rw"   # fresh default
+
+
+def _saved_config(tmp_path):
+    vault_path = str(tmp_path / "x.vault")
+    cfg = VaultConfig()
+    cfg.settings["auto_lock_minutes"] = 45
+    cfg.save(vault_path)
+    return vault_path, cfg
+
+
+def test_an_open_during_a_save_reads_the_old_settings_whole(tmp_path,
+                                                            monkeypatch):
+    """save() truncated the file and then wrote it, in place, and every
+    unlock reads this file. An open in between (the panel toggling a setting
+    while an MCP server or the CLI opens the vault) got an empty file and a
+    JSONDecodeError that no caller handles. The reader here looks at the
+    moment the save opens the file it is about to write."""
+    vault_path, cfg = _saved_config(tmp_path)
+    seen = []
+    real_open = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if "w" in mode:
+            try:
+                seen.append(
+                    VaultConfig.load(vault_path).settings["auto_lock_minutes"])
+            except ValueError as exc:
+                seen.append(f"{type(exc).__name__}: {exc}")
+        return f
+
+    cfg.settings["auto_lock_minutes"] = 46
+    with monkeypatch.context() as m:
+        m.setattr(acl, "open", opening, raising=False)
+        cfg.save(vault_path)
+    assert seen == [45]
+    assert VaultConfig.load(vault_path).settings["auto_lock_minutes"] == 46
+    # Same file, same JSON as before.
+    assert pathlib.Path(VaultConfig.path_for(vault_path)).read_text(
+        encoding="utf-8") == json.dumps(
+            {"callers": cfg.callers, "settings": cfg.settings}, indent=2)
+
+
+class _DiskFillsUp:
+    """A file that takes 40 characters and then reports the disk full, the
+    way a write ends on a disk with no room left."""
+
+    def __init__(self, f):
+        self._f, self._room = f, 40
+
+    def write(self, s):
+        if len(s) > self._room:
+            self._f.write(s[:self._room])
+            self._room = 0
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self._room -= len(s)
+        return self._f.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+def test_a_save_on_a_full_disk_leaves_the_old_settings_whole(tmp_path,
+                                                             monkeypatch):
+    """The cut-short file stayed cut short, so every later unlock, in every
+    process, failed to parse it until someone repaired the JSON by hand."""
+    vault_path, cfg = _saved_config(tmp_path)
+    path = pathlib.Path(VaultConfig.path_for(vault_path))
+    before = path.read_bytes()
+    real_open = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return _DiskFillsUp(f) if "w" in mode else f
+
+    cfg.settings["auto_lock_minutes"] = 46
+    with monkeypatch.context() as m:
+        m.setattr(acl, "open", opening, raising=False)
+        with pytest.raises(OSError, match="No space left"):
+            cfg.save(vault_path)
+    assert path.read_bytes() == before
+    assert VaultConfig.load(vault_path).settings["auto_lock_minutes"] == 45
+
+
+def test_two_saves_at_once_each_leave_the_file_whole(tmp_path, monkeypatch):
+    """Every save wrote <config>.tmp, so two at the same moment (the panel
+    and the CLI) shared one file: the second's open emptied what the first
+    had written, the first rename moved whatever was there into place, and
+    the second found nothing to rename. Here both have written before
+    either renames."""
+    vault_path, _ = _saved_config(tmp_path)
+    both_written = threading.Barrier(2, timeout=10)
+    real = acl._atomic_replace
+
+    def replace(tmp, path):
+        both_written.wait()
+        real(tmp, path)
+    monkeypatch.setattr(acl, "_atomic_replace", replace)
+    wanted, errors = [], []
+
+    def save(minutes):
+        cfg = VaultConfig()
+        cfg.settings["auto_lock_minutes"] = minutes
+        wanted.append(json.dumps({"callers": cfg.callers,
+                                  "settings": cfg.settings}, indent=2))
+        try:
+            cfg.save(vault_path)
+        except Exception as exc:                        # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+    savers = [threading.Thread(target=save, args=(m,)) for m in (46, 47)]
+    for t in savers:
+        t.start()
+    for t in savers:
+        t.join(timeout=30)
+    assert errors == []
+    assert pathlib.Path(VaultConfig.path_for(vault_path)).read_text(
+        encoding="utf-8") in wanted                     # one of them, whole
+    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"] == []
+
+
+def test_a_save_that_fails_leaves_no_temporary_file(tmp_path, monkeypatch):
+    """The old settings stayed whole, and the cut-short temporary file
+    stayed too, beside the vault, for good."""
+    vault_path, cfg = _saved_config(tmp_path)
+    real_open = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return _DiskFillsUp(f) if "w" in mode else f
+
+    with monkeypatch.context() as m:
+        m.setattr(acl, "open", opening, raising=False)
+        with pytest.raises(OSError, match="No space left"):
+            cfg.save(vault_path)
+    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"] == []
 
 
 # -- no-regression: the shipped default and packs ----------------------------

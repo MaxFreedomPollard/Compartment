@@ -69,14 +69,47 @@ def _maybe_keyfile(args) -> bytes | None:
     return Vault.load_keyfile_hint(args.vault)
 
 
+#: What a command says instead of asking for the vault's passphrase where
+#: nobody can type it.
+LOCKED_NOT_INTERACTIVE = ("vault is locked: run `compartment unlock`, or set "
+                          "COMPARTMENT_PASSPHRASE")
+
+
+def _can_prompt() -> bool:
+    """Whether a person can answer a passphrase prompt: stdin is a terminal.
+
+    getpass otherwise reads stdin, where nobody types: on an open pipe it
+    waits for good, on a closed one it dies with EOFError, and a program
+    that has a terminal and runs this with stdin piped would have the
+    prompt, and the keys typed at it, taken from its user's terminal."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _open_vault(args) -> Vault:
     try:
         pw, key = Vault.resolve_credential(args.vault)
     except CryptoError:
+        if not _can_prompt():
+            _die(LOCKED_NOT_INTERACTIVE)
         pw = getpass.getpass(f"Passphrase for {args.vault}: ")
         key = None
     kf = None if key is not None else _maybe_keyfile(args)
     return Vault.unlock(args.vault, passphrase=pw, raw_key=key, keyfile=kf)
+
+
+def _save_reads(v: Vault) -> None:
+    """Save the audit rows a read appended in RAM. On a vault this process
+    cannot write (a backup disk, a mounted snapshot) the read has already
+    answered and the rows cannot reach that disk: said on stderr, rather
+    than a traceback and a failed command for a read that worked."""
+    try:
+        v.save()
+    except OSError as exc:
+        print(f"note: the audit entry for this read was not saved ({exc})",
+              file=sys.stderr)
 
 
 def _data_dir() -> Path:
@@ -136,12 +169,15 @@ def cmd_init(args) -> None:
         # and compared the two entries where the user could see them, so this
         # takes the agreed one down a pipe rather than putting a secret in a
         # command line every process on the machine can read.
-        pw = sys.stdin.readline().rstrip("\r\n")
+        pw = _passphrase_from_stdin()
         if not pw:
             _die("no passphrase on stdin")
     elif args.passphrase:
         pw = args.passphrase
     else:
+        if not _can_prompt():
+            _die("a passphrase is needed: use --passphrase or "
+                 "--passphrase-stdin when not interactive")
         pw = getpass.getpass("Choose a passphrase: ")
         pw2 = getpass.getpass("Repeat passphrase:  ")
         if pw != pw2:
@@ -412,6 +448,8 @@ def cmd_update(args) -> None:
     print(f"Compartment {__version__} - updating ({kind} install)")
     print("  " + " ".join(cmd))
     try:
+        # The one call that keeps the terminal: its output is the user's to
+        # see, and pip may have to ask for a private index's credentials.
         res = subprocess.run(cmd, timeout=1800)
     except (OSError, subprocess.SubprocessError) as exc:
         _die(f"update failed to run: {exc}")
@@ -419,9 +457,14 @@ def cmd_update(args) -> None:
         _die(f"update failed (exit {res.returncode})")
     ver = "?"
     try:
+        # The CLI writes UTF-8 whatever the console's code page. Left to the
+        # default, this decodes with the locale's (the ANSI code page on
+        # Windows), and a user folder name it could not decode made update
+        # die after the upgrade.
         out = subprocess.run([shutil.which("compartment") or "compartment",
                               "--version"], capture_output=True, text=True,
-                             timeout=120)
+                             encoding="utf-8", errors="replace",
+                             stdin=subprocess.DEVNULL, timeout=120)
         ver = (out.stdout or "").strip() or "?"
     except (OSError, subprocess.SubprocessError):
         pass
@@ -443,7 +486,9 @@ def cmd_update(args) -> None:
     try:
         ref = subprocess.run([shutil.which("compartment") or "compartment",
                               "integrate", "--refresh"],
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace",
+                             stdin=subprocess.DEVNULL, timeout=120)
         if ref.returncode == 0 and ref.stdout.strip():
             print(ref.stdout.rstrip())
     except (OSError, subprocess.SubprocessError):
@@ -471,7 +516,7 @@ def _restart_status_bar_app(vault: str) -> None:
         pass
     try:
         app = _tray_app()
-        app.quit_running()
+        app.quit_running(vault)
     except Exception:                                    # noqa: BLE001
         pass
     _start_status_bar_app(vault)
@@ -491,7 +536,7 @@ def cmd_uninstall(args) -> None:
         if linux:
             print("  applications menu entry: removed")
         try:
-            print("  app stopped" if app.quit_running()
+            print("  app stopped" if app.quit_running(args.vault)
                   else "  app: nothing was running")
         except Exception:                                # noqa: BLE001
             pass
@@ -515,23 +560,95 @@ def cmd_uninstall(args) -> None:
     except Exception as exc:                             # noqa: BLE001
         print(f"  capture hook: {exc}")
     # Installing wrote a file into each agent's own skills directory, so
-    # uninstalling takes it back. Only the skill file itself: a backup of an
-    # edited copy stays, and so does the directory if anything else is in it.
+    # uninstalling takes it back. Only the skill file as it was written: an
+    # edited copy stays and is named, a backup of one stays, and so does the
+    # directory if anything else is in it.
     for _t in agent_skill.SKILL_TARGETS:
         try:
             if agent_skill.remove(_t):
                 print(f"  /compartmentalize skill removed from {_t}")
+            elif (agent_skill.is_installed(_t)
+                  and not agent_skill.is_current(_t)):
+                print(f"  /compartmentalize skill kept in {_t}: it differs "
+                      "from the packaged copy, so it may hold your edits "
+                      f"({agent_skill.skill_path(_t)})")
         except Exception as exc:                         # noqa: BLE001
             print(f"  {_t} skill: {exc}")
     from .home import LEGACY_NAME, NAME
     for name in (NAME, LEGACY_NAME):
         try:
             r = subprocess.run(["claude", "mcp", "remove", name],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
+                               stdin=subprocess.DEVNULL, timeout=120)
             if r.returncode == 0:
                 print(f"  MCP registration removed: {name}")
         except (OSError, subprocess.SubprocessError):
             pass
+    # The rest of what integrate wrote points at the program about to be
+    # removed, so it goes too: each step on its own, and reported.
+    try:
+        if claude_desktop.unregister():
+            print("  Claude Desktop registration removed")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  Claude Desktop: {exc}")
+    for client in clients.CLIENTS.values():
+        try:
+            if not clients.is_registered(client):
+                continue
+            if clients.unregister(client):
+                print(f"  removed from {client.display} "
+                      f"({client.config_path()})")
+            else:
+                print(f"  {client.display}: left as it is; remove "
+                      f"compartment from {client.config_path()} by hand")
+        except Exception as exc:                         # noqa: BLE001
+            print(f"  {client.display}: {exc}")
+    openclaw = Path(os.environ.get("OPENCLAW_HOME",
+                                   Path.home() / ".openclaw")) / "openclaw.json"
+    try:
+        cfg = (json.loads(openclaw.read_text(encoding="utf-8"))
+               if openclaw.is_file() else {})
+        servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
+        if isinstance(servers, dict) and "compartment" in servers:
+            del servers["compartment"]
+            # As integrate wrote it: backed up, then replaced whole.
+            clients.write_config(openclaw, json.dumps(cfg, indent=2))
+            print(f"  OpenClaw registration removed from {openclaw}")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  OpenClaw: {openclaw} left as it is ({exc})")
+    try:
+        md = _remove_managed_claude_md()
+        if md:
+            print(f"  compartment block removed from {md}")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  CLAUDE.md: {exc}")
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    plugin = hermes_home / "plugins" / "compartment"
+    try:
+        files = ("__init__.py", "plugin.yaml")
+        if all((plugin / f).is_file() for f in files):
+            packaged = _data_dir() / "hermes-plugin"
+            if plugin.is_symlink():         # integrate copies; a link is theirs
+                print(f"  Hermes provider plugin kept at {plugin}: it is a "
+                      f"link to {plugin.resolve()}")
+            elif all((plugin / f).read_bytes() == (packaged / f).read_bytes()
+                     for f in files):
+                for f in files:
+                    (plugin / f).unlink()
+                # The bytecode Hermes compiled from it, then the directory
+                # once nothing else is in it.
+                shutil.rmtree(plugin / "__pycache__", ignore_errors=True)
+                try:
+                    plugin.rmdir()
+                except OSError:
+                    pass
+                print(f"  Hermes provider plugin removed from {plugin}")
+            else:
+                print(f"  Hermes provider plugin kept at {plugin}: it "
+                      "differs from the packaged copy")
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  Hermes plugin: {exc}")
     if args.purge:
         # only on an explicit --purge: this is the only copy of everything
         # the agent has ever learned, and it is not recoverable.
@@ -559,6 +676,21 @@ def _ask_yn(q: str) -> bool:
     return input(f"{q} [y/N] ").strip().lower().startswith("y")
 
 
+def _passphrase_from_stdin() -> str:
+    """One line of stdin, decoded as the UTF-8 the apps write it in.
+
+    Python decodes a piped stdin with the locale's encoding, which on
+    Windows is the ANSI code page (UTF-8 mode is off there by default): a
+    passphrase with an accented letter, sent by the tray app, arrived as
+    other text, and one with 0x81 or 0x8D in its UTF-8 bytes crashed the
+    read. Strict, because a replaced character would silently be another
+    passphrase."""
+    try:
+        return sys.stdin.buffer.readline().decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError:
+        _die("the passphrase on stdin is not UTF-8")
+
+
 def _read_passphrase(args, prompt: str = "Passphrase: ") -> str:
     """Get the passphrase without ever putting it in argv.
 
@@ -568,10 +700,13 @@ def _read_passphrase(args, prompt: str = "Passphrase: ") -> str:
     the secret down a pipe, where nothing else can see it.
     """
     if getattr(args, "passphrase_stdin", False):
-        pw = sys.stdin.readline().rstrip("\r\n")
+        pw = _passphrase_from_stdin()
         if not pw:
             _die("no passphrase on stdin")
         return pw
+    if not args.passphrase and not _can_prompt():
+        _die("a passphrase is needed: use --passphrase-stdin when not "
+             "interactive")
     return args.passphrase or getpass.getpass(prompt)
 
 
@@ -622,8 +757,6 @@ def cmd_status(args) -> None:
         _die(f"no vault at {args.vault} (run `compartment init`)")
     try:
         pw, key = Vault.resolve_credential(args.vault)
-        v = Vault.unlock(args.vault, passphrase=pw, raw_key=key)
-        _print(v.status())
     except CryptoError:
         loaded = read_vault_file(args.vault)
         _print({"vault": args.vault, "locked": True,
@@ -631,6 +764,17 @@ def cmd_status(args) -> None:
                 "created": loaded.header.created,
                 "signed": loaded.header.manifest is not None,
                 "size_bytes": os.path.getsize(args.vault)})
+        return
+    try:
+        kf = None if key is not None else Vault.load_keyfile_hint(args.vault)
+        v = Vault.unlock(args.vault, passphrase=pw, raw_key=key, keyfile=kf)
+    except CryptoError as exc:
+        # A credential that does not open the vault is not a locked vault.
+        # A model pin mismatch, a two-factor keyfile, a damaged file: each
+        # names its own remedy, and "locked" would send the user to unlock.
+        _print({"vault": args.vault, "locked": False, "error": str(exc)})
+        return
+    _print(v.status())
 
 
 def cmd_store(args) -> None:
@@ -829,7 +973,7 @@ def cmd_recent(args) -> None:
             tags = [t for t in r.get("tags", []) if not t.startswith("id:")]
             if tags:
                 print(f"{'':>19}tags: {', '.join(tags[:6])}")
-    v.save()
+    _save_reads(v)
 
 
 def _tray_app():
@@ -936,7 +1080,7 @@ def cmd_search(args) -> None:
             q = " ⚠QUARANTINED" if r.get("quarantined") else ""
             print(f"[{r['cosine']:.3f}] ({r['namespace']}){q} {r['text']}")
         print(f"-- {out['note']}")
-    v.save()
+    _save_reads(v)
 
 
 def _ts(s: str | None) -> float | None:
@@ -977,7 +1121,7 @@ def cmd_relations(args) -> None:
         nrel = len(out["relations"])
         print(f"-- {nrel} {'relation' if nrel == 1 else 'relations'}. "
               f"{out['note']}")
-    v.save()
+    _save_reads(v)
 
 
 def cmd_unlink(args) -> None:
@@ -988,6 +1132,7 @@ def cmd_unlink(args) -> None:
 def cmd_get(args) -> None:
     v = _open_vault(args)
     _print(v.get(args.id, caller=args.caller))
+    _save_reads(v)
 
 
 def cmd_forget(args) -> None:
@@ -1008,7 +1153,7 @@ def cmd_export(args) -> None:
         print(f"exported {n} {'record' if n == 1 else 'records'} → {args.out}")
     else:
         _die("export writes plaintext; pass --plaintext to confirm you want that")
-    v.save()
+    _save_reads(v)
 
 
 def cmd_import(args) -> None:
@@ -1023,10 +1168,12 @@ def cmd_rekey(args) -> None:
         # The apps confirm the repeat in their own dialog, where the user can
         # see both fields, and send one line. Same reasoning as unlock: the
         # secret goes down a pipe, never into argv.
-        pw = sys.stdin.readline().rstrip("\r\n")
+        pw = _passphrase_from_stdin()
         if not pw:
             _die("no passphrase on stdin")
     else:
+        if not _can_prompt():
+            _die("--new-passphrase-stdin required when not interactive")
         pw = getpass.getpass("NEW passphrase (you choose it - nothing is "
                              "generated for you): ")
         if pw != getpass.getpass("Repeat NEW passphrase: "):
@@ -1105,6 +1252,8 @@ def cmd_reindex(args) -> None:
         try:
             pw, key = Vault.resolve_credential(args.vault)
         except CryptoError:
+            if not _can_prompt():
+                _die(LOCKED_NOT_INTERACTIVE)
             pw = getpass.getpass(f"Passphrase for {args.vault}: ")
             key = None
         v = Vault.unlock(args.vault, passphrase=pw, raw_key=key,
@@ -1313,6 +1462,9 @@ def cmd_pack_build(args) -> None:
     vectors = emb.embed_passages([r["text"] for r in records])
     pw = None
     if args.encrypt:
+        if not _can_prompt():
+            _die("--encrypt asks for the pack passphrase, which needs a "
+                 "terminal")
         pw = getpass.getpass("Pack passphrase: ")
     blob = packs.build_pack(
         name=args.name, version=args.version, description=args.description,
@@ -1327,6 +1479,9 @@ def cmd_pack_build(args) -> None:
 
 def cmd_pack_install(args) -> None:
     v = _open_vault(args)
+    if args.encrypted and not _can_prompt():
+        _die("--encrypted asks for the pack passphrase, which needs a "
+             "terminal")
     pw = getpass.getpass("Pack passphrase: ") if args.encrypted else None
     out = packs.install_pack(v, Path(args.file).read_bytes(), caller=args.caller,
                              passphrase=pw, allow_reembed=args.re_embed,
@@ -1409,7 +1564,33 @@ def _write_managed_claude_md() -> Path:
         text = pre + block + post
     else:
         text = (text.rstrip() + "\n\n" + block + "\n") if text.strip() else block + "\n"
-    md.write_text(text, encoding="utf-8")
+    # Backed up and replaced whole: a write cut short must not leave the
+    # user's own file truncated.
+    clients.write_config(md, text)
+    return md
+
+
+def _remove_managed_claude_md() -> Path | None:
+    """Take the fenced block back out of the user's CLAUDE.md: the inverse
+    of _write_managed_claude_md, leaving everything outside the markers as
+    it is. Returns the file, or None when it holds no block."""
+    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    if not md.is_file():
+        return None
+    text = md.read_text(encoding="utf-8")
+    start = text.find(_CLAUDE_MD_BEGIN)
+    end = (text.find(_CLAUDE_MD_END, start + len(_CLAUDE_MD_BEGIN))
+           if start >= 0 else -1)
+    if end < 0:
+        return None
+    pre, post = text[:start], text[end + len(_CLAUDE_MD_END):]
+    # The newlines the writer put around it go too: the blank line after the
+    # user's text, and the end of the END line.
+    if pre.endswith("\n\n"):
+        pre = pre[:-1]
+    if post.startswith("\n"):
+        post = post[1:]
+    clients.write_config(md, pre + post)
     return md
 
 
@@ -1457,7 +1638,10 @@ def _install_capture_hook(vault: str, skip: bool = False) -> None:
               "with `compartment hook install`.")
         return
     try:
-        out = claude_hooks.install(vault=vault)
+        # The same executable the MCP registration names, not whatever
+        # `compartment` happens to be on this process's PATH.
+        out = claude_hooks.install(compartment_bin=clients.executable(),
+                                   vault=vault)
     except ValueError as exc:            # malformed settings.json - never guess
         print(f"\n  ! {exc}")
         print("    fix the file, then run `compartment hook install`")
@@ -1528,6 +1712,8 @@ def _refresh_installed() -> list[str]:
                 done.append(f"updated the compartment block in {md}")
     except OSError as exc:
         done.append(f"! could not update {md} ({exc})")
+    except UnicodeDecodeError:          # the user's file, left as it is
+        done.append(f"! could not update {md}: not UTF-8")
 
     for target in agent_skill.SKILL_TARGETS:
         if not agent_skill.is_installed(target) or agent_skill.is_current(target):
@@ -1643,7 +1829,11 @@ def _integrate_all(args) -> None:
         return
     print(f"{len(found)} client(s) found\n")
     for c in found:
-        _integrate_client(c, args, brief=True)
+        try:
+            _integrate_client(c, args, brief=True)
+        except Exception as exc:                 # noqa: BLE001
+            # One client's file must not stop the rest being wired.
+            print(f"• {c.display}: skipped ({exc})")
     print("\nrestart any client that was running to pick it up.")
 
 
@@ -1651,6 +1841,15 @@ def _integrate_client(client, args, brief: bool = False) -> None:
     """Register compartment with one MCP client, or say why not."""
     if getattr(args, "remove", False):
         gone = clients.unregister(client)
+        if not gone and clients.is_registered(client):
+            # Taking it out would have broken the file or left part of it,
+            # so the file is as it was and the user gets what to remove.
+            print(f"• {client.display}: left as it is; compartment could not "
+                  f"be taken out of {client.config_path()} without breaking "
+                  "it. Remove this entry by hand:")
+            for line in clients.snippet(client, args.vault).splitlines():
+                print(f"   {line}")
+            return
         print(f"{'removed from' if gone else 'was not in'} "
               f"{client.display} ({client.config_path()})")
         return
@@ -1675,6 +1874,17 @@ def _integrate_client(client, args, brief: bool = False) -> None:
               "create one")
 
 
+#: How long `integrate` waits for another program's CLI it runs (Hermes's,
+#: Claude Code's) before printing the command to finish by hand. Each is a
+#: small step for that program; one busy updating itself is no reason to
+#: hold an install for as long as that takes.
+AGENT_TOOL_TIMEOUT = 120
+#: The `import compartment` check in Hermes's own interpreter.
+HERMES_IMPORT_TIMEOUT = 30
+#: pip installing compartment into Hermes's own environment.
+HERMES_PIP_TIMEOUT = 300
+
+
 def _integrate_target(args) -> None:
     import shutil
     import subprocess as sp
@@ -1692,21 +1902,52 @@ def _integrate_target(args) -> None:
         # compartment must be importable from Hermes's own venv
         hermes_py = hermes_home / "hermes-agent" / "venv" / "bin" / "python"
         if hermes_py.exists():
-            r = sp.run([str(hermes_py), "-c", "import compartment"], capture_output=True)
-            if r.returncode != 0:
-                print("  installing compartment into the Hermes venv…")
-                sp.run([str(hermes_py), "-m", "pip", "install", "-q",
-                        "compartment"], check=False)
+            # No stdin for any program run here: a question one of them asks
+            # must fail, not wait on the user's keyboard, and a failure or a
+            # timeout prints the command that finishes the step by hand.
+            by_hand = (f"  install it by hand with:  {hermes_py} -m pip "
+                       "install compartment")
+            try:
+                r = sp.run([str(hermes_py), "-c", "import compartment"],
+                           capture_output=True, stdin=sp.DEVNULL,
+                           timeout=HERMES_IMPORT_TIMEOUT)
+            except sp.TimeoutExpired:
+                print(f"  the Hermes venv did not answer within "
+                      f"{HERMES_IMPORT_TIMEOUT} s;")
+                print(by_hand)
+            else:
+                if r.returncode != 0:
+                    print("  installing compartment into the Hermes venv…")
+                    try:
+                        failed = sp.run(
+                            [str(hermes_py), "-m", "pip", "install", "-q",
+                             "compartment"], check=False, stdin=sp.DEVNULL,
+                            timeout=HERMES_PIP_TIMEOUT).returncode != 0
+                    except sp.TimeoutExpired:
+                        print(f"  pip did not finish within "
+                              f"{HERMES_PIP_TIMEOUT} s;")
+                        failed = True
+                    if failed:
+                        print(by_hand)
         if not os.path.exists(vault):
             print(f"! no vault at {vault} - run `compartment init` first, then re-run "
                   "this command")
             return
         hermes = shutil.which("hermes")
+        finish = "  finish selection with:  hermes memory setup compartment"
         if hermes:
             print("  selecting compartment in Hermes…")
-            sp.run([hermes, "memory", "setup", "compartment"], check=False)
+            try:
+                failed = sp.run([hermes, "memory", "setup", "compartment"],
+                                check=False, stdin=sp.DEVNULL,
+                                timeout=AGENT_TOOL_TIMEOUT).returncode != 0
+            except sp.TimeoutExpired:
+                print(f"  Hermes did not finish within {AGENT_TOOL_TIMEOUT} s;")
+                failed = True
+            if failed:
+                print(finish)
         else:
-            print("  finish selection with:  hermes memory setup compartment")
+            print(finish)
         print("Done. Verify with:  hermes memory status")
 
     elif target == "openclaw":
@@ -1724,19 +1965,18 @@ def _integrate_target(args) -> None:
                 existed = cfg_path.is_file()
                 cfg = (json.loads(cfg_path.read_text(encoding="utf-8"))
                        if existed else {})
-                backup = None
-                if existed:
-                    backup = cfg_path.with_suffix(".json.bak-compartment")
-                    backup.write_bytes(cfg_path.read_bytes())  # byte-exact recovery copy
+                if not isinstance(cfg, dict):      # null, a list: not a config
+                    raise ValueError("not a JSON object")
                 cfg.setdefault("mcpServers", {})["compartment"] = entry
-                cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                # A byte-exact backup first, then the file replaced whole.
+                backup = clients.write_config(cfg_path,
+                                              json.dumps(cfg, indent=2))
                 wrote = True
                 print(f"✓ registered in {cfg_path}"
                       + (f" (backup: {backup.name})" if backup else ""))
                 print("  restart to load:  openclaw gateway restart")
                 print("  verify:           openclaw mcp list")
-            except (json.JSONDecodeError, OSError) as exc:
+            except (ValueError, OSError) as exc:
                 print(f"  could not edit {cfg_path} automatically ({exc});")
         if not wrote:
             print("  add this under \"mcpServers\" in ~/.openclaw/openclaw.json, "
@@ -1752,17 +1992,26 @@ def _integrate_target(args) -> None:
         # inherit anyway.
         compartment_bin = clients.executable()
         claude = shutil.which("claude")
+        by_hand = (f"    claude mcp add --scope user compartment -- "
+                   f"{compartment_bin} --vault {vault} --caller claude-code "
+                   "serve")
         if claude:
             print("  registering the Compartment MCP server with Claude Code…")
-            r = sp.run([claude, "mcp", "add", "--scope", "user", "compartment", "--",
-                        compartment_bin, "--vault", vault, "--caller", "claude-code",
-                        "serve"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-            print((r.stdout or r.stderr).strip() or "  registered.")
+            try:
+                r = sp.run([claude, "mcp", "add", "--scope", "user",
+                            "compartment", "--", compartment_bin, "--vault",
+                            vault, "--caller", "claude-code", "serve"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", stdin=sp.DEVNULL,
+                           timeout=AGENT_TOOL_TIMEOUT)
+                print((r.stdout or r.stderr).strip() or "  registered.")
+            except sp.TimeoutExpired:
+                print(f"  Claude Code did not finish within "
+                      f"{AGENT_TOOL_TIMEOUT} s; register manually with:")
+                print(by_hand)
         else:
             print("  Claude Code CLI not found; register manually with:")
-            print(f"    claude mcp add --scope user compartment -- {compartment_bin} "
-                  f"--vault {vault} --caller claude-code serve")
+            print(by_hand)
         # Claude Desktop is a separate program with a separate config file, so
         # wiring Claude Code leaves it connected to nothing. This used to print
         # the block and leave the pasting to the user, which is not connecting
@@ -1798,6 +2047,9 @@ def _integrate_target(args) -> None:
         except OSError as exc:
             print(f"\n  ! could not update CLAUDE.md ({exc}); the MCP server "
                   "still advertises its instructions on connect")
+        except UnicodeDecodeError:      # the user's file, left as it is
+            print("\n  ! could not update CLAUDE.md: not UTF-8; the MCP "
+                  "server still advertises its instructions on connect")
         print("  The server also self-describes over the MCP handshake, so "
               "Claude treats compartment as memory with no further setup.")
         if not os.path.exists(vault):

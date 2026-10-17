@@ -403,6 +403,94 @@ def test_lock_runs_with_no_view_holding_the_key(vault_path, quiet_agents):
     assert st["locked"] is True and st["recent"] == []
 
 
+def test_lock_stops_the_dashboard_the_panel_started(vault_path, quiet_agents,
+                                                    monkeypatch):
+    """A dashboard started from the panel keeps an unlocked vault of its
+    own. Lock stopped the view and left it running, so its page went on
+    serving decrypted memories after the lock; only Quit stopped it."""
+    import subprocess
+    _open(vault_path)
+    dash = subprocess.Popen([sys.executable, "-c",
+                             "import time; time.sleep(30)"])
+    monkeypatch.setitem(menubar._DASH, "proc", dash)
+    monkeypatch.setitem(menubar._DASH, "url", "http://127.0.0.1:1/token/")
+    try:
+        ps = menubar.PanelState(vault_path, view=_FakeView())
+        assert ps.lock(lambda: session.clear(vault_path) or True) is True
+        assert dash.poll() is not None, "the dashboard was left serving"
+        assert menubar._DASH["proc"] is None
+    finally:
+        if dash.poll() is None:
+            dash.kill()
+        dash.wait(timeout=10)
+
+
+def test_a_setting_changed_in_the_panel_is_saved_and_shown(vault_path,
+                                                           quiet_agents):
+    _open(vault_path)
+    ps = menubar.PanelState(vault_path, view=_FakeView())
+    assert ps.change_setting("auto_lock_minutes", 15) is True
+    assert ps.snapshot()["settings"]["auto_lock_minutes"] == 15
+    assert menubar.read_settings(vault_path)["auto_lock_minutes"] == 15
+
+
+def test_a_setting_that_cannot_be_saved_says_so(vault_path, quiet_agents):
+    """A config that does not parse - cut short mid-write, or a hand edit -
+    made set_setting raise inside the switch's handler, where nothing caught
+    it: the switch moved, nothing was saved, and nothing said so."""
+    from compartment.acl import VaultConfig
+    _open(vault_path)
+    ps = menubar.PanelState(vault_path, view=_FakeView())
+    ps.refresh()
+    before = ps.snapshot()["settings"]
+    with open(VaultConfig.path_for(vault_path), "w", encoding="utf-8"):
+        pass                                  # the config, empty
+    with pytest.raises(ValueError):           # what the handler has to catch
+        menubar.set_setting(vault_path, "search_starter_facts", False)
+    assert ps.change_setting("search_starter_facts", False) is False
+    st = ps.snapshot()
+    assert "could not save" in st["error"].lower()
+    assert st["settings"] == before           # the switch goes back
+
+
+def test_a_slow_button_runs_off_the_thread_that_clicked():
+    """Connect waits on the agent's own tool and Create on all of `init`,
+    for up to five and fifteen minutes. Run on the UI thread, where a
+    click's handler runs, each froze the app for that long, Quit included.
+    The work goes to a thread of its own, and its answer is handed back."""
+    gate, landed = threading.Event(), threading.Event()
+    got = []
+    clicked = threading.get_ident()
+
+    def work():
+        gate.wait(10)                      # the agent's tool, still going
+        return True, "Hermes is connected."
+
+    menubar.run_in_background(work, lambda out: (
+        got.append((out, threading.get_ident())), landed.set()))
+    assert got == [], "the click waited for the work"
+    gate.set()
+    assert landed.wait(10)
+    out, where = got[0]
+    assert out == (True, "Hermes is connected.")
+    assert where != clicked
+
+
+def test_a_button_whose_work_fails_still_hears_back():
+    """The buttons are disabled until the answer lands. Work that raised
+    and never answered would leave them disabled for good."""
+    landed = threading.Event()
+    got = []
+
+    def work():
+        raise RuntimeError("hermes exited with 1")
+
+    menubar.run_in_background(work, lambda out: (got.append(out),
+                                                 landed.set()))
+    assert landed.wait(10)
+    assert isinstance(got[0], RuntimeError) and "hermes" in str(got[0])
+
+
 def test_refresh_async_reruns_once_for_requests_made_meanwhile(vault_path,
                                                                 quiet_agents):
     _open(vault_path)

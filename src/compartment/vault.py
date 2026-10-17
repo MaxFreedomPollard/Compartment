@@ -23,6 +23,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -288,7 +289,7 @@ class Vault:
         #: When the expiry sweep last ran. Zero means never, so the first read
         #: after opening always sweeps.
         self._last_expiry_sweep = 0.0
-        self._disk_state: tuple[int, int] | None = None
+        self._disk_state: tuple[int, int, int] | None = None
         if os.path.exists(path):
             self._disk_state = self._stat_disk()
         self.index = None
@@ -297,9 +298,12 @@ class Vault:
 
     # -------------------------------------------------- multi-process safety
 
-    def _stat_disk(self) -> tuple[int, int]:
+    def _stat_disk(self) -> tuple[int, int, int]:
+        # The inode as well, as in platforms.file_signature: another
+        # process's compaction can leave a file of the same length with, on a
+        # coarse clock, the same time, and only the inode shows it is new.
         st = os.stat(self.path)
-        return (st.st_mtime_ns, st.st_size)
+        return (st.st_ino, st.st_size, st.st_mtime_ns)
 
     def is_stale(self) -> bool:
         """True if the vault file changed under us since we read it.
@@ -419,7 +423,10 @@ class Vault:
         # model pin check (I3: refuse to run degraded)
         model_name = db.get_meta("model_name")
         config = VaultConfig.load(path)
-        v = cls(path, loaded.header, db, master, config)
+        # No index yet: the one search uses is built once, after the journal
+        # replay below. Nothing in between reads it, and a build from the
+        # payload alone was thrown away unused.
+        v = cls(path, loaded.header, db, master, config, build_index=False)
         # What this vault holds is the file as it was READ, so that is what
         # later saves must check against. The constructor stats the disk now,
         # after the decrypt: an append another process made in between would
@@ -443,8 +450,22 @@ class Vault:
                       "write at the end of the journal were discarded. The "
                       "write was never acknowledged, so nothing confirmed was "
                       "lost. This is the expected result of a crash or power "
-                      "loss during a store.")
-            v.save()  # compact replayed journal into the payload
+                      "loss during a store.", file=sys.stderr, flush=True)
+            try:
+                v.save()  # compact replayed journal into the payload
+            except OSError:
+                # Best effort: a vault on a disk this process cannot write
+                # (a backup, a mounted snapshot; on Windows, a file another
+                # process holds open) still opens, with the replayed state
+                # in RAM and the journal still on disk, as any reader of the
+                # file has it. Entries are sealed to their position, so an
+                # append from here continues the journal where it ends. With
+                # a torn tail still on disk an append would land after the
+                # torn bytes and the journal would no longer parse: that
+                # one case refuses, as it did.
+                if loaded.truncated_tail:
+                    raise
+                v._journal_seq = len(entries)
         if check_model:
             # The pin is a hash of a file, so hashing the file is the whole
             # check. Opening a vault used to build the encoder to answer this
@@ -508,6 +529,7 @@ class Vault:
         # both the namespace and the pack name, which is the recency
         # population's own predicate.
         self.db._invalidate_recency()
+        self.db._invalidate_namespaces()
         registry = json.loads(self.db.get_meta("packs", "{}"))
         registry.pop("starter", None)
         self.db.set_meta("packs", json.dumps(registry))
@@ -660,17 +682,9 @@ class Vault:
                 shared=self._embed_daemon_setting())
         return self._embedder
 
-    def _rank_candidates(self, query: str, qvec, pool: int,
-                         namespaces: set[str] | None = None):
-        """Score one candidate pool. Returns (fused, cosine, static).
-
-        `fused` is the score a caller sees: the evidence with the semantic
-        channel aged by how much of the vault is newer, times the prior.
-        `static` is the same score with no ageing, and it is what decides
-        MEMBERSHIP: how relevant a memory is cannot be settled by its age,
-        so recency orders results and never removes one. `namespaces` scopes
-        the population that ageing counts against, and None means the whole
-        vault, which is what the dashboard wants."""
+    def _candidate_hits(self, query: str, qvec, pool: int):
+        """One pool's candidates, before any scoring: the best cosine and
+        the vector rank of each record, and the keyword hits in BM25 order."""
         # The index holds one entry per embedding WINDOW, so several hits can
         # belong to one record. Reduce by MAX: a record is relevant if any part
         # of it is, and averaging would punish a long memory for the parts that
@@ -688,8 +702,24 @@ class Vault:
                 v_rank[rid] = len(v_rank)
             if len(vec_score) >= pool:
                 break
+        return vec_score, v_rank, self.db.fts_search(query, pool,
+                                                      COMMON_TERM_FRACTION)
 
-        fts_hits = self.db.fts_search(query, pool, COMMON_TERM_FRACTION)
+    def _rank_candidates(self, query: str, qvec, pool: int,
+                         namespaces: set[str] | None = None, hits=None):
+        """Score one candidate pool. Returns (fused, cosine, static).
+
+        `fused` is the score a caller sees: the evidence with the semantic
+        channel aged by how much of the vault is newer, times the prior.
+        `static` is the same score with no ageing, and it is what decides
+        MEMBERSHIP: how relevant a memory is cannot be settled by its age,
+        so recency orders results and never removes one. `namespaces` scopes
+        the population that ageing counts against, and None means the whole
+        vault, which is what the dashboard wants. `hits` is what
+        _candidate_hits returned for this pool, for a caller that has it."""
+        vec_score, v_rank, fts_hits = (
+            hits if hits is not None
+            else self._candidate_hits(query, qvec, pool))
         l_rank = {rid: r for r, (rid, _) in enumerate(fts_hits)}
 
         # How much of the query's information does each keyword hit explain?
@@ -775,12 +805,15 @@ class Vault:
         self.index = build_index(dim, ikeys, mat if mat.size else mat.reshape(0, dim),
                                  precision=precision)
 
-    def _journal(self, entry: dict) -> None:
+    def _journal(self, *entries: dict) -> None:
+        """Append under ONE file lock: one staleness check, one fsync, so no
+        other process can write between entries passed together."""
         def _append():
-            vaultfile.append_journal_entry(self.path, self.header,
-                                           self._journal_seq, entry, self._master)
+            vaultfile.append_journal_entries(self.path, self.header,
+                                             self._journal_seq, list(entries),
+                                             self._master)
         self._with_file_lock(_append)
-        self._journal_seq += 1
+        self._journal_seq += len(entries)
 
     def _replay(self, e: dict) -> None:
         op = e["op"]
@@ -934,6 +967,11 @@ class Vault:
             # excluded so the vector represents the claim itself.
             vec = self.embedder.embed_record(strip_provenance(text))
         vec = np.atleast_2d(np.asarray(vec, dtype=np.float32))
+        # Kept to 0..1 as the server's tools keep it, so a value on another
+        # scale (1-10, say) lands in a dashboard bucket; a NaN is the default.
+        importance = float(importance)
+        importance = (0.5 if importance != importance
+                      else min(1.0, max(0.0, importance)))
         # THE OPINION PATH: update-first, not insert-first. An opinion is a
         # claim that revises rather than accumulates, so before any insert the
         # vault itself looks for the live opinion this one resembles. What
@@ -1007,8 +1045,9 @@ class Vault:
             self._id_by_ikey[k] = rid
             self.index.add(k, vec[seq])
         arow = self._audit_and_capture(caller, "store", f"ns={ns} id={rid}")
+        entries = []
         if _journal:
-            self._journal({"op": "store", "audit": arow, "record": {
+            entries.append({"op": "store", "audit": arow, "record": {
                 "id": rid, "ns": ns, "text": text,
                 "vec": base64.b64encode(vec.tobytes()).decode(),
                 "tags": tags or [], "importance": importance,
@@ -1018,11 +1057,16 @@ class Vault:
                 "kind": kind, "affirmed": affirmed,
             }})
         # The replacement exists; now its predecessors leave the searchable
-        # surface. After the insert and its journal entry, so a crash between
-        # the two leaves both records live - visible and mendable - rather
-        # than the old one gone and the new one never written.
+        # surface. Their entries follow the insert's, so a crash between the
+        # two leaves both records live - visible and mendable - rather than
+        # the old one gone and the new one never written. All of them go in
+        # one append: a write by another process landing between them failed
+        # the tombstone with the replacement already durable, and a reopen
+        # and retry then stored the replacement twice.
         for sid in (supersedes or []):
-            self._tombstone(sid, rid, caller, _journal=_journal)
+            entries.append(self._tombstone(sid, rid, caller, _journal=False))
+        if _journal:
+            self._journal(*entries)
         out = {"id": rid, "duplicate": False, "namespace": ns,
                "kind": kind, "created": row["created"],
                "created_local": local_stamp(row["created"]),
@@ -1150,11 +1194,12 @@ class Vault:
         self.config.check(caller, row["ns"], write=True)
 
     def _tombstone(self, sid: str, by: str, caller: str,
-                   _journal: bool = True) -> None:
+                   _journal: bool = True) -> dict:
         """Retire a record in favour of its replacement. Tombstoned, never
         shredded: the row, its ciphertext and its history stay readable by
         id, but every retrieval surface - vector index, keyword index,
-        search, recent - lets go of it."""
+        search, recent - lets go of it. Returns its journal entry, for a
+        caller that journals it with others (_journal=False)."""
         row = self.db.get_row(sid)
         keys = set(self.db.vector_keys(sid)) | {row["ikey"]}
         self.db.tombstone(sid, by)
@@ -1163,9 +1208,10 @@ class Vault:
             self._id_by_ikey.pop(k, None)
         arow = self._audit_and_capture(caller, "supersede",
                                        f"id={sid} by={by}")
+        entry = {"op": "supersede", "ids": [sid], "by": by, "audit": arow}
         if _journal:
-            self._journal({"op": "supersede", "ids": [sid], "by": by,
-                           "audit": arow})
+            self._journal(entry)
+        return entry
 
     @_synchronized
     def supersede(self, record_id: str, by: str, caller: str = "user") -> dict:
@@ -1244,18 +1290,28 @@ class Vault:
         # and let relevance decide how many come back.
         adaptive = top_k is None
         want = MAX_RESULTS if adaptive else int(top_k)
+        if want <= 0:
+            # The survivor loop below keeps a record before it compares the
+            # count, so an empty window has to be explicit, as in recent().
+            self._audit_and_capture(caller, "search",
+                                    f"q={query[:80]!r} hits=0")
+            return {"results": [], "note": DATA_NOT_INSTRUCTIONS}
         qvec = self.embedder.embed_query(query)
-        boosted, vec_score, static = {}, {}, {}
         # Filters below run after ranking, so a pool sized to top_k can be
         # emptied by them while matching records sit just past the cut. Widen
         # and retry rather than answer "nothing found" from an exhausted pool.
+        # Whether to widen turns only on how many candidates a pool finds, so
+        # that is settled first and only the pool kept is scored.
         pool = CANDIDATE_POOL
         for attempt in range(POOL_EXPANSIONS):
-            boosted, vec_score, static = self._rank_candidates(
-                query, qvec, pool, allowed)
-            if len(boosted) >= want * 4 or len(boosted) >= len(self._id_by_ikey):
+            hits = self._candidate_hits(query, qvec, pool)
+            found = len(hits[0].keys() | {rid for rid, _ in hits[2]})
+            if (found >= want * 4 or found >= len(self._id_by_ikey)
+                    or attempt == POOL_EXPANSIONS - 1):
                 break
             pool *= 4
+        boosted, vec_score, static = self._rank_candidates(
+            query, qvec, pool, allowed, hits)
 
         # The starting memories are ordinary records in "main", so a namespace
         # filter cannot reach them. Anyone who wants recall limited to what the
@@ -1434,6 +1490,7 @@ class Vault:
                 "counts": {"total": total, "organic": organic,
                            "seeded": total - organic}}
 
+    @_synchronized
     def get(self, record_id: str, caller: str) -> dict:
         self._require_open()
         row = self.db.get_row(record_id)
@@ -1469,11 +1526,12 @@ class Vault:
             out["warning"] = QUARANTINE_WARNING
         return out
 
-    def _restore_children_live(self, record_id: str) -> list[str]:
+    def _restore_children_live(self, record_id: str,
+                               children: list[str] | None = None) -> list[str]:
         """restore_children plus the RAM-index half: the revived records'
         vectors go back into the live index so they answer searches again
         without waiting for the next rebuild."""
-        restored = self.db.restore_children(record_id, self._master)
+        restored = self.db.restore_children(record_id, self._master, children)
         for rid in restored:
             for k, v in self.db.vectors_of(rid):
                 self._id_by_ikey[k] = rid
@@ -1602,13 +1660,16 @@ class Vault:
         ids = self._expired_today()
         if not ids:
             return {"enabled": True, "removed": 0, "ids": []}
+        # What each one superseded, read once rather than once per record:
+        # the sweep only clears superseded_by, so the lists stay true.
+        children = self.db.superseded_children()
         for rid in ids:
             row = self.db.get_row(rid)
             if row is None:
                 continue
             # An expiring replacement releases what it superseded, exactly as
             # forget() does - the sweep must not orphan history either.
-            self._restore_children_live(rid)
+            self._restore_children_live(rid, children.get(rid, []))
             # Rule 7: through the same delete every other removal uses, so a
             # window left in the index cannot keep answering searches for
             # text that is gone.
@@ -1764,10 +1825,20 @@ class Vault:
         a mutable buffer end to end, which PyNaCl will not accept (it requires
         `bytes`), so that is a wider change than this one. See SECURITY.md,
         which already states that Python cannot guarantee zeroization.
+
+        The key goes even when the save fails, and so do the decrypted
+        database (its full-text table holds every memory in plain text) and
+        the index. A handle another process has written to can never save
+        again, so a lock that waited for its save kept the key for good.
         """
-        self.save(signing_key=signing_key)
-        self._master = None
-        self._locked = True
+        try:
+            self.save(signing_key=signing_key)
+        finally:
+            self._master = None
+            self._locked = True
+            self.db.conn.close()
+            self.index = None
+            self._id_by_ikey = {}
 
     # ---------------------------------------------------------------- status
 
@@ -1954,8 +2025,21 @@ class Vault:
                      namespace: str | None = None) -> int:
         self._require_open()
         records = [json.loads(l) for l in text.splitlines() if l.strip()]
-        texts = [r["text"] for r in records]
-        vecs = self.embedder.embed_passages(texts) if texts else []
+        # What store() embeds: the claim without its provenance clause, every
+        # window of it. All of them go in one batched call, and each record
+        # is handed its own block of rows. A claim of at most CHUNK_WINDOW
+        # characters is one window, as in rebuild_windows, without a call.
+        windows = []
+        for r in records:
+            claim = strip_provenance(r["text"].strip())
+            windows.append(self.embedder.chunk(claim)
+                           if len(claim) > CHUNK_WINDOW else [claim])
+        flat = [w for ws in windows for w in ws]
+        rows = self.embedder.embed_passages(flat) if flat else []
+        vecs, at = [], 0
+        for ws in windows:
+            vecs.append(rows[at:at + len(ws)])
+            at += len(ws)
         n = 0
         skipped = 0
         stale = 0
@@ -2013,6 +2097,11 @@ class Vault:
 # macOS Keychain integration (optional keyslot type "keychain")
 # ---------------------------------------------------------------------------
 
+#: How long a `security` call may take. The Keychain can put up a dialog,
+#: and a server or a panel helper has nobody to answer it; a lookup that
+#: waited on it held the vault open, or the tool call, for good.
+KEYCHAIN_TIMEOUT = 15
+
 def _keychain_names(path: str) -> list[tuple[str, str]]:
     """(account, service) pairs identifying this vault's Keychain item,
     current spelling first.
@@ -2037,21 +2126,30 @@ def _keychain_service(path: str) -> str:
 def keychain_store(path: str, master_key: bytes) -> None:
     if platform.system() != "Darwin":
         raise CryptoError("Keychain unlock is only available on macOS")
-    subprocess.run(
-        ["security", "add-generic-password", "-U",
-         "-a", wire.KEYCHAIN_ACCOUNT,
-         "-s", _keychain_service(path), "-w", master_key.hex()],
-        check=True, capture_output=True)
+    try:
+        subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-a", wire.KEYCHAIN_ACCOUNT,
+             "-s", _keychain_service(path), "-w", master_key.hex()],
+            check=True, capture_output=True, timeout=KEYCHAIN_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise CryptoError("the Keychain did not answer within "
+                          f"{KEYCHAIN_TIMEOUT} s") from exc
 
 
 def keychain_get(path: str) -> bytes | None:
     if platform.system() != "Darwin":
         return None
     for i, (account, service) in enumerate(_keychain_names(path)):
-        r = subprocess.run(
-            ["security", "find-generic-password", "-a", account,
-             "-s", service, "-w"],
-            capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-a", account,
+                 "-s", service, "-w"],
+                capture_output=True, text=True, timeout=KEYCHAIN_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            # `security` that does not answer (a keychain waiting on a
+            # dialog nobody can see) is no credential, not a hung unlock.
+            continue
         if r.returncode != 0:
             continue
         try:
@@ -2064,7 +2162,8 @@ def keychain_get(path: str) -> bytes | None:
             keychain_store(path, key)
             subprocess.run(
                 ["security", "delete-generic-password", "-a", account,
-                 "-s", service], capture_output=True)
+                 "-s", service], capture_output=True,
+                timeout=KEYCHAIN_TIMEOUT)
         return key
     return None
 
@@ -2074,8 +2173,12 @@ def keychain_clear(path: str) -> bool:
         return False
     cleared = False
     for account, service in _keychain_names(path):
-        r = subprocess.run(
-            ["security", "delete-generic-password", "-a", account,
-             "-s", service], capture_output=True)
+        try:
+            r = subprocess.run(
+                ["security", "delete-generic-password", "-a", account,
+                 "-s", service], capture_output=True,
+                timeout=KEYCHAIN_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            continue
         cleared = cleared or r.returncode == 0
     return cleared

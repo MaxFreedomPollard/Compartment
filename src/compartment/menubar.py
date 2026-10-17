@@ -81,13 +81,24 @@ def claim_first_run(vault: str) -> bool:
 
 # --------------------------------------------------------------- data layer
 
-#: Held for as long as the status bar app runs. One icon per vault.
+#: Held for as long as the status bar app runs. One icon per vault: the lock
+#: is the vault's own file name with this after it (_instance_lock_path).
 INSTANCE_LOCK_NAME = ".menubar.lock"
 
 #: Module-level so the handle outlives acquire_instance_lock's frame. A
 #: garbage-collected file object closes its descriptor, and closing the
 #: descriptor drops the lock, which would let a second copy in.
 _INSTANCE_LOCK = None
+
+
+def _instance_lock_path(vault: str) -> Path:
+    """This vault's lock: beside it, hidden, and named after the vault file.
+
+    It was named after the folder alone, so every vault in one folder shared
+    a lock: a second vault there could get no panel of its own, and the
+    launchd copy started for it read the other's pid and stopped that app."""
+    v = Path(vault).expanduser()
+    return v.parent / f".{v.name}{INSTANCE_LOCK_NAME}"
 
 
 def acquire_instance_lock(vault: str):
@@ -105,7 +116,7 @@ def acquire_instance_lock(vault: str):
     """
     global _INSTANCE_LOCK
     try:
-        path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+        path = _instance_lock_path(vault)
     except (OSError, ValueError):
         return None, True
 
@@ -137,21 +148,30 @@ def acquire_instance_lock(vault: str):
     return fh, True
 
 
+def _pid_file(lock: Path) -> Path:
+    """Where the holder of `lock` leaves its pid: in the lock file itself,
+    except on Windows. msvcrt locks the first byte outright, and another
+    process cannot read a byte range Windows has locked, so there the lock
+    file would be unreadable by the only reader that wants it, and the pid
+    goes in a file of its own beside it."""
+    return lock.with_name(lock.name + ".pid") if sys.platform == "win32" \
+        else lock
+
+
 def _record_lock_holder(fh) -> None:
-    """Leave our pid in the lock file.
+    """Leave our pid where lock_holder_pid reads it (_pid_file).
 
     So that the copy entitled to take the menu bar knows which single process
-    to ask for it. The lock is per vault on purpose - a second vault is a
-    second memory and gets an icon of its own - and a pgrep for every running
-    copy would take that one down too.
-
-    POSIX only. msvcrt locks the first byte outright, and another process
-    cannot read a byte range Windows has locked, so on Windows the file would
-    be unreadable by the only reader that wants it.
+    to ask for it, and an update or uninstall which single process to stop.
+    The lock is per vault on purpose - a second vault is a second memory and
+    gets an icon of its own - and a pgrep for every running copy would take
+    that one down too.
     """
-    if sys.platform == "win32":
-        return
     try:
+        if sys.platform == "win32":
+            _pid_file(Path(fh.name)).write_text(f"{os.getpid()}\n",
+                                                encoding="utf-8")
+            return
         fh.seek(0)
         fh.truncate()
         fh.write(f"{os.getpid()}\n".encode())
@@ -168,7 +188,7 @@ def lock_holder_pid(vault: str) -> int | None:
     alone, never a reason to guess at it.
     """
     try:
-        path = Path(vault).expanduser().parent / INSTANCE_LOCK_NAME
+        path = _pid_file(_instance_lock_path(vault))
         pid = int((path.read_text(encoding="utf-8", errors="replace")
                    ).strip() or 0)
     except (OSError, ValueError):
@@ -245,6 +265,11 @@ def default_vault() -> str:
 #: Worked out once, then reused: asking the login shell costs a fork.
 _USER_PATH = None
 
+#: Printed by the login shell just before its PATH. Whatever a profile prints
+#: on the way - an echo, a version manager's "Now using node ..." - comes
+#: before it, and was glued onto the first entry when there was no marker.
+_PATH_MARK = "__COMPARTMENT_PATH__"
+
 
 def user_path() -> str:
     """The PATH a terminal on this machine would have.
@@ -268,10 +293,16 @@ def user_path() -> str:
     if sys.platform != "win32":
         shell = os.environ.get("SHELL") or "/bin/sh"
         try:
-            out = subprocess.run([shell, "-lc", 'printf %s "$PATH"'],
-                                 capture_output=True, text=True, timeout=15,
-                                 encoding="utf-8", errors="replace").stdout
-            parts += [p for p in (out or "").strip().split(os.pathsep) if p]
+            # No keyboard: a profile that reads input would otherwise wait on
+            # a terminal a login item does not have.
+            out = subprocess.run(
+                [shell, "-lc", f"printf '\\n{_PATH_MARK}%s' \"$PATH\""],
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace",
+                stdin=subprocess.DEVNULL).stdout or ""
+            if _PATH_MARK in out:
+                parts += [p for p in out.rsplit(_PATH_MARK, 1)[1].strip()
+                          .split(os.pathsep) if p]
         except (OSError, subprocess.SubprocessError):
             pass
     parts += [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
@@ -786,11 +817,30 @@ class PanelState:
             self._sigs.pop("settings", None)
             return dict(self.state)
 
+    def change_setting(self, key: str, value) -> bool:
+        """set_setting for a switch in the panel, its result shown at once.
+
+        False, with the reason on screen, when it could not be saved: a
+        config that does not parse, a folder that cannot be written. That
+        raised inside the switch's handler, where nothing caught it, so the
+        switch moved, nothing was saved and nothing said so. The switch now
+        goes back to what is saved."""
+        try:
+            self.set_settings(set_setting(self.vault, key, value))
+            return True
+        except Exception as exc:                        # noqa: BLE001
+            self.mark(error=f"Could not save that setting: {exc}")
+            return False
+
     def lock(self, lock_fn) -> bool:
-        """Run `lock_fn` with no view process alive, then show locked."""
+        """Run `lock_fn` with no view process alive and no dashboard, then
+        show locked."""
         with self._lock:
             self._gen += 1
         with self.view.held():
+            # A dashboard this panel started holds the key in a process of
+            # its own, and went on serving the vault after the lock.
+            stop_dashboard()
             ok = bool(lock_fn())
         if ok:
             self.mark(locked=True, checking=False, records=0, organic=0,
@@ -803,6 +853,32 @@ class PanelState:
     def close(self) -> None:
         """For quitting."""
         self.view.close()
+
+
+def run_in_background(work, deliver) -> None:
+    """deliver(work()), with the work on a thread of its own: for the
+    panel's buttons that wait on the CLI.
+
+    A click's handler runs on the UI thread, and AppKit and Tk draw nothing
+    and answer nothing while it runs. Connect waited there on the agent's
+    own tool (up to five minutes), Create on all of `init` (fifteen), unlock
+    and a passphrase change on Argon2, and for that long the app was frozen,
+    Quit included. `deliver` is called from the worker thread, and hands the
+    result back to the UI thread, the only one widgets may be touched from.
+    Work that raises delivers the exception instead, so whatever the click
+    disabled is always given back."""
+    def run():
+        try:
+            out = work()
+        except Exception as exc:                        # noqa: BLE001
+            out = exc
+        try:
+            deliver(out)
+        except Exception:                               # noqa: BLE001
+            pass                # the app is quitting and its UI has gone
+
+    threading.Thread(target=run, daemon=True,
+                     name="compartment-panel-action").start()
 
 
 def fetch_state(vault: str) -> dict:
@@ -827,6 +903,12 @@ def fetch_state(vault: str) -> dict:
 #: server with a second random token for the same vault.
 _DASH: dict = {"proc": None, "url": None}
 _DASH_PREFIX = "Compartment dashboard: "
+
+#: How long the Dashboard button waits for `compartment dash` to say where it
+#: serves. Longer than a cold unlock of a big vault (Argon2, then a full
+#: decrypt), and finite: the wait is on the UI thread, and one that never
+#: ended froze the whole app.
+DASH_START_TIMEOUT = 60
 
 
 def dashboard_url(line: str) -> str | None:
@@ -854,7 +936,8 @@ def open_dashboard(vault: str) -> str | None:
     `dash` opens the browser itself the moment it is serving, so a first
     click needs only a started process; a later click reopens the URL it
     announced. Returns that URL, or None when the server did not start (a
-    locked vault, for instance, which `dash` refuses).
+    locked vault, for instance, which `dash` refuses) or did not say where
+    it serves within DASH_START_TIMEOUT.
     """
     proc, url = _DASH["proc"], _DASH["url"]
     if proc is not None and proc.poll() is None and url:
@@ -869,16 +952,33 @@ def open_dashboard(vault: str) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     _DASH["proc"], _DASH["url"] = proc, None
-    url = None
-    for line in proc.stdout:                # the announcement is line one
-        url = dashboard_url(line)
-        if url:
-            break
+    # Listened for on a thread of its own, and waited for here no longer
+    # than DASH_START_TIMEOUT: this runs on the UI thread, and a dash that
+    # never announced itself held it - and the whole app - for as long as
+    # that dash ran.
+    heard: queue.Queue = queue.Queue()
+
+    def listen():
+        try:
+            for line in proc.stdout:        # the announcement is line one
+                found = dashboard_url(line)
+                if found:
+                    heard.put(found)
+                    break
+        except (OSError, ValueError):
+            pass
+        heard.put(None)
+        _drain(proc)
+
+    threading.Thread(target=listen, daemon=True).start()
+    try:
+        url = heard.get(timeout=DASH_START_TIMEOUT)
+    except queue.Empty:
+        url = None
     if not url:
         stop_dashboard()
         return None
     _DASH["url"] = url
-    threading.Thread(target=_drain, args=(proc,), daemon=True).start()
     return url
 
 
@@ -965,6 +1065,14 @@ def create_vault(vault: str, passphrase: str, repeat: str) -> tuple[bool, str]:
             input=passphrase + "\n", capture_output=True, text=True,
             timeout=900, encoding="utf-8", errors="replace",
             env={**os.environ, "PATH": user_path()})
+    except subprocess.TimeoutExpired as exc:
+        if os.path.exists(vault):
+            # init writes the vault in its first seconds. What ran out of
+            # time is a later step, connecting the agents installed here,
+            # which waits on their own programs.
+            return True, ("Vault created. Connecting the agents installed "
+                          "here did not finish; connect them from this panel.")
+        return False, str(exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
@@ -1237,6 +1345,15 @@ def starter_note(state: dict) -> str:
 
 def auto_lock_label(minutes: int) -> str:
     return "Never" if not minutes else f"{minutes} min"
+
+
+def offers_settings(state: dict) -> bool:
+    """Whether the panel shows its settings switches: only once there is a
+    vault. What they change is the vault's config file, and creating the
+    vault writes that file afresh, so a switch flipped before Create was
+    undone by it, with nothing said. Locked is fine: the config needs no
+    passphrase."""
+    return bool(state.get("exists"))
 
 
 # ---------------------------------------------------------------- login item
@@ -1646,20 +1763,60 @@ def relaunch_detached(vault: str, show: bool = False,
     return not only
 
 
+#: The status bar app's own command line, as pgrep sees it: the CLI (its
+#: console script, or `-m compartment.cli`), the vault if one is named,
+#: which may hold spaces, then the subcommand. A match anywhere in the
+#: arguments also found an editor, a pager or a test run open on
+#: src/compartment/menubar.py or systray.py.
+APP_COMMAND = (r"(compartment|compartment\.cli)( --vault .+)? "
+               r"(menubar|panel|tray)( |$)")
+
+
 def running_pids() -> list[int]:
-    """Every other status bar copy on this machine."""
+    """Every other status bar copy of this user's on this machine."""
+    uid = getattr(os, "getuid", None)
     try:
-        out = subprocess.run(["pgrep", "-f", "compartment.*menubar"],
-                             capture_output=True, text=True, timeout=15).stdout
+        out = subprocess.run(
+            ["pgrep", *(["-u", str(uid())] if uid else []), "-f",
+             APP_COMMAND],
+            capture_output=True, text=True, timeout=15).stdout
     except (OSError, subprocess.SubprocessError):
         return []
     me = os.getpid()
     return [int(x) for x in out.split() if x.isdigit() and int(x) != me]
 
 
-def quit_running(timeout: float = 10.0) -> bool:
-    """Stop a running status bar app, so an update or uninstall does not leave
-    the old build sitting in the menu bar with its binary already gone.
+def _instance_lock_held(vault: str) -> bool:
+    """Whether a copy holds this vault's lock right now. Asked with a shared
+    lock that is dropped again at once, which the app's own exclusive lock
+    refuses. A lock file that is not there, or cannot be opened, is held by
+    nobody. POSIX only; Windows is systray's to stop."""
+    try:
+        fh = open(_instance_lock_path(vault), "rb")    # noqa: SIM115
+    except (OSError, ValueError):
+        return False
+    with fh:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except ImportError:
+            return False
+        except OSError as exc:
+            return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK,
+                                 errno.EWOULDBLOCK)
+    return False
+
+
+def quit_running(vault: str | None = None, timeout: float = 10.0) -> bool:
+    """Stop the status bar app running for this vault, so an update or
+    uninstall does not leave the old build sitting in the menu bar with its
+    binary already gone.
+
+    Only the one process the vault's lock names is signalled, as
+    evict_unsupervised does, and only while that lock is held: the pid stays
+    in the file after its copy has gone, and by then may be anybody's. It
+    used to signal every pgrep match, which took an editor or a pager open
+    on menubar.py down with the app.
 
     Waits for the process to actually go. Sending a signal is not the same
     as being obeyed, and the caller's next move - starting the new build -
@@ -1668,20 +1825,20 @@ def quit_running(timeout: float = 10.0) -> bool:
     the app had restarted while looking at the build it replaced.
     """
     import signal
-    pids = running_pids()
-    if not pids:
+    vault = vault or default_vault()
+    pid = lock_holder_pid(vault) if _instance_lock_held(vault) else None
+    if pid is None:
         return False
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not running_pids():
+        if not _instance_lock_held(vault):
             return True
         time.sleep(0.1)
-    return not running_pids()
+    return not _instance_lock_held(vault)
 
 
 def restart_agent() -> bool:
@@ -2108,49 +2265,51 @@ def run(vault: str | None = None, show: bool = False,
                                    wrap=True))
             views.append(divider())
 
-            views.append(label("SETTINGS", 10, bold=True, secondary=True))
-            s = st["settings"]
+            # Not before there is a vault: see offers_settings.
+            if offers_settings(st):
+                views.append(label("SETTINGS", 10, bold=True, secondary=True))
+                s = st["settings"]
 
-            self.hook_switch = NSSwitch.alloc().init()
-            self.hook_switch.setState_(1 if s["capture_hook"] else 0)
-            self.hook_switch.setTarget_(self)
-            self.hook_switch.setAction_("toggleHook:")
-            # No explanatory line under these two: the switch says what it
-            # does, and a popover cannot grow past the height macOS gives it
-            # without putting the whole panel behind a scrollbar.
-            views.append(row(label("Create memories automatically"), _spacer(),
-                             self.hook_switch))
+                self.hook_switch = NSSwitch.alloc().init()
+                self.hook_switch.setState_(1 if s["capture_hook"] else 0)
+                self.hook_switch.setTarget_(self)
+                self.hook_switch.setAction_("toggleHook:")
+                # No explanatory line under these two: the switch says what it
+                # does, and a popover cannot grow past the height macOS gives it
+                # without putting the whole panel behind a scrollbar.
+                views.append(row(label("Create memories automatically"), _spacer(),
+                                 self.hook_switch))
 
-            self.starter_switch = NSSwitch.alloc().init()
-            self.starter_switch.setState_(1 if s["search_starter_facts"] else 0)
-            self.starter_switch.setTarget_(self)
-            self.starter_switch.setAction_("toggleStarter:")
-            views.append(row(label("Search starter facts"), _spacer(),
-                             self.starter_switch))
+                self.starter_switch = NSSwitch.alloc().init()
+                self.starter_switch.setState_(1 if s["search_starter_facts"] else 0)
+                self.starter_switch.setTarget_(self)
+                self.starter_switch.setAction_("toggleStarter:")
+                views.append(row(label("Search starter facts"), _spacer(),
+                                 self.starter_switch))
 
-            # A memory stored with a last day on it is removed once that day
-            # has gone. Off, the date is recorded and shown and nothing is
-            # ever deleted. Nothing without an expiry is touched either way.
-            self.expire_switch = NSSwitch.alloc().init()
-            self.expire_switch.setState_(1 if s["expire_memories"] else 0)
-            self.expire_switch.setTarget_(self)
-            self.expire_switch.setAction_("toggleExpire:")
-            views.append(row(label("Forget memories when they expire"),
-                             _spacer(), self.expire_switch))
+                # A memory stored with a last day on it is removed once that day
+                # has gone. Off, the date is recorded and shown and nothing is
+                # ever deleted. Nothing without an expiry is touched either way.
+                self.expire_switch = NSSwitch.alloc().init()
+                self.expire_switch.setState_(1 if s["expire_memories"] else 0)
+                self.expire_switch.setTarget_(self)
+                self.expire_switch.setAction_("toggleExpire:")
+                views.append(row(label("Forget memories when they expire"),
+                                 _spacer(), self.expire_switch))
 
-            seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
-                [auto_lock_label(m) for m in AUTO_LOCK_CHOICES], 0, self,
-                "changeAutoLock:")
-            try:
-                seg.setSelectedSegment_(
-                    AUTO_LOCK_CHOICES.index(int(s["auto_lock_minutes"])))
-            except ValueError:
-                seg.setSelectedSegment_(1)
-            self.autolock_seg = seg
-            views.append(row(label("Auto-lock"), _spacer(), seg))
-            views.append(label("Lock the vault after this much idle time",
-                               10, secondary=True))
-            views.append(divider())
+                seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
+                    [auto_lock_label(m) for m in AUTO_LOCK_CHOICES], 0, self,
+                    "changeAutoLock:")
+                try:
+                    seg.setSelectedSegment_(
+                        AUTO_LOCK_CHOICES.index(int(s["auto_lock_minutes"])))
+                except ValueError:
+                    seg.setSelectedSegment_(1)
+                self.autolock_seg = seg
+                views.append(row(label("Auto-lock"), _spacer(), seg))
+                views.append(label("Lock the vault after this much idle time",
+                                   10, secondary=True))
+                views.append(divider())
 
             # Installing leaves you with a vault and an icon, and nothing
             # using either until an agent is wired to it. That step is one
@@ -2280,6 +2439,16 @@ def run(vault: str | None = None, show: bool = False,
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "stateArrived:", None, False)
 
+        @objc.python_method
+        def _inBackground(self, work, selector):
+            """work() off the main thread, and what it returned handed to
+            `selector` back on the main one, the only thread AppKit may be
+            touched from: see run_in_background."""
+            run_in_background(
+                work,
+                lambda out: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    selector, out, False))
+
         def stateArrived_(self, _):
             """Fresh numbers are in: redraw in place - but only when the
             panel is on screen, something on it changed, and nobody is typing
@@ -2378,28 +2547,27 @@ def run(vault: str | None = None, show: bool = False,
 
         # ---- actions ---------------------------------------------------
         def toggleHook_(self, sender):
-            try:
-                self.panel.set_settings(set_setting(
-                    vault_path, "capture_hook", bool(sender.state())))
-            except Exception:                           # noqa: BLE001
-                pass
+            self.panel.change_setting("capture_hook", bool(sender.state()))
             self.rebuild()
 
         def toggleStarter_(self, sender):
-            self.panel.set_settings(set_setting(
-                vault_path, "search_starter_facts", bool(sender.state())))
+            self.panel.change_setting("search_starter_facts",
+                                      bool(sender.state()))
             self.rebuild()
 
         def toggleExpire_(self, sender):
-            self.panel.set_settings(set_setting(
-                vault_path, "expire_memories", bool(sender.state())))
+            saved = self.panel.change_setting("expire_memories",
+                                              bool(sender.state()))
             self.rebuild()
-            self.panel.refresh_async()      # the counts depend on this one
+            # The counts depend on this one. Not after a failed save: the
+            # read would clear the reason off the panel before it was seen.
+            if saved:
+                self.panel.refresh_async()
 
         def changeAutoLock_(self, sender):
             idx = int(sender.selectedSegment())
-            self.panel.set_settings(set_setting(
-                vault_path, "auto_lock_minutes", AUTO_LOCK_CHOICES[idx]))
+            self.panel.change_setting("auto_lock_minutes",
+                                      AUTO_LOCK_CHOICES[idx])
             self.rebuild()
 
         def connectAgent_(self, sender):
@@ -2408,9 +2576,12 @@ def run(vault: str | None = None, show: bool = False,
             Wiring takes a second or two, and AppKit paints nothing while a
             handler is running. Doing the work here would freeze the panel
             for that second and then change one line, which is exactly what
-            a dead button looks like. Painting first and working on the next
-            turn of the run loop costs nothing and shows the user their click
-            landed."""
+            a dead button looks like. So the note is painted first and the
+            work goes to a thread of its own. Put off to the next turn of the
+            run loop instead, it still froze the whole app, Quit included,
+            for as long as the agent's own tool took, and Hermes setting
+            itself up takes minutes. The buttons stay disabled until the
+            answer lands in connectDone_."""
             try:
                 target, name = INTEGRATION_TARGETS[int(sender.tag())]
             except (IndexError, ValueError, AttributeError):
@@ -2420,17 +2591,15 @@ def run(vault: str | None = None, show: bool = False,
             self.connect_busy = target
             self.connect_note = f"Connecting {name}…"
             self.rebuild()
-            self.performSelector_withObject_afterDelay_(
-                "runConnect:", target, 0.05)
+            self._inBackground(lambda: integrate(vault_path, target),
+                               "connectDone:")
 
-        def runConnect_(self, target):
-            try:
-                _ok, msg = integrate(vault_path, str(target))
-            except Exception as exc:            # noqa: BLE001
-                # Never let this die silently: an exception raised inside an
-                # action is swallowed by the run loop, and the button then
-                # genuinely does nothing.
-                msg = f"could not connect: {exc}"
+        def connectDone_(self, out):
+            # Never let a failure die silently: an exception raised inside an
+            # action is swallowed by the run loop, and the button then
+            # genuinely does nothing.
+            msg = (f"could not connect: {out}" if isinstance(out, Exception)
+                   else out[1])
             self.connect_busy = None
             self.connect_note = msg
             self.rebuild()
@@ -2441,9 +2610,10 @@ def run(vault: str | None = None, show: bool = False,
 
             Seeding the starting memories and wiring the agents already on
             the machine takes a few seconds, and AppKit paints nothing while
-            a handler runs. Painting first and working on the next turn of
-            the run loop is what stops the only first-run button in the app
-            from looking dead while it succeeds."""
+            a handler runs. Painting first is what stops the only first-run
+            button in the app from looking dead while it succeeds, and doing
+            the work on a thread of its own is what keeps the app answering
+            while `init` waits on the agents' own tools."""
             if self.creating or self.new_pw is None or self.new_repeat is None:
                 return
             pw = str(self.new_pw.stringValue() or "")
@@ -2456,16 +2626,14 @@ def run(vault: str | None = None, show: bool = False,
             self.creating = True
             self.create_note = "Creating the vault…"
             self.rebuild()
-            self.performSelector_withObject_afterDelay_("runCreate:", pw, 0.05)
+            self._inBackground(lambda: create_vault(vault_path, pw, pw),
+                               "createDone:")
 
-        def runCreate_(self, passphrase):
-            pw = str(passphrase)
-            try:
-                _ok, note = create_vault(vault_path, pw, pw)
-            except Exception as exc:            # noqa: BLE001
-                # An exception raised inside an action is swallowed by the
-                # run loop, and the button then genuinely does nothing.
-                note = f"could not create the vault: {exc}"
+        def createDone_(self, out):
+            # An exception raised inside an action is swallowed by the run
+            # loop, and the button then genuinely does nothing.
+            note = (f"could not create the vault: {out}"
+                    if isinstance(out, Exception) else out[1])
             self.creating = False
             self.create_note = note
             # Clear the fields whichever way it went: a passphrase must not
@@ -2499,8 +2667,13 @@ def run(vault: str | None = None, show: bool = False,
 
         def lockNow_(self, sender):
             # With no vault view running while it happens, so that no process
-            # of ours still holds the key once the vault is locked.
-            self.panel.lock(lambda: lock_vault(vault_path))
+            # of ours still holds the key once the vault is locked. Off the
+            # main thread, like every button that waits on the CLI.
+            self._inBackground(
+                lambda: self.panel.lock(lambda: lock_vault(vault_path)),
+                "lockDone:")
+
+        def lockDone_(self, _):
             self.unlock_note = None
             self.rebuild()
             self.panel.refresh_async(force=True)    # and confirm it from disk
@@ -2513,8 +2686,14 @@ def run(vault: str | None = None, show: bool = False,
             if self.pw_field is None:
                 return
             pw = str(self.pw_field.stringValue() or "")
-            ok, note = unlock_vault(vault_path, pw)
             self.pw_field.setStringValue_("")        # never leave it on screen
+            # Argon2 takes its time on purpose; not on the main thread.
+            self._inBackground(lambda: unlock_vault(vault_path, pw),
+                               "unlockDone:")
+
+        def unlockDone_(self, out):
+            ok, note = ((False, f"could not unlock: {out}")
+                        if isinstance(out, Exception) else out)
             self.unlock_note = None if ok else note
             if ok:
                 self.panel.mark(locked=False, checking=True, error=None)
@@ -2536,11 +2715,17 @@ def run(vault: str | None = None, show: bool = False,
                 return
             new = str(self.pw_new.stringValue() or "")
             rep = str(self.pw_repeat.stringValue() or "")
-            ok, note = change_passphrase(vault_path, new, rep)
             # Clear both regardless: a passphrase must not sit in a field on
-            # screen after the attempt, successful or not.
+            # screen while the attempt runs or after it, successful or not.
             self.pw_new.setStringValue_("")
             self.pw_repeat.setStringValue_("")
+            self._inBackground(
+                lambda: change_passphrase(vault_path, new, rep),
+                "changeDone:")
+
+        def changeDone_(self, out):
+            ok, note = ((False, f"could not change the passphrase: {out}")
+                        if isinstance(out, Exception) else out)
             self.changing_pw = not ok
             self.change_note = note
             self.rebuild()

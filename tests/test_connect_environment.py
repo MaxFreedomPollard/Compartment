@@ -62,11 +62,60 @@ def test_the_login_shell_is_asked_first(monkeypatch):
     monkeypatch.setenv("SHELL", "/bin/zsh")
     monkeypatch.setenv("PATH", LAUNCHD_PATH)
 
-    class R:
-        stdout = "/opt/only/here:/usr/bin"
+    class R:                                  # what the marked printf prints
+        stdout = "\n__COMPARTMENT_PATH__/opt/only/here:/usr/bin"
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
     parts = menubar.user_path().split(os.pathsep)
     assert parts[0] == "/opt/only/here"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX login shell")
+@pytest.mark.parametrize("shell,profile", [("/bin/zsh", ".zprofile"),
+                                           ("/bin/bash", ".bash_profile")])
+def test_what_the_login_shell_prints_is_not_glued_onto_path(shell, profile,
+                                                            tmp_path,
+                                                            monkeypatch):
+    """A profile that prints anything - an echo, a version manager saying
+    "Now using node ..." - put that text in front of the first PATH entry.
+    Version managers prepend their bin directory, which is where an
+    npm-installed agent CLI lives, so the panel called the agent not
+    installed and `integrate` run from it could not find the CLI either."""
+    if not os.path.exists(shell):
+        pytest.skip(f"no {shell} on this machine")
+    home = tmp_path / "home"
+    nvm_bin = home / ".nvm" / "versions" / "node" / "v20.11.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    tool = nvm_bin / "openclaw"                  # looked up, never run
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+    (home / profile).write_text(
+        'echo "Now using node v20.11.0 (npm v10.2.4)"\n'
+        'export PATH="$HOME/.nvm/versions/node/v20.11.0/bin:$PATH"\n',
+        encoding="utf-8")
+    # A scratch home: the shell reads this profile, never the real ones.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("ZDOTDIR", raising=False)
+    monkeypatch.setenv("SHELL", shell)
+    assert str(nvm_bin) in menubar.user_path().split(os.pathsep)
+    assert menubar.agent_present("openclaw")
+
+
+def test_the_login_shell_is_given_no_keyboard(monkeypatch):
+    """A profile that reads input would wait on a terminal a login item does
+    not have, and the panel with it."""
+    if sys.platform == "win32":
+        pytest.skip("POSIX login shell")
+    seen = {}
+
+    class R:
+        stdout = ""
+
+    def fake(*a, **k):
+        seen.update(k)
+        return R()
+    monkeypatch.setattr(subprocess, "run", fake)
+    menubar.user_path()
+    assert seen.get("stdin") is subprocess.DEVNULL
 
 
 def test_no_directory_is_listed_twice(minimal_env):
