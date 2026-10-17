@@ -194,8 +194,14 @@ _UPDATE_ON_CP1252 = """
             code = {version!r}
         elif argv[1:] == ["integrate", "--refresh"]:
             code = {refresh!r}
-        else:
+        elif "install" in argv:
+            # The upgrade itself: stubbed, nothing is installed.
             return subprocess.CompletedProcess(argv, 0)
+        else:
+            # Anything else is somebody else's call and runs for real: on
+            # Windows, Python 3.11's platform module runs `cmd /c ver`
+            # while argon2 imports, and an empty answer crashes it.
+            return real_run(argv, **kwargs)
         return real_run([sys.executable, "-c", code], **kwargs)
     subprocess.run = run
     from compartment import cli, embed_daemon

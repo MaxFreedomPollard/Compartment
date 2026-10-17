@@ -87,6 +87,59 @@ def test_dashboard_is_read_only(served):
     assert e.value.code == 501                # no POST handler exists at all
 
 
+def _no_browser(tmp_path, monkeypatch):
+    """dash opens the browser itself; this one opens nothing."""
+    import sys
+    if sys.platform == "win32":
+        browser = tmp_path / "browser.bat"
+        browser.write_text("@exit /b 0\r\n", encoding="utf-8")
+    else:
+        browser = tmp_path / "browser"
+        browser.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        browser.chmod(0o755)
+    monkeypatch.setenv("BROWSER", str(browser))
+
+
+def test_dash_announces_where_it_serves_before_anything_else(
+        vault, vault_path, tmp_path, monkeypatch):
+    """The first line `compartment dash` prints names the URL, and it
+    arrives at once: unflushed, it sat in the pipe for as long as dash
+    served. The real child, with its stderr kept so a start that fails says
+    why, and its stack dumped after 40 s so a start that stalls says where."""
+    import subprocess
+    import sys
+    import time
+    from compartment import menubar, session
+    session.store(vault_path, vault._master)          # `compartment unlock`
+    _no_browser(tmp_path, monkeypatch)
+    boot = ("import faulthandler, sys; "
+            "faulthandler.dump_traceback_later(40, exit=True); "
+            "from compartment.cli import main; main(sys.argv[1:])")
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        [sys.executable, "-X", "faulthandler", "-c", boot,
+         "--vault", vault_path, "dash"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace",
+        env={**os.environ, "PATH": menubar.user_path()})
+    first = {}
+    reader = threading.Thread(
+        target=lambda: first.update(line=proc.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout=60)
+    took = time.monotonic() - started
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+        err = proc.communicate(timeout=15)[1]
+        assert "line" in first and menubar.dashboard_url(first["line"]), (
+            f"no announcement after {took:.1f} s; first line "
+            f"{first.get('line')!r}; exit {proc.returncode}; stderr:\n{err}")
+        assert took < 40, f"the announcement took {took:.1f} s"
+    finally:
+        session.clear(vault_path)
+
+
 def test_the_panel_hears_where_dash_is_serving(vault, vault_path, tmp_path,
                                                monkeypatch):
     """The panel's Dashboard button waits for the first line `compartment
@@ -96,25 +149,20 @@ def test_the_panel_hears_where_dash_is_serving(vault, vault_path, tmp_path,
     import sys
     from compartment import menubar, session
     session.store(vault_path, vault._master)          # `compartment unlock`
-    # dash opens the browser itself; this one opens nothing.
-    if sys.platform == "win32":
-        browser = tmp_path / "browser.bat"
-        browser.write_text("@exit /b 0\r\n", encoding="utf-8")
-    else:
-        browser = tmp_path / "browser"
-        browser.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        browser.chmod(0o755)
-    monkeypatch.setenv("BROWSER", str(browser))
+    _no_browser(tmp_path, monkeypatch)
     menubar._DASH.update(proc=None, url=None)
     out = {}
     clicked = threading.Thread(target=lambda: out.update(
         url=menubar.open_dashboard(vault_path)), daemon=True)
     clicked.start()
-    clicked.join(timeout=30)
+    # Longer than the panel's own bound, so a dash that never announces
+    # comes back as None rather than as a thread still waiting.
+    clicked.join(timeout=menubar.DASH_START_TIMEOUT + 30)
     try:
         assert not clicked.is_alive(), \
             "the panel was still waiting for dash's first line"
-        url = out["url"]
+        url = out.get("url")
+        assert url, "the panel gave up on dash before it announced"
         assert url and url.startswith("http://127.0.0.1:")
         status, _body, _ = _get(url + "api/stats")    # it serves that URL
         assert status == 200

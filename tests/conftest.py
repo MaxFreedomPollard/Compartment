@@ -139,10 +139,16 @@ def forget_session_holder(session_dir) -> None:
     directory, so only that store's secret can go, and nothing is created on
     disk."""
     from compartment import session
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(session, "_session_dir",
-                   lambda: pathlib.Path(session_dir))
-        session._forget_boot_secret()
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(session, "_session_dir",
+                       lambda: pathlib.Path(session_dir))
+            session._forget_boot_secret()
+    except Exception:                                   # noqa: BLE001
+        # Best effort: a test that stubbed winreg or sys.platform is still
+        # patched at this point, and a holder that cannot be forgotten is a
+        # kernel object that goes at the next restart, never a failure.
+        pass
 
 
 @pytest.fixture(autouse=True)
