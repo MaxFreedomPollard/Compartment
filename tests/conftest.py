@@ -127,9 +127,11 @@ def no_real_session_store(monkeypatch, tmp_path):
     monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(store))
     yield
     forget_session_holder(store)
-    own = os.environ.get("COMPARTMENT_SESSION_DIR")
-    if own and own != str(store) and pathlib.Path(own).is_relative_to(
-            tmp_path):
+    # Plain strings, and best effort: a test that patched pathlib.Path or
+    # sys.platform for its own purposes is still patched at this point.
+    own = os.environ.get("COMPARTMENT_SESSION_DIR") or ""
+    base = str(tmp_path).rstrip("/\\")
+    if own and own != str(store) and own.startswith(base):
         forget_session_holder(own)
 
 
