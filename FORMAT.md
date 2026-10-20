@@ -99,7 +99,9 @@ u32 section_count, then per section:
 Each entry: `AEAD_seal(master_key, canonical_json(entry),
 aad="compartment-journal:"+vault_id+":"+u64_be(seq))` where `seq` starts at 0
 after each compaction and increments per entry. Entries are fsync'd on
-append (acknowledged). Ops:
+append (acknowledged). An append the disk refuses part way (ENOSPC, EDQUOT,
+a failed sync) is truncated back to where it began, so an unacknowledged
+write leaves no bytes behind. Ops:
 
 ```json
 {"op":"store","audit":AuditRow,"record":{"id","ns","text","vec":base64_f32,

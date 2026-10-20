@@ -393,14 +393,45 @@ def append_journal_entries(path: str, header: VaultHeader, seq: int,
         crypto.canonical_json(entry),
         aad=_journal_aad(header.vault_id, seq + i),
     ) for i, entry in enumerate(entries)]
-    with open(path, "ab") as f:
-        for ct in cts:
-            length = struct.pack(">I", len(ct))
-            f.write(length)
-            f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
-            f.write(ct)
-        f.flush()
-        os.fsync(f.fileno())
+    frames = bytearray()
+    for ct in cts:
+        length = struct.pack(">I", len(ct))
+        frames += length
+        frames += struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF)
+        frames += ct
+    # No O_CREAT: an append is only ever made to a vault that exists, and
+    # creating one here would write journal frames into a file with no
+    # header, which nothing can open again. O_BINARY, where it exists, so
+    # Windows never translates a newline byte inside the ciphertext.
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    try:
+        # The caller holds the vault's write lock, so nothing else appends
+        # between this and the write below: the file ends here.
+        start = os.fstat(fd).st_size
+        try:
+            view = memoryview(frames)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        except BaseException:
+            # A write the disk refused part way (ENOSPC, EDQUOT, an I/O
+            # error, a sync that failed) is a write nobody acknowledged, and
+            # its bytes are taken back off the end. Left there they were a
+            # torn tail, and a torn tail is the one thing an open cannot
+            # tolerate without compacting: on a disk that was still full,
+            # every MCP server, `compartment status` and the panel then
+            # failed to open the vault at all, reads included, until space
+            # was freed. Truncating frees the space it took, so it succeeds
+            # on the full disk that caused it. If it cannot, the bytes stay
+            # a torn tail and the next open discards them, as before.
+            try:
+                os.ftruncate(fd, start)
+                os.fsync(fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------

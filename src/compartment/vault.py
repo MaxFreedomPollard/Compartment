@@ -310,10 +310,11 @@ class Vault:
 
         A file that has been DELETED counts as changed. It used to count as
         unchanged, because the existence test was ANDed into the answer, and
-        the consequence was silent and permanent: _journal appends with
-        open(path, "ab"), which recreates the file with journal frames and no
+        the consequence was silent and permanent: _journal appended with
+        open(path, "ab"), which recreated the file with journal frames and no
         header, so every later write reported success into something no
-        version of this program can ever open again.
+        version of this program can ever open again. (The append no longer
+        creates a missing file either; this check is what refuses first.)
         """
         if self._disk_state is None:
             return False
