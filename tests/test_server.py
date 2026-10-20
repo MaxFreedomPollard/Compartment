@@ -533,8 +533,8 @@ def _serve(monkeypatch, vault_path, session, passphrase="CorrectHorse"):
     """server.main() with `session` in place of the stdio transport, its two
     background loops not started, and the passphrase in the environment as
     the only credential (no keychain lookup; None for no credential at
-    all). main() handles SIGTERM for the whole process, so the handler it
-    found is put back."""
+    all). main() handles SIGTERM and SIGHUP for the whole process, so the
+    handlers it found are put back."""
     from compartment import vault as vault_module
     monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
     monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
@@ -545,11 +545,14 @@ def _serve(monkeypatch, vault_path, session, passphrase="CorrectHorse"):
     monkeypatch.setattr(server, "_autolock_loop", lambda: None)
     monkeypatch.setattr(server, "_retag_loop", lambda: None)
     monkeypatch.setattr(server.mcp, "run", lambda *a, **k: session())
-    before = signal.getsignal(signal.SIGTERM)
+    handled = [getattr(signal, n) for n in ("SIGTERM", "SIGHUP")
+               if hasattr(signal, n)]
+    before = {sig: signal.getsignal(sig) for sig in handled}
     try:
         server.main(["--vault", vault_path, "--caller", "agent"])
     finally:
-        signal.signal(signal.SIGTERM, before)
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
 
 
 def _audited_on_disk(vault_path):
@@ -595,6 +598,28 @@ def test_a_server_stopped_with_sigterm_saves_them_too(
         signal.raise_signal(signal.SIGTERM)
     _serve(monkeypatch, vault_path, session)
     assert ended == [(os.getpid(), signal.SIGTERM, signal.SIG_DFL, "search")]
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"),
+                    reason="Windows has no SIGHUP")
+def test_a_server_whose_terminal_closes_saves_them_too(
+        vault, vault_path, own_state, monkeypatch):
+    """A client running in a terminal starts its servers in its process
+    group, and closing the terminal sends them all SIGHUP, whose default
+    action ended the server with the session's audited reads unsaved."""
+    vault.lock()
+    ended = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: ended.append(
+        (pid, sig, signal.getsignal(sig), _audited_on_disk(vault_path)[-1])))
+
+    def session():
+        _call(server.memory_search, "which Postgres version does staging run")
+        if not callable(signal.getsignal(signal.SIGHUP)):
+            pytest.fail("compartment serve leaves SIGHUP to end it on the "
+                        "spot, with nothing saved")
+        signal.raise_signal(signal.SIGHUP)
+    _serve(monkeypatch, vault_path, session)
+    assert ended == [(os.getpid(), signal.SIGHUP, signal.SIG_DFL, "search")]
 
 
 def _set(vault_path, **settings):

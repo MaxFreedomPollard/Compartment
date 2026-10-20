@@ -959,11 +959,11 @@ def _save_on_exit() -> None:
 
 
 def _stop(signum, frame) -> None:
-    """SIGTERM: the save a closed stdin gets, then the end SIGTERM always
-    meant. Not SystemExit raised through the event loop: anyio tells its
-    idle worker threads to stop only when the server's task ends, and the
-    interpreter waits for them on the way out, so a server ended that way
-    never exited. A second SIGTERM during the save is ignored: the process
+    """SIGTERM or SIGHUP: the save a closed stdin gets, then the end the
+    signal always meant. Not SystemExit raised through the event loop:
+    anyio tells its idle worker threads to stop only when the server's task
+    ends, and the interpreter waits for them on the way out, so a server
+    ended that way never exited. A second signal during the save is ignored: the process
     ends as soon as the save is done."""
     signal.signal(signum, signal.SIG_IGN)
     try:
@@ -995,7 +995,15 @@ def main(argv: list[str] | None = None) -> None:
         _state["vault"] = None  # start locked; tools will say so
     threading.Thread(target=_autolock_loop, daemon=True).start()
     threading.Thread(target=_retag_loop, daemon=True).start()
-    signal.signal(signal.SIGTERM, _stop)
+    # SIGHUP too, where there is one: a client running in a terminal, as
+    # Claude Code, Codex and Gemini CLI do, starts its servers in its own
+    # process group, and closing that terminal hangs them all up. Its
+    # default action ended the server on the spot, and the reads it had
+    # audited only in RAM with it.
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _stop)
     try:
         mcp.run()  # stdio transport
     finally:
