@@ -244,7 +244,16 @@ def _peer_uid(conn: socket.socket) -> int | None:
         if hasattr(socket, "SO_PEERCRED"):
             raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                   struct.calcsize("iII"))
-            _pid, uid, _gid = struct.unpack("iII", raw)
+            if sys.platform.startswith("openbsd"):
+                # OpenBSD has SO_PEERCRED too, but its struct sockpeercred
+                # is { uid_t uid; gid_t gid; pid_t pid; }, not Linux's
+                # struct ucred { pid; uid; gid; }. Read as Linux's, the
+                # "uid" was the peer's gid, so the daemon turned away every
+                # client of a user whose group id is not their user id, and
+                # would have let in one whose group id happened to be ours.
+                uid, _gid, _pid = struct.unpack("IIi", raw)
+            else:
+                _pid, uid, _gid = struct.unpack("iII", raw)
             return uid
         if sys.platform == "darwin" or "bsd" in sys.platform:
             # struct xucred { u_int cr_version; uid_t cr_uid; short

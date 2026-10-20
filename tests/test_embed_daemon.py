@@ -12,6 +12,7 @@ import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -564,6 +565,34 @@ def test_the_peer_credential_is_this_user():
     finally:
         a.close()
         b.close()
+
+
+class _PeerCred:
+    """A connection whose SO_PEERCRED answer is `raw`."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def getsockopt(self, level, option, size):
+        assert size >= len(self.raw)
+        return self.raw
+
+
+@pytest.mark.parametrize("platform, raw", [
+    # Linux, musl and Android: struct ucred { pid_t pid; uid_t uid; gid_t gid; }
+    ("linux", struct.pack("iII", 4242, 1000, 1001)),
+    # OpenBSD: struct sockpeercred { uid_t uid; gid_t gid; pid_t pid; }
+    ("openbsd7", struct.pack("IIi", 1000, 1001, 4242)),
+], ids=["linux", "openbsd"])
+def test_the_peer_uid_is_read_from_the_platforms_own_struct(monkeypatch,
+                                                            platform, raw):
+    """OpenBSD answers SO_PEERCRED with its fields in another order, and
+    the daemon read the peer's group id as its user id: every client of a
+    user whose gid is not their uid was turned away, and the daemon was
+    useless there."""
+    monkeypatch.setattr(socket, "SO_PEERCRED", 17, raising=False)
+    monkeypatch.setattr(embed_daemon.sys, "platform", platform)
+    assert embed_daemon._peer_uid(_PeerCred(raw)) == 1000
 
 
 # ------------------------------------------------------------- the vault --
