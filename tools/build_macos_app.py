@@ -48,6 +48,7 @@ import argparse
 import os
 import pathlib
 import plistlib
+import re
 import shutil
 import struct
 import subprocess
@@ -363,6 +364,99 @@ def _strip(lib: pathlib.Path) -> None:
     print(f"stripped {freed / 1024 / 1024:.0f} MB of test and build files")
 
 
+#: What a console script in the bundle starts with: the interpreter beside
+#: the script, wherever the bundle is, the form uv gives its own Pythons'
+#: scripts. Valid sh and valid Python at once: sh runs the exec line, and
+#: Python reads lines two and three as one string and moves on. -B because
+#: the bundle is signed, and bytecode written into it breaks the seal.
+#: realpath is in macOS 13 and up, which is MIN_MACOS's floor.
+_RELOCATABLE_SHEBANG = (
+    "#!/bin/sh\n"
+    "'''exec' \"$(dirname -- \"$(realpath -- \"$0\")\")/{python}\" -B "
+    "\"$0\" \"$@\"\n"
+    "' '''\n")
+
+
+def _relocate_scripts(runtime: pathlib.Path) -> list[str]:
+    """Rewrite the console scripts pip put in runtime/bin so they run from
+    wherever the bundle ends up.
+
+    pip writes the absolute path of the interpreter that installed them into
+    each script's first line, and that interpreter is the copy inside the
+    BUILD directory. So `compartment` inside the app, which is what the
+    panel's Connect buttons write into every agent's config (clients.
+    executable picks the console script beside the running interpreter) and
+    what the capture hook runs, named a Python on the build machine: on
+    anybody else's Mac the agent's memory server failed with "bad
+    interpreter" on its first start. The long-path form pip uses for a
+    folder with a space in it names the same absolute path, inside an exec
+    line, and is rewritten the same way."""
+    bin_dir = runtime / "bin"
+    here = {str(runtime), str(runtime.resolve())}
+    done = []
+    for script in sorted(bin_dir.iterdir()):
+        if script.is_symlink() or not script.is_file():
+            continue
+        try:
+            lines = script.read_text(encoding="utf-8").split("\n")
+        except (UnicodeDecodeError, OSError):
+            continue                                  # a binary
+        first = lines[0]
+        if (first.startswith("#!") and len(lines) > 2
+                and first.strip() == "#!/bin/sh"
+                and lines[1].startswith("'''exec' ")
+                and lines[2] == "' '''"):
+            named, rest = lines[1], lines[3:]
+        elif first.startswith("#!"):
+            named, rest = first, lines[1:]
+        else:
+            continue
+        if not any(h in named for h in here):
+            continue                       # not ours, or relocatable already
+        # The interpreter's own name, python3.12, from wherever it sat: the
+        # path itself may hold spaces, so it is not split on them.
+        found = re.search(r"/bin/(python[0-9.]*)", named)
+        python = found.group(1) if found else "python3"
+        script.write_text(_RELOCATABLE_SHEBANG.format(python=python)
+                          + "\n".join(rest), encoding="utf-8")
+        done.append(script.name)
+    return done
+
+
+def _verify_console_scripts(app: pathlib.Path) -> None:
+    """No script in the bundle names the build machine's paths, and the CLI
+    an agent is given really runs, from a clean environment."""
+    runtime = app / "Contents" / "Resources" / "runtime"
+    built_at = {str(app), str(app.resolve())}
+    strays = []
+    for script in sorted((runtime / "bin").iterdir()):
+        if script.is_symlink() or not script.is_file():
+            continue
+        try:
+            head = script.read_text(encoding="utf-8")[:1024]
+        except (UnicodeDecodeError, OSError):
+            continue
+        if any(p in head for p in built_at):
+            strays.append(script.name)
+    if strays:
+        raise SystemExit(
+            "error: these scripts name the build directory and would fail "
+            "on any other Mac:\n  " + "\n  ".join(strays))
+    cli = runtime / "bin" / "compartment"
+    if not cli.is_file():
+        raise SystemExit("error: the bundle has no compartment command for "
+                         "agents to run")
+    with tempfile.TemporaryDirectory(prefix="compartment-buildprobe-") as tmp:
+        out = subprocess.run([str(cli), "--version"], capture_output=True,
+                             text=True, timeout=120,
+                             env={"PATH": "/usr/bin:/bin", "HOME": tmp})
+    if out.returncode != 0:
+        raise SystemExit("error: the bundle's compartment command does not "
+                         "run\n" + (out.stderr or out.stdout).strip()[:2000])
+    print(f"the compartment command agents are given runs: "
+          f"{out.stdout.strip()}")
+
+
 def _unseal_hazards(contents: pathlib.Path) -> None:
     """Delete files that make the bundle unsignable.
 
@@ -524,6 +618,8 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
                       capture_output=True).returncode != 0:
         _run(rt_python, "-m", "ensurepip", "--default-pip")  # a pip-less build
     _install_packages(rt_python, spec or str(ROOT), arch, min_macos)
+    fixed = _relocate_scripts(runtime)
+    print(f"console scripts made relocatable: {', '.join(fixed) or 'none'}")
 
     _strip(runtime / "lib")
 
@@ -590,6 +686,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     # Checked BEFORE signing: running the interpreter is what writes bytecode
     # into the bundle, and doing that afterwards is what broke the seal.
     _verify_self_contained(app)
+    _verify_console_scripts(app)
     _verify_deployment_target(app, arch, min_macos)
 
     _run("codesign", "--force", "--deep", "--sign", "-",

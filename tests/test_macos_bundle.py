@@ -371,3 +371,68 @@ def test_the_installer_accepts_only_the_macos_the_app_declares(tmp_path,
 def test_a_minimum_below_what_the_login_item_needs_is_refused():
     with pytest.raises(SystemExit, match="SMAppService"):
         _builder().build_app(python="/nonexistent", min_macos="12.0")
+
+
+# ---------------------------- the CLI inside the bundle runs on another Mac
+
+def _pip_written(runtime: pathlib.Path, name: str, long_form=False) -> None:
+    """A console script as pip writes it: the absolute path of the
+    interpreter that installed it, plain or in the exec form pip uses for a
+    path with a space in it."""
+    py = runtime / "bin" / "python3.12"
+    head = (f"#!/bin/sh\n'''exec' \"{py}\" \"$0\" \"$@\"\n' '''\n"
+            if long_form else f"#!{py}\n")
+    (runtime / "bin" / name).write_text(
+        head + "# -*- coding: utf-8 -*-\nimport sys\n"
+        "print('ran', sys.argv[1:])\n", encoding="utf-8")
+    (runtime / "bin" / name).chmod(0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the bundle is POSIX")
+def test_console_scripts_still_run_after_the_bundle_moves(tmp_path):
+    """pip names the build directory's interpreter in every script it writes,
+    and `compartment` inside the app is what the panel writes into each
+    agent's config. Installed anywhere else - which is everywhere but the
+    build machine - it failed with "bad interpreter"."""
+    import shutil
+    import subprocess
+    if not shutil.which("realpath"):
+        pytest.skip("no realpath here")
+    build = tmp_path / "build dir" / "runtime"
+    (build / "bin").mkdir(parents=True)
+    (build / "bin" / "python3.12").symlink_to(sys.executable)
+    _pip_written(build, "compartment")
+    _pip_written(build, "cmpt", long_form=True)
+    relocatable = "#!/bin/sh\n'''exec' \"$(dirname -- \"$0\")/python3.12\" \"$0\"\n' '''\nprint(1)\n"
+    (build / "bin" / "pip").write_text(relocatable, encoding="utf-8")
+    assert sorted(_builder()._relocate_scripts(build)) == ["cmpt",
+                                                           "compartment"]
+    assert (build / "bin" / "pip").read_text() == relocatable, \
+        "a script that is relocatable already is left alone"
+    installed = tmp_path / "Applications" / "runtime"
+    installed.parent.mkdir()
+    shutil.move(str(build), str(installed))
+    for name in ("compartment", "cmpt"):
+        script = installed / "bin" / name
+        assert str(build) not in script.read_text()
+        r = subprocess.run([str(script), "--version"], capture_output=True,
+                           text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "ran ['--version']"
+
+
+def test_a_script_naming_the_build_directory_fails_the_build(tmp_path):
+    app = tmp_path / "Compartment.app"
+    runtime = app / "Contents" / "Resources" / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    _pip_written(runtime, "compartment")
+    with pytest.raises(SystemExit, match="name the build directory"):
+        _builder()._verify_console_scripts(app)
+
+
+def test_the_build_makes_its_scripts_relocatable_and_checks_them():
+    src = SPEC.read_text(encoding="utf-8")
+    body = src.split("def build_app")[1]
+    assert body.index("_relocate_scripts(runtime)") < body.index("compileall")
+    assert body.index("_verify_console_scripts(app)") \
+        < body.index('_run("codesign"')
