@@ -30,15 +30,26 @@ def test_a_session_over_stdio_ends_cleanly_when_the_client_hangs_up(
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, "-m", "compartment.cli", "--vault", vault, "serve"],
-        input="".join(json.dumps(r) + "\n" for r in requests).encode(),
-        capture_output=True, env=env, timeout=120)
-    err = proc.stderr.decode("utf-8", "replace")
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env)
+    try:
+        for r in requests:
+            proc.stdin.write((json.dumps(r) + "\n").encode())
+        proc.stdin.flush()
+        # The client hangs up once it has its answers, as a client does:
+        # closing stdin at once would race the replies.
+        replies = [json.loads(proc.stdout.readline()) for _ in range(2)]
+        rest, err = proc.communicate(timeout=60)    # closes stdin first
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    err = err.decode("utf-8", "replace")
     assert proc.returncode == 0, err
     assert "Traceback" not in err, err
-    lines = proc.stdout.decode("utf-8").splitlines()
-    replies = [json.loads(line) for line in lines]     # nothing but frames
+    assert rest == b""                              # nothing but frames
     assert [r.get("id") for r in replies] == [1, 2]
     init, listed = replies
     assert init["result"]["serverInfo"]["name"] == "compartment"
