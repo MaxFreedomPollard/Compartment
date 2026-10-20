@@ -82,16 +82,113 @@ def _app_support(name: str) -> Path:
 def _vscode_user(app: str = "Code") -> Path:
     """VS Code's User directory, which several extensions nest inside.
 
-    Cline, Roo Code and Kilo Code are VS Code extensions, so their settings
-    live under VS Code's storage rather than anywhere of their own.
+    Roo Code, and older Cline and Kilo Code, are VS Code extensions whose
+    settings live under the editor's storage rather than anywhere of their
+    own.
     """
     return _app_support(app) / "User"
 
 
+#: The editors an extension may be installed in, by the name of their user
+#: data folder: VS Code, its Insiders build, VSCodium, and the forks that
+#: run VS Code extensions (vscode-docs, VSCodium's prepare_vscode.sh).
+_EDITORS = ("Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf")
+
+
+def _editor_users() -> list[Path]:
+    """Every editor User directory an extension could keep storage in,
+    the Flathub builds of VS Code and VSCodium included (Flatpak sets their
+    XDG_CONFIG_HOME to ~/.var/app/<id>/config)."""
+    users = [_vscode_user(app) for app in _EDITORS]
+    if sys.platform != "darwin" and os.name != "nt":
+        flat = Path.home() / ".var" / "app"
+        users += [flat / "com.visualstudio.code" / "config" / "Code" / "User",
+                  flat / "com.vscodium.codium" / "config" / "VSCodium"
+                  / "User"]
+    return users
+
+
+def _ext_storage(ext: str) -> Path | None:
+    """The globalStorage directory of extension `ext` in the first editor
+    that has one, or None when no editor has run it."""
+    for user in _editor_users():
+        d = user / "globalStorage" / ext
+        try:
+            if d.is_dir():
+                return d
+        except OSError:
+            pass
+    return None
+
+
 def _ext_settings(ext: str, filename: str) -> Callable[[], Path]:
-    """A VS Code extension's own settings file, by extension id."""
-    return lambda: (_vscode_user() / "globalStorage" / ext / "settings"
-                    / filename)
+    """A VS Code extension's own settings file, by extension id, in the
+    editor it is installed in.
+
+    Only VS Code's own storage used to be looked at, so the extension in
+    Cursor, Windsurf, VSCodium or VS Code Insiders was reported as not
+    installed, and wiring it wrote a file in a VS Code that might not even
+    be there. VS Code is still the answer when no editor has run it."""
+    def path() -> Path:
+        storage = _ext_storage(ext) or (_vscode_user() / "globalStorage"
+                                        / ext)
+        return storage / "settings" / filename
+    return path
+
+
+def _env_dir(var: str) -> Path | None:
+    """The directory an environment variable names, or None when it is
+    unset or blank."""
+    raw = os.environ.get(var, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _cline_dir() -> Path:
+    return _env_dir("CLINE_DIR") or Path.home() / ".cline"
+
+
+def _cline_settings() -> Path:
+    """cline_mcp_settings.json, where the Cline that is installed reads it.
+
+    Cline 4 keeps one file for the VS Code extension, the CLI and the
+    JetBrains plugin, ~/.cline/data/settings/cline_mcp_settings.json
+    (CLINE_MCP_SETTINGS_PATH, CLINE_DATA_DIR and CLINE_DIR move it;
+    sdk/packages/shared/src/storage/paths.ts), and imports the old
+    globalStorage file once, the first time it runs. A server written to
+    the old file after that is never read. An older Cline, one that has
+    not created ~/.cline, still reads the old file in its editor."""
+    explicit = _env_dir("CLINE_MCP_SETTINGS_PATH")
+    if explicit:
+        return explicit
+    data = _env_dir("CLINE_DATA_DIR")
+    current = ((data or _cline_dir() / "data") / "settings"
+               / "cline_mcp_settings.json")
+    try:
+        if data or current.exists() or _cline_dir().is_dir():
+            return current
+    except OSError:
+        return current
+    legacy = _ext_storage("saoudrizwan.claude-dev")
+    if legacy is not None:
+        return legacy / "settings" / "cline_mcp_settings.json"
+    return current
+
+
+def _kilo_config() -> Path:
+    """Kilo Code's global config.
+
+    Kilo Code 7 is built on OpenCode and reads MCP servers from
+    ~/.config/kilo (XDG_CONFIG_HOME, on every platform): the first of
+    kilo.jsonc, kilo.json, opencode.jsonc, opencode.json and config.json
+    that exists, kilo.jsonc when none does (packages/opencode/src/config/
+    config.ts). The extension's old mcp_settings.json is read only from VS
+    Code's own storage, only for migration, and never by the Kilo CLI."""
+    d = _xdg() / "kilo"
+    for name in ("kilo.jsonc", "kilo.json", "opencode.jsonc",
+                 "opencode.json", "config.json"):
+        if (d / name).exists():
+            return d / name
+    return d / "kilo.jsonc"
 
 
 def _home(*parts: str) -> Callable[[], Path]:
@@ -133,6 +230,9 @@ class Client:
     #: Whether the client reads its file as JSON with comments, so a file
     #: holding comments or trailing commas is edited as text, not refused.
     jsonc: bool = False
+    #: Whether the client is installed, when the config file's directory is
+    #: not the proof (it may not exist until the first server is added).
+    installed: Callable[[], bool] | None = None
 
     def config_path(self) -> Path:
         return self.path()
@@ -148,7 +248,14 @@ class Client:
         p = self.config_path()
         if not p.is_absolute():
             return p.exists()
-        return p.exists() or p.parent.is_dir()
+        if p.exists() or p.parent.is_dir():
+            return True
+        if self.installed is not None:
+            try:
+                return bool(self.installed())
+            except OSError:
+                return False
+        return False
 
 
 # --- the table -------------------------------------------------------------
@@ -164,17 +271,25 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
     Client("cursor", "Cursor", _home(".cursor", "mcp.json")),
     Client("windsurf", "Windsurf",
            _home(".codeium", "windsurf", "mcp_config.json")),
-    Client("cline", "Cline",
-           _ext_settings("saoudrizwan.claude-dev", "cline_mcp_settings.json"),
-           note="reload the VS Code window to pick it up"),
+    Client("cline", "Cline", _cline_settings,
+           installed=lambda: (_cline_dir().is_dir() or _ext_storage(
+               "saoudrizwan.claude-dev") is not None),
+           note="reload the editor window, or restart the Cline CLI, to "
+                "pick it up"),
+    # Roo Code's repository was archived in May 2026; the extension still
+    # reads globalStorage/rooveterinaryinc.roo-cline/settings.
     Client("roo", "Roo Code",
            _ext_settings("rooveterinaryinc.roo-cline", "mcp_settings.json"),
            aliases=("roo-code",),
-           note="reload the VS Code window to pick it up"),
-    Client("kilo", "Kilo Code",
-           _ext_settings("kilocode.kilo-code", "mcp_settings.json"),
-           aliases=("kilo-code",),
-           note="reload the VS Code window to pick it up"),
+           installed=lambda: _ext_storage(
+               "rooveterinaryinc.roo-cline") is not None,
+           note="reload the editor window to pick it up"),
+    Client("kilo", "Kilo Code", _kilo_config, root="mcp",
+           entry=_entry_opencode, jsonc=True, aliases=("kilo-code",),
+           installed=lambda: ((_xdg() / "kilo").is_dir() or _ext_storage(
+               "kilocode.kilo-code") is not None),
+           note="reload the editor window, or restart the Kilo CLI, to "
+                "pick it up"),
     Client("gemini", "Gemini CLI", _home(".gemini", "settings.json"),
            aliases=("gemini-cli",)),
     Client("qwen", "Qwen Code CLI", _home(".qwen", "settings.json"),
