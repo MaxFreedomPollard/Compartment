@@ -420,3 +420,28 @@ def _linux(monkeypatch, *paths):
     monkeypatch.setattr(platforms, "_LINUX_MACHINE_ID_PATHS",
                         tuple(str(p) for p in paths))
     yield
+
+
+def test_the_windows_lock_always_takes_byte_zero(monkeypatch, tmp_path):
+    """msvcrt.locking locks from the handle's position, and an "a+" handle
+    starts at end of file: with anything in the lock file, two processes
+    locked different bytes and both held the "exclusive" lock."""
+    import importlib
+    import types
+    calls = []
+    fake = types.SimpleNamespace(
+        LK_NBLCK=2, LK_UNLCK=0,
+        locking=lambda fd, mode, n: calls.append((mode, os.lseek(fd, 0, os.SEEK_CUR))))
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    monkeypatch.setattr(os, "name", "nt")
+    try:
+        win = importlib.reload(platforms)
+        lockfile = tmp_path / "v.flock"
+        lockfile.write_text("left behind by something else")
+        with win.FileLock(str(lockfile), timeout=0.2):
+            pass
+    finally:
+        monkeypatch.setattr(os, "name", "posix" if sys.platform != "win32" else "nt")
+        monkeypatch.delitem(sys.modules, "msvcrt", raising=False)
+        importlib.reload(platforms)
+    assert calls and all(pos == 0 for _, pos in calls)

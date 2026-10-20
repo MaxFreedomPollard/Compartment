@@ -126,6 +126,10 @@ class VaultHeader:
         )
 
 
+#: How long _atomic_replace keeps retrying a Windows sharing violation.
+_REPLACE_PATIENCE_S = 5.0
+
+
 def _atomic_replace(tmp: str, path: str) -> None:
     """os.replace, tolerant of the transient sharing violations Windows raises
     when another process momentarily holds a handle to `path`.
@@ -140,14 +144,26 @@ def _atomic_replace(tmp: str, path: str) -> None:
     if os.name != "nt":
         os.replace(tmp, path)
         return
+    # Backing off to ~5 s in all: a reader's handle goes in milliseconds, but
+    # OneDrive's sync engine and some antivirus scanners hold a file they
+    # are looking at for a second or more, and a save that gives up then
+    # fails a store the user was told succeeded once it is retried.
     last: OSError | None = None
-    for _ in range(20):            # ~1s worst case
+    delay, waited = 0.02, 0.0
+    while waited < _REPLACE_PATIENCE_S:
         try:
             os.replace(tmp, path)
             return
         except PermissionError as exc:
             last = exc
-            time.sleep(0.05)
+            time.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, 0.5)
+    try:
+        os.replace(tmp, path)
+        return
+    except PermissionError as exc:
+        last = exc
     raise last if last is not None else OSError(f"could not replace {path}")
 
 

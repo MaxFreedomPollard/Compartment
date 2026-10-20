@@ -40,8 +40,14 @@ if IS_WINDOWS:
 
     _BUSY = frozenset({errno.EACCES, getattr(errno, "EDEADLOCK", 36)})
 
+    # msvcrt.locking locks bytes from the handle's CURRENT position, and the
+    # lock file is opened "a+", whose position is end of file. Two processes
+    # agree on which byte that is only while the file stays empty; anything
+    # that ever wrote to it (a tool, an older version, a user) would put
+    # them on different bytes and both would "hold" the lock. Byte 0 always.
     def _lock_nb(fh) -> bool:
         try:
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             return True
         except OSError as exc:
@@ -51,6 +57,7 @@ if IS_WINDOWS:
 
     def _unlock(fh) -> None:
         try:
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
             pass

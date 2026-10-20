@@ -1203,7 +1203,11 @@ class Vault:
             # being missed. Walk a small window instead, stopping as soon as
             # the scores drop below the threshold (results are descending).
             for ikey, score in self.index.search(vec[0], DEDUP_CANDIDATES):
-                if score < thr:
+                # `not >=` rather than `<`: a NaN score (a vector from a
+                # broken model run) compares false both ways, and `< thr`
+                # read it as a match, so every store came back as a
+                # "duplicate" of whatever happened to be nearest.
+                if not score >= thr:
                     break
                 rid = self._id_by_ikey.get(ikey)
                 if not rid:
@@ -1277,7 +1281,7 @@ class Vault:
         best-first. One entry per record (best window), organic only."""
         best: dict[str, float] = {}
         for ikey, score in self.index.search(qvec, OPINION_CANDIDATES):
-            if score < floor:
+            if not score >= floor:                      # NaN: never a match
                 break                                   # results are descending
             rid = self._id_by_ikey.get(ikey)
             if rid is None or rid in exclude:

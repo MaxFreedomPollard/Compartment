@@ -713,3 +713,14 @@ def test_a_keychain_that_does_not_answer_is_no_credential(monkeypatch):
     assert vault_module.keychain_clear("/x/a.vault") is False
     with pytest.raises(vault_module.CryptoError, match="did not answer"):
         vault_module.keychain_store("/x/a.vault", b"\x00" * 32)
+
+
+def test_a_nan_similarity_is_never_a_duplicate(vault, monkeypatch):
+    """A vector from a broken model run scores NaN against everything, and
+    NaN compares false both ways: `score < thr` read it as a match, so every
+    later store came back as a "duplicate" of whatever was nearest."""
+    first = vault.store("The staging database is Postgres 16", caller="test")
+    monkeypatch.setattr(vault.index, "search",
+                        lambda vec, k: [(next(iter(vault._id_by_ikey)), float("nan"))])
+    second = vault.store("Deploys go out on Tuesdays", caller="test")
+    assert not second["duplicate"] and second["id"] != first["id"]
