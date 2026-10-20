@@ -4,11 +4,16 @@ When activated (COMPARTMENT_ASSERT_OFFLINE=1 or --assert-offline), anything
 that could put a byte of ours on the wire raises OfflineViolation and the
 process aborts loudly. That is three doors, not one:
 
-  1. Sockets. Creating an AF_INET/AF_INET6 socket raises. AF_UNIX and every
-     other local family keep working, because local IPC is not networking.
-     So does socket.socketpair, which on Windows is two AF_INET sockets on
-     loopback and which asyncio's event loop needs, for the length of that
-     call and in that thread only.
+  1. Sockets. Creating a socket of any family that can reach another
+     machine raises. That is not only AF_INET/AF_INET6: AF_PACKET writes raw
+     frames, AF_BLUETOOTH reaches a paired device without any privilege,
+     AF_VSOCK and AF_HYPERV reach the host of a VM (WSL2's included), AF_CAN,
+     AF_TIPC and AF_RDS are buses and cluster links. So the families are an
+     allow list: AF_UNIX, because local IPC is not networking, and the
+     kernel's own interfaces (netlink/route, AF_ALG, macOS AF_SYSTEM), which
+     have no far end. socket.socketpair, which on Windows is two AF_INET
+     sockets on loopback and which asyncio's event loop needs, is let
+     through for the length of that call and in that thread only.
   2. Name resolution. getaddrinfo, gethostbyname, gethostbyname_ex,
      gethostbyaddr, getnameinfo, getfqdn and create_connection raise for any
      host that is not already local. A DNS lookup needs no socket object at
@@ -47,6 +52,13 @@ _original_socket_new = socket.socket.__new__
 _real_raw_socket = _socket.socket
 _original_socketpair = socket.socketpair
 _INET_FAMILIES = (socket.AF_INET, socket.AF_INET6)
+#: The only families a socket may have while the guard is on: none of them
+#: has a far end on another machine. Anything not listed - a family this
+#: platform has and this list never heard of included - is refused.
+_LOCAL_FAMILIES = frozenset(
+    getattr(socket, name)
+    for name in ("AF_UNIX", "AF_NETLINK", "AF_ROUTE", "AF_ALG", "AF_SYSTEM")
+    if hasattr(socket, name))
 
 _RESOLVERS = ("getaddrinfo", "gethostbyname", "gethostbyname_ex",
               "gethostbyaddr", "getnameinfo", "getfqdn", "create_connection")
@@ -108,11 +120,20 @@ def _reject_lookup(host: object) -> None:
 
 
 def _reject_inet(family: object) -> None:
+    """Refuse every family but the local ones. -1 is "the default", which is
+    AF_INET; with a fileno it means "whatever that descriptor is", which the
+    audit hook cannot see, so it is refused too, as it always was."""
     fam = family if family not in (-1, None) else socket.AF_INET
-    if fam in _INET_FAMILIES and not getattr(_state, "socketpair", 0):
-        raise _violation(
-            "something attempted to create a network socket"
-        )
+    try:
+        if fam in _LOCAL_FAMILIES:
+            return
+    except TypeError:                     # unhashable: not a family at all
+        pass
+    if fam in _INET_FAMILIES and getattr(_state, "socketpair", 0):
+        return
+    raise _violation(
+        "something attempted to create a network socket"
+    )
 
 
 # ------------------------------------------------------------ socket patches
