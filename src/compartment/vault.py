@@ -87,8 +87,57 @@ def local_stamp(created: float | None) -> str:
     try:
         return datetime.datetime.fromtimestamp(
             float(created)).strftime("%Y-%m-%d %H:%M")
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, OverflowError):
+        # OverflowError: an infinite or vast value, which a JSONL import
+        # could carry in, raised past every reader of the record, so one
+        # such memory failed every search that would have returned it.
         return ""
+
+
+#: The span a stored instant may take: what a calendar date can be made of
+#: (years 1 to 9999, in UTC), checked as a number so the answer does not
+#: depend on what the platform's C library will convert.
+_MIN_INSTANT = -62135596800.0
+_MAX_INSTANT = 253402300799.0
+
+
+def instant(value) -> float | None:
+    """A moment as unix seconds, or None when `value` does not name one.
+
+    `created` and `affirmed` reach the vault from outside on the restore
+    paths - a JSONL import, a curation plan - and whatever a file holds was
+    stored as it came: an ISO string such as "2024-05-01T09:30:00Z" went
+    into the REAL column as text, and the next search failed converting it
+    for the recency prior. Every search, for good, since every search reads
+    the whole population. So the value is read the way a person would read
+    it: a number of seconds; numeric text; an ISO date or datetime (one
+    without a zone is local time, as a person writing it means); or a count
+    of milliseconds, which is what JavaScript's Date.now() writes and which
+    as seconds would be a date thousands of years away. Anything else,
+    including NaN and infinity, is None, and the caller falls back to now
+    rather than keep a date nothing can read."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        t = float(value)
+    else:
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            t = float(s)
+        except ValueError:
+            try:
+                t = datetime.datetime.fromisoformat(s).timestamp()
+            except (ValueError, OverflowError, OSError):
+                return None
+    if not math.isfinite(t):
+        return None
+    if _MIN_INSTANT <= t <= _MAX_INSTANT:
+        return t
+    if _MIN_INSTANT <= t / 1000.0 <= _MAX_INSTANT:
+        return t / 1000.0
+    return None
 
 
 # A memory's own account of where it came from, written at the end of its text
@@ -108,8 +157,18 @@ def discovery_date(value=None) -> str:
     time and lives in `created`."""
     if value in (None, ""):
         return datetime.date.today().isoformat()
-    if isinstance(value, (int, float)):
-        return datetime.date.fromtimestamp(float(value)).isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Through instant, so milliseconds (what a JavaScript client sends)
+        # read as the day they name, and a number that names no day is kept
+        # as written below instead of raising "year 56759 is out of range"
+        # out of the store.
+        t = instant(value)
+        if t is not None:
+            try:
+                return datetime.date.fromtimestamp(t).isoformat()
+            except (ValueError, OverflowError, OSError):
+                pass
+        return str(value)[:40]
     s = str(value).strip()
     try:
         return datetime.date.fromisoformat(s[:10]).isoformat()
@@ -118,6 +177,33 @@ def discovery_date(value=None) -> str:
         # that would read as verified. Truncated so a whole sentence smuggled
         # into this field cannot become the provenance clause.
         return s[:40]
+
+
+def clean_text(value):
+    """Text as UTF-8 can carry it: every lone surrogate replaced by U+FFFD,
+    and a surrogate pair that arrived as two code points joined into the
+    character it encodes. Anything that is not a str (None, a number) and a
+    list of strings come back the same shape.
+
+    Python's json decoder turns "\\ud83d" into a lone surrogate without
+    complaint, and lone surrogates are common in what agents send: a
+    JavaScript client that cuts a string to length cuts emoji in half, and
+    Windows hands back unpaired UTF-16 from file names and the clipboard.
+    Such a string cannot be encoded as UTF-8, so the tokenizer refused it
+    ("TextInputSequence must be str") and SQLite would have refused it next:
+    the store or search failed outright, with an error that said nothing
+    about why. One replacement character is a far smaller loss than the
+    memory, and it is what every UTF-8 decoder shows for the same damage."""
+    if isinstance(value, list):
+        return [clean_text(v) for v in value]
+    if not isinstance(value, str):
+        return value
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("utf-16", "surrogatepass").decode("utf-16",
+                                                              "replace")
 
 
 def strip_provenance(text: str) -> str:
@@ -204,6 +290,11 @@ def expiry_date(value, today: datetime.date | None = None,
     if value in (None, ""):
         return None
     today = today or datetime.date.today()
+    if isinstance(value, float) and not math.isfinite(value):
+        raise CryptoError(
+            f"expires={value!r} is not a date or a duration. Give the last "
+            f"day it is true (2026-09-03), or how long it lasts (14d, 2w, "
+            f"3m, 1y).")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         s = str(int(value))
     else:
@@ -217,12 +308,20 @@ def expiry_date(value, today: datetime.date | None = None,
             raise CryptoError(
                 f"expires={value!r}: a duration has to be at least one day")
         unit = (m.group(2) or "d").lower()
-        if unit == "m":
-            return _add_months(today, n).isoformat()
-        if unit == "y":
-            return _add_months(today, n * 12).isoformat()
-        return (today + datetime.timedelta(
-            days=n * (7 if unit == "w" else 1))).isoformat()
+        try:
+            if unit == "m":
+                return _add_months(today, n).isoformat()
+            if unit == "y":
+                return _add_months(today, n * 12).isoformat()
+            return (today + datetime.timedelta(
+                days=n * (7 if unit == "w" else 1))).isoformat()
+        except (ValueError, OverflowError):
+            # `9999y` lands past the year 9999, the last a date can name.
+            # A fact meant to outlast that is a fact with no expiry.
+            raise CryptoError(
+                f"expires={value!r} runs past the year 9999. A fact that "
+                f"lasts that long does not expire: leave the expiry off."
+            ) from None
     try:
         day = datetime.date.fromisoformat(s[:10])
     except ValueError:
@@ -253,6 +352,11 @@ class VaultLockedError(CryptoError):
 
 class VaultStaleError(CryptoError):
     """Another process wrote the vault; the caller should reopen and retry."""
+
+
+#: The disk state of a handle whose RAM holds a change its journal append
+#: failed to write. Matches no file, so is_stale() is True from then on.
+_DIVERGED = (-1, -1, -1, "")
 
 
 def _synchronized(fn):
@@ -289,7 +393,7 @@ class Vault:
         #: When the expiry sweep last ran. Zero means never, so the first read
         #: after opening always sweeps.
         self._last_expiry_sweep = 0.0
-        self._disk_state: tuple[int, int, int] | None = None
+        self._disk_state: tuple[int, int, int, str] | None = None
         if os.path.exists(path):
             self._disk_state = self._stat_disk()
         self.index = None
@@ -298,22 +402,25 @@ class Vault:
 
     # -------------------------------------------------- multi-process safety
 
-    def _stat_disk(self) -> tuple[int, int, int]:
+    def _stat_disk(self) -> tuple[int, int, int, str]:
         # The inode as well, as in platforms.file_signature: another
         # process's compaction can leave a file of the same length with, on a
-        # coarse clock, the same time, and only the inode shows it is new.
-        st = os.stat(self.path)
-        return (st.st_ino, st.st_size, st.st_mtime_ns)
+        # coarse clock, the same time, and only the inode shows it is new -
+        # where the filesystem does not hand the new file an old number. The
+        # identity read with them is what shows it everywhere else; see
+        # vaultfile.disk_state.
+        return vaultfile.disk_state(self.path)
 
     def is_stale(self) -> bool:
         """True if the vault file changed under us since we read it.
 
         A file that has been DELETED counts as changed. It used to count as
         unchanged, because the existence test was ANDed into the answer, and
-        the consequence was silent and permanent: _journal appends with
-        open(path, "ab"), which recreates the file with journal frames and no
+        the consequence was silent and permanent: _journal appended with
+        open(path, "ab"), which recreated the file with journal frames and no
         header, so every later write reported success into something no
-        version of this program can ever open again.
+        version of this program can ever open again. (The append no longer
+        creates a missing file either; this check is what refuses first.)
         """
         if self._disk_state is None:
             return False
@@ -321,11 +428,23 @@ class Vault:
             return True
         return self._stat_disk() != self._disk_state
 
+    def _refuse_if_diverged(self) -> None:
+        """Refuse to write from a handle whose journal append failed (see
+        _journal). Checked at the door of the writes that can answer from RAM
+        without journalling - a store matched as a duplicate, a link that
+        already exists - as well as under the write lock."""
+        if self._disk_state == _DIVERGED:
+            raise VaultStaleError(
+                "An earlier write from this handle did not reach the vault "
+                "file, so what it holds in memory no longer matches it. "
+                "Reopen the vault and retry.")
+
     def _with_file_lock(self, fn, timeout: float = 10.0):
         """Advisory single-writer lock: serializes journal appends and saves
         across processes sharing one vault (Hermes + Claude + CLI).
         Cross-platform via platforms.FileLock (POSIX flock / Windows msvcrt)."""
         with FileLock(self.path + ".flock", timeout=timeout):
+            self._refuse_if_diverged()
             if self.is_stale():
                 if not os.path.exists(self.path):
                     raise VaultStaleError(
@@ -439,7 +558,9 @@ class Vault:
             v._replay(e)
         merged = v._merge_legacy_starter()
         rewired = v._migrate_wire_format()
-        if entries or loaded.truncated_tail or merged or rewired or slots_migrated:
+        repaired = v._repair_instants()
+        if (entries or loaded.truncated_tail or merged or rewired
+                or slots_migrated or repaired):
             if loaded.truncated_tail:
                 # Reaching here means the framing proved this was an
                 # interrupted append: an intact, checksummed length prefix
@@ -511,6 +632,37 @@ class Vault:
         n = self.db.migrate_wire(self._master)
         self.header.extra["wire"] = wire.WIRE_FORMAT
         return n or 1   # truthy even for an empty vault: the marker must save
+
+    def _repair_instants(self) -> int:
+        """Give every record a `created` (and `affirmed`) that is a number.
+
+        Builds before `instant` stored an imported date as whatever the file
+        held, so a vault that took one line with an ISO string, a NaN or a
+        word in it failed every search from then on, and nothing in it could
+        be fixed from the outside because finding the record needed a
+        search. Each bad value is read as `instant` reads it; one that names
+        no moment becomes the time the row was written (`accessed` starts
+        there, and a record no search could return was never touched since),
+        and a bad `affirmed` is dropped. Writes nothing itself: the caller's
+        save commits it, as with the other migrations here."""
+        rows = self.db.conn.execute(
+            "SELECT id, created, affirmed, accessed FROM records"
+            " WHERE typeof(created) NOT IN ('integer', 'real')"
+            " OR (affirmed IS NOT NULL"
+            "     AND typeof(affirmed) NOT IN ('integer', 'real'))").fetchall()
+        for r in rows:
+            created = (instant(r["created"]) or instant(r["accessed"])
+                       or time.time())
+            self.db.conn.execute(
+                "UPDATE records SET created = ?, affirmed = ? WHERE id = ?",
+                (created, instant(r["affirmed"]), r["id"]))
+        if rows:
+            # Direct SQL, so the cache of the population's times is stale.
+            self.db._invalidate_recency()
+            self._audit_and_capture(
+                "system", "repair",
+                f"{len(rows)} records given a readable stored date")
+        return len(rows)
 
     def _merge_legacy_starter(self) -> int:
         """One-time reorganization: fold the legacy read-only packs/starter
@@ -636,7 +788,18 @@ class Vault:
         from . import session
         if passphrase:
             return passphrase, None
-        key = session.get(path)
+        # A session lookup that fails (no shared memory in a container, a
+        # session directory that cannot be read, a boot that cannot be
+        # identified inside a sandbox) says nothing about the credentials
+        # after it. Raised on the spot, it hid a COMPARTMENT_PASSPHRASE set
+        # precisely because the session store does not work there - which is
+        # what that error's own message tells the user to do. It is kept and
+        # raised only when nothing else opens the vault.
+        session_error: Exception | None = None
+        try:
+            key = session.get(path)
+        except Exception as exc:                        # noqa: BLE001
+            session_error, key = exc, None
         if key is not None:
             return None, key
         key = keychain_get(path)
@@ -645,6 +808,8 @@ class Vault:
         from_env = env("PASSPHRASE")
         if from_env:
             return from_env, None
+        if session_error is not None:
+            raise session_error
         return None
 
     @staticmethod
@@ -812,7 +977,21 @@ class Vault:
             vaultfile.append_journal_entries(self.path, self.header,
                                              self._journal_seq, list(entries),
                                              self._master)
-        self._with_file_lock(_append)
+        try:
+            self._with_file_lock(_append)
+        except BaseException:
+            # Every caller changes the rows and the index in RAM before it
+            # journals, so a journal that did not land (the write lock busy
+            # past its timeout, a full disk, a failed sync) leaves this
+            # handle holding a change the file does not have. Kept, it went
+            # to disk with the next save, a memory the caller had been told
+            # was not stored; and a retry of the same store found it in RAM,
+            # returned it as a duplicate, and journalled nothing, so it was
+            # gone at the next reopen. The handle is marked as no longer
+            # matching the file, so every later write refuses and the server
+            # reopens from disk, which is the only state worth trusting.
+            self._disk_state = _DIVERGED
+            raise
         self._journal_seq += len(entries)
 
     def _replay(self, e: dict) -> None:
@@ -910,6 +1089,11 @@ class Vault:
               _expiry_strict: bool = True, _gate: bool = True,
               _split_hint: str | None = None) -> dict:
         self._require_open()
+        self._refuse_if_diverged()
+        text, source, discovered, namespace = (
+            clean_text(text), clean_text(source), clean_text(discovered),
+            clean_text(namespace))
+        tags = clean_text(tags)
         ns = namespace or self.config.default_namespace(caller)
         if pack is None:
             self.config.check(caller, ns, write=True)
@@ -967,6 +1151,9 @@ class Vault:
             # excluded so the vector represents the claim itself.
             vec = self.embedder.embed_record(strip_provenance(text))
         vec = np.atleast_2d(np.asarray(vec, dtype=np.float32))
+        # Read as moments, or dropped: see instant. Stored as they came, an
+        # ISO string or a NaN from an import broke every later search.
+        created, affirmed = instant(created), instant(affirmed)
         # Kept to 0..1 as the server's tools keep it, so a value on another
         # scale (1-10, say) lands in a dashboard bucket; a NaN is the default.
         importance = float(importance)
@@ -1280,6 +1467,10 @@ class Vault:
         An explicit `top_k` still means exactly that many, unchanged, because
         callers that page or benchmark need a fixed window."""
         self._require_open()
+        query, namespace, tags = (clean_text(query), clean_text(namespace),
+                                  clean_text(tags))
+        discovered_since, discovered_until = (clean_text(discovered_since),
+                                              clean_text(discovered_until))
         self._maybe_expire()
         if namespace is not None:
             self.config.grant_for(caller, namespace)  # raises if no access
@@ -1695,7 +1886,13 @@ class Vault:
         if not self.expiry_enabled():
             return
         now = time.time()
-        if now - self._last_expiry_sweep < self.EXPIRY_SWEEP_SECONDS:
+        # A clock set back - a VM or a laptop restored from a snapshot, a
+        # clock that ran ahead and was corrected - leaves the last sweep in
+        # the future. Read as "swept moments ago", that held every sweep
+        # off until the clock caught up again, which can be months in a
+        # server that stays open. A negative interval says nothing about
+        # when the vault was last tidied, so it sweeps.
+        if 0 <= now - self._last_expiry_sweep < self.EXPIRY_SWEEP_SECONDS:
             return
         try:
             self.expire()
@@ -1723,6 +1920,10 @@ class Vault:
         host model (or the user), exactly like memory curation. Idempotent:
         re-linking the same triple returns the existing relation."""
         self._require_open()
+        self._refuse_if_diverged()
+        subject, predicate, obj, namespace = (
+            clean_text(subject), clean_text(predicate), clean_text(obj),
+            clean_text(namespace))
         ns = namespace or self.config.default_namespace(caller)
         self.config.check(caller, ns, write=True)
         for label, val in (("subject", subject), ("predicate", predicate),
@@ -1773,6 +1974,9 @@ class Vault:
         subject OR object (case-insensitive); `as_of` keeps relations whose
         validity window covers that instant."""
         self._require_open()
+        entity, subject, predicate, obj, namespace = (
+            clean_text(entity), clean_text(subject), clean_text(predicate),
+            clean_text(obj), clean_text(namespace))
         if namespace is not None:
             self.config.grant_for(caller, namespace)
             allowed = {namespace}
@@ -2024,7 +2228,22 @@ class Vault:
     def import_jsonl(self, text: str, caller: str = "user",
                      namespace: str | None = None) -> int:
         self._require_open()
-        records = [json.loads(l) for l in text.splitlines() if l.strip()]
+        # A file saved with a byte order mark (Notepad, Windows PowerShell's
+        # Out-File) arrives with U+FEFF in front of its first line, which
+        # json.loads refuses, and the whole import failed on line one.
+        # Split on newlines only, never splitlines(), for the reason
+        # curate.parse_plan gives: JSONL written with ensure_ascii=False
+        # (most tools other than this one) carries U+2028, U+2029 and U+0085
+        # unescaped inside strings, and splitlines() cut such a line in two,
+        # failing the whole import on a memory that merely contained one. A
+        # trailing \r from CRLF is whitespace to json.loads.
+        records = [json.loads(l) for l in text.lstrip("\ufeff").split("\n")
+                   if l.strip()]
+        # Cleaned here, not only in store(): the vectors below are computed
+        # before store() sees the text, and the tokenizer refuses a lone
+        # surrogate exactly as it does there.
+        for r in records:
+            r["text"] = clean_text(r["text"])
         # What store() embeds: the claim without its provenance clause, every
         # window of it. All of them go in one batched call, and each record
         # is handed its own block of rows. A claim of at most CHUNK_WINDOW

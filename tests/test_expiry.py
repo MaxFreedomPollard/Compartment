@@ -269,7 +269,7 @@ def test_with_the_toggle_on_an_expired_memory_is_never_handed_over(v):
     it, so the read paths filter even inside the hour before the sweep."""
     dead = _store(v, "The old wifi password is hunter2.", expires=_day(-1),
                   _expiry_strict=False)
-    v._last_expiry_sweep = 9e18          # pretend a sweep just ran
+    v._last_expiry_sweep = __import__("time").time()   # a sweep just ran
     hits = v.search("wifi password", caller="t")["results"]
     assert not any(r["id"] == dead["id"] for r in hits)
     assert not any(r["id"] == dead["id"]
@@ -306,6 +306,18 @@ def test_a_read_sweeps_at_most_once_an_hour(v, monkeypatch):
     v._last_expiry_sweep = __import__("time").time()
     v.search("anything again", caller="t")
     assert len(calls) == 1, "swept twice inside the hour"
+
+
+def test_a_clock_set_back_does_not_hold_the_sweep_off(v, monkeypatch):
+    """The last sweep ran by a clock that was ahead, or before a snapshot
+    was restored. Counted as moments ago, no read swept again until the
+    clock caught up, however far that was."""
+    calls = []
+    monkeypatch.setattr(Vault, "expire",
+                        lambda self, caller="expiry": calls.append(caller))
+    v._last_expiry_sweep = __import__("time").time() + 90 * 86400
+    v.search("anything", caller="t")
+    assert len(calls) == 1
 
 
 def test_a_sweep_that_fails_does_not_take_the_search_down(v, monkeypatch):

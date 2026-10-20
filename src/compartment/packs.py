@@ -207,6 +207,13 @@ def read_pack(blob: bytes, passphrase: str | None = None, *,
     sections = unpack_sections(body)
     records = [json.loads(l) for l in
                sections["records"].decode("utf-8").splitlines() if l.strip()]
+    # A "\ud83d" escape in a record decodes to a lone surrogate, which the
+    # encoder refuses when the vectors have to be recomputed and SQLite
+    # refuses on insert; see vault.clean_text.
+    from .vault import clean_text
+    for r in records:
+        if isinstance(r.get("text"), str):
+            r["text"] = clean_text(r["text"])
     dim = int(header["model"]["dim"])
     vectors = np.frombuffer(sections["vectors"], dtype=np.float32).reshape(-1, dim)
     if vectors.shape[0] != len(records) or vectors.shape[0] != header["records"]:

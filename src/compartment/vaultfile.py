@@ -7,9 +7,10 @@ Layout:
 
 Invariant I2: plaintext never touches disk. The payload and every journal
 entry are sealed before any byte is written. lock/save rewrites the file
-atomically (temp file → fsync → rename). Journal appends are fsync'd, so an
-acknowledged write survives kill -9; a truncated *final* entry is an
-unacknowledged write and is discarded on open with a notice - any other
+atomically (temp file → fsync → rename → fsync of the folder). Journal
+appends are fsync'd, so an acknowledged write survives kill -9 and power
+loss (see _sync for what that takes on macOS); a truncated *final* entry is
+an unacknowledged write and is discarded on open with a notice - any other
 malformed byte is a tamper error.
 """
 from __future__ import annotations
@@ -26,6 +27,15 @@ from nacl.signing import SigningKey, VerifyKey
 
 from . import crypto, wire
 from .crypto import CryptoError, TamperError
+
+try:
+    import fcntl
+except ImportError:                     # Windows
+    fcntl = None
+
+#: The fcntl that makes a write durable on Apple's platforms, or None where
+#: Python does not define it (everywhere else). See _sync.
+_FULLFSYNC = getattr(fcntl, "F_FULLFSYNC", None)
 
 MAGIC = b"NUCV"
 FORMAT_VERSION = 1
@@ -141,6 +151,64 @@ def _atomic_replace(tmp: str, path: str) -> None:
     raise last if last is not None else OSError(f"could not replace {path}")
 
 
+def _sync(fd: int) -> None:
+    """Make what was written to `fd` durable: on the disk itself, not in a
+    cache that a power cut empties.
+
+    On macOS (and iOS) fsync only hands the data to the drive, which is free
+    to hold it in its own volatile cache and to write it out in any order;
+    Apple documents F_FULLFSYNC as the call that actually flushes it, and
+    SSDs in current Macs are measured to lose fsync'd data on power loss
+    without it. Two promises rest on this. An acknowledged store is meant to
+    survive power loss, not only kill -9. And a journal entry whose length
+    reached the disk before its body did reads back as a complete entry that
+    fails authentication, which an open has to treat as tampering: the vault
+    refused to open after a power cut, for no fault of the user's. The
+    compaction's copy is synced the same way, or the rename could land
+    before the bytes it points at.
+
+    F_FULLFSYNC costs a few milliseconds per call (about 4 ms measured on an
+    Apple SSD, against roughly 40 ms for the embedding a store already
+    pays), and stores are not a hot loop, so it is paid on every append. A
+    filesystem that does not support it (SMB, some FUSE and USB media)
+    refuses it, and plain fsync is the best that disk offers."""
+    if _FULLFSYNC is not None:
+        try:
+            fcntl.fcntl(fd, _FULLFSYNC)
+            return
+        except OSError:
+            pass
+    os.fsync(fd)
+
+
+def _sync_dir(path: str) -> None:
+    """Make the rename that just put `path` in place durable.
+
+    A rename is a change to the FOLDER, and on POSIX it is the folder that
+    has to be synced for it to survive a power cut: syncing the file makes
+    its bytes durable, not the name pointing at them. Lose the rename and
+    the old vault comes back, and with it every store acknowledged since the
+    compaction is gone, because each was appended to the new file. Best
+    effort: some filesystems (certain FUSE and network mounts) refuse to
+    sync a directory, and the save has already succeeded by then.
+
+    Not on Windows, where a directory cannot be opened for this at all and
+    NTFS journals the rename itself."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(os.path.dirname(os.path.abspath(path)),
+                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        _sync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _payload_aad(vault_id: str) -> bytes:
     return wire.payload(vault_id)[0]
 
@@ -197,10 +265,11 @@ class LoadedVaultFile:
     #: decrypting the whole payload again.
     journal_start: int = 0
     journal_end: int = 0
-    #: (inode, size, mtime in ns) of the file as it was read - taken before the
-    #: read, from the same open file. What an opener compares against to learn
-    #: that another process wrote while it was reading. See Vault.unlock.
-    disk_state: tuple[int, int, int] | None = None
+    #: (inode, size, mtime in ns, identity) of the file as it was read - taken
+    #: before the read, from the same open file. What an opener compares
+    #: against to learn that another process wrote while it was reading. See
+    #: Vault.unlock and disk_state below.
+    disk_state: tuple[int, int, int, str] | None = None
 
 
 def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
@@ -256,6 +325,53 @@ def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
     return journal_cts, pos, truncated_tail, tail_bytes
 
 
+#: The most header an identity reads. A real header is a few kilobytes; this
+#: only bounds the read on a file whose length field is garbage.
+_IDENTITY_HEADER_CAP = 1 << 20
+
+
+def _identity_span(head: bytes) -> int:
+    """How many leading bytes identify one write of the file: the header and
+    the payload's nonce, given at least the first ten bytes."""
+    if len(head) >= 10 and head[:4] == MAGIC:
+        (hlen,) = struct.unpack(">I", head[6:10])
+        return 10 + min(hlen, _IDENTITY_HEADER_CAP) + crypto.NONCE_LEN
+    return min(len(head), 10)
+
+
+def _identity(prefix: bytes) -> str:
+    return crypto.sha256(prefix[:_identity_span(prefix)])
+
+
+def disk_state(path: str) -> tuple[int, int, int, str]:
+    """(inode, size, mtime in ns, identity) of the vault file as it is now,
+    all read from one open file.
+
+    The first three are what a stat can say, and between them they miss a
+    rewrite on exactly the disks people carry vaults on. A compaction leaves
+    a file of the same size often - the payload is a whole number of SQLite
+    pages - and FAT and exFAT keep modification times to two seconds or ten
+    milliseconds, hand a new file an inode number derived from where its
+    directory entry or first cluster landed (which a later save reuses), and
+    a clock stepped back can stamp a newer file with an older time anywhere.
+    Missed, another process's save is overwritten by this one's, or this
+    process appends entries sealed to a journal position the new file does
+    not have, and the next open refuses the vault as tampered.
+
+    The identity closes that: every save reseals the payload under a fresh
+    random nonce at its front, so the header plus those bytes differ between
+    any two writes of the file, whatever the filesystem reports. It costs
+    one read of a few kilobytes. The read-only panel helper (vaultview) has
+    told rewrites apart the same way."""
+    with open(path, "rb") as f:
+        st = os.fstat(f.fileno())
+        head = f.read(10)
+        span = _identity_span(head)
+        if span > len(head):
+            head += f.read(span - len(head))
+    return (st.st_ino, st.st_size, st.st_mtime_ns, _identity(head))
+
+
 def read_vault_file(path: str) -> LoadedVaultFile:
     with open(path, "rb") as f:
         # Before the read, so an append that lands during it makes the file
@@ -264,7 +380,8 @@ def read_vault_file(path: str) -> LoadedVaultFile:
         st = os.fstat(f.fileno())
         raw = f.read()
     loaded = parse_vault_bytes(raw, path)
-    loaded.disk_state = (st.st_ino, st.st_size, st.st_mtime_ns)
+    loaded.disk_state = (st.st_ino, st.st_size, st.st_mtime_ns,
+                         _identity(raw))
     return loaded
 
 
@@ -361,7 +478,7 @@ def write_vault_file(
             f.write(hjson)
             f.write(payload_ct)
             f.flush()
-            os.fsync(f.fileno())
+            _sync(f.fileno())
         # O_CREAT only sets the mode when it actually creates the file, so a temp
         # left behind by an earlier run keeps its old mode. Set it either way.
         os.chmod(tmp, VAULT_MODE)
@@ -375,6 +492,7 @@ def write_vault_file(
         except OSError:
             pass
         raise
+    _sync_dir(path)
 
 
 def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, master_key: bytes) -> None:
@@ -393,14 +511,45 @@ def append_journal_entries(path: str, header: VaultHeader, seq: int,
         crypto.canonical_json(entry),
         aad=_journal_aad(header.vault_id, seq + i),
     ) for i, entry in enumerate(entries)]
-    with open(path, "ab") as f:
-        for ct in cts:
-            length = struct.pack(">I", len(ct))
-            f.write(length)
-            f.write(struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF))
-            f.write(ct)
-        f.flush()
-        os.fsync(f.fileno())
+    frames = bytearray()
+    for ct in cts:
+        length = struct.pack(">I", len(ct))
+        frames += length
+        frames += struct.pack(">I", zlib.crc32(length) & 0xFFFFFFFF)
+        frames += ct
+    # No O_CREAT: an append is only ever made to a vault that exists, and
+    # creating one here would write journal frames into a file with no
+    # header, which nothing can open again. O_BINARY, where it exists, so
+    # Windows never translates a newline byte inside the ciphertext.
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    try:
+        # The caller holds the vault's write lock, so nothing else appends
+        # between this and the write below: the file ends here.
+        start = os.fstat(fd).st_size
+        try:
+            view = memoryview(frames)
+            while view:
+                view = view[os.write(fd, view):]
+            _sync(fd)
+        except BaseException:
+            # A write the disk refused part way (ENOSPC, EDQUOT, an I/O
+            # error, a sync that failed) is a write nobody acknowledged, and
+            # its bytes are taken back off the end. Left there they were a
+            # torn tail, and a torn tail is the one thing an open cannot
+            # tolerate without compacting: on a disk that was still full,
+            # every MCP server, `compartment status` and the panel then
+            # failed to open the vault at all, reads included, until space
+            # was freed. Truncating frees the space it took, so it succeeds
+            # on the full disk that caused it. If it cannot, the bytes stay
+            # a torn tail and the next open discards them, as before.
+            try:
+                os.ftruncate(fd, start)
+                _sync(fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------

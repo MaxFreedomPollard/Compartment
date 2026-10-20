@@ -42,6 +42,7 @@ from __future__ import annotations
 from .home import env, home
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -92,15 +93,30 @@ def download(variant: str = "s") -> Path:
     print(f"downloading {url}")
     h = hashlib.sha256()
     done = 0
-    with urllib.request.urlopen(url) as r, open(dest, "wb") as f:
-        while True:
-            chunk = r.read(1 << 22)
-            if not chunk:
-                break
-            f.write(chunk)
-            h.update(chunk)
-            done += len(chunk)
-            print(f"\r  {done // (1 << 20)} MB", end="", flush=True)
+    # Into a file beside it, renamed into place only once the whole body has
+    # arrived. Written straight to `dest`, a download cut short (Ctrl-C, a
+    # dropped connection, a full disk; the m variant is gigabytes) left a
+    # truncated file that run() trusted because it existed, and every run
+    # after failed parsing it as "Unterminated string" with nothing to say
+    # the download was the problem or that deleting it was the fix.
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(url) as r, open(part, "wb") as f:
+            while True:
+                chunk = r.read(1 << 22)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                done += len(chunk)
+                print(f"\r  {done // (1 << 20)} MB", end="", flush=True)
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
     print(f"\n  sha256 {h.hexdigest()}")
     print(f"  → {dest}")
     return dest
