@@ -432,3 +432,97 @@ def test_llms_install_gets_an_agent_past_the_common_install_failures():
     assert "where compartment" in text and "which compartment" in text
     for client in re.findall(r"compartment integrate ([a-z0-9][a-z0-9-]*)", text):
         assert client in clients.CLIENTS, client
+
+
+# ---------------------------------- the repository root is a plugin root ----
+#: What each host that installs the repository root loads from it without
+#: being told to. skills/ and mcp.json are shared on purpose; everything
+#: else here would be read by several hosts in several incompatible ways
+#: (a Claude hooks/hooks.json is not a Gemini one; Gemini's commands/ are
+#: TOML, Claude's Markdown; OpenClaw imports a root settings.json into its
+#: own settings). Adding one is a decision for every host at once, which is
+#: why this test names them.
+HOST_AUTOLOADED = ("commands", "agents", "hooks", "policies", "output-styles",
+                   "monitors", "themes", ".mcp.json", ".lsp.json",
+                   "settings.json", ".codex-plugin", ".cursor-plugin",
+                   "openclaw.plugin.json")
+
+
+def test_the_root_holds_nothing_a_host_would_load_by_surprise():
+    present = [n for n in HOST_AUTOLOADED if (ROOT / n).exists()]
+    assert not present, (
+        f"{present} at the repository root would be auto-loaded by Claude "
+        "Code, Gemini CLI, Codex, OpenClaw or Hermes, each in its own format; "
+        "see HOST_AUTOLOADED and docs/PLUGINS.md before adding it")
+
+
+def test_every_shared_skill_meets_the_agent_skills_specification():
+    """All five hosts load skills/*/SKILL.md, and Hermes and Codex skip a
+    skill that fails the specification instead of loading it loosely."""
+    allowed = {"name", "description", "license", "compatibility", "metadata",
+               "allowed-tools"}
+    skills = sorted((ROOT / "skills").glob("*/SKILL.md"))
+    assert skills
+    for path in skills:
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        front = text.split("---\n", 2)[1]
+        keys = set(re.findall(r"^([A-Za-z][\w-]*):", front, re.M))
+        assert keys <= allowed, (path, keys - allowed)
+        name = re.search(r"^name:\s*(\S+)", front, re.M).group(1)
+        assert name == path.parent.name
+        assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", name) and len(name) <= 64
+        desc = re.search(r"^description:\s*(.+)$", front, re.M).group(1)
+        assert 1 <= len(desc) <= 1024
+        # metadata is a map of strings: quoted, never a YAML list or number
+        for value in re.findall(r"^  [\w-]+:\s*(.*)$", front, re.M):
+            assert value.startswith('"') and value.endswith('"'), (path, value)
+
+
+# --------------------------------------------------- Claude Code, Gemini ----
+def test_the_claude_code_marketplace_serves_the_plugin_at_the_root():
+    market = _json(".claude-plugin/marketplace.json")
+    plugin = _json(".claude-plugin/plugin.json")
+    assert market["owner"]["name"]
+    (entry,) = market["plugins"]
+    assert entry["name"] == plugin["name"] == "compartment"
+    assert entry["source"] == "./"
+    assert re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", plugin["name"])
+    assert re.fullmatch(r"\d+\.\d+\.\d+", plugin["version"])
+    server = plugin["mcpServers"]["compartment"]
+    assert set(server) <= {"type", "command", "args", "env"}
+
+
+def test_the_gemini_extension_is_what_the_gallery_indexes():
+    """The gallery crawler wants gemini-extension.json at the repository
+    root with a name matching the install directory, a version and a
+    description; extensions may not set `trust` on a server."""
+    d = _json("gemini-extension.json")
+    assert d["name"] == "compartment"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", d["version"]) and d["description"]
+    assert (ROOT / d["contextFileName"]).is_file()
+    for server in d["mcpServers"].values():
+        assert "trust" not in server
+
+
+def test_gemini_md_is_the_handshake_instructions_verbatim():
+    """Gemini CLI loads GEMINI.md into every session as the extension's
+    context, on top of the instructions the server sends in its handshake;
+    two versions of the rules would tell the model two things."""
+    from compartment import server
+    flat = lambda s: re.sub(r"\s+", " ", s).strip()        # noqa: E731
+    body = (ROOT / "GEMINI.md").read_text(encoding="utf-8").split("\n", 1)[1]
+    assert flat(body) == flat(server.COMPARTMENT_INSTRUCTIONS)
+
+
+def test_the_website_does_not_publish_the_plugin_files_as_pages():
+    """GitHub Pages builds the repository root with Jekyll, which renders
+    any file with YAML front matter (every SKILL.md) as a page and copies
+    the rest; the manifests are for hosts, not for the site."""
+    import pytest
+    yaml = pytest.importorskip("yaml")
+    excluded = set(yaml.safe_load((ROOT / "_config.yml").read_text(
+        encoding="utf-8"))["exclude"])
+    for name in ("skills", "plugin.json", "mcp.json", "gemini-extension.json",
+                 "GEMINI.md", "server.json", "glama.json", "packaging", "tools"):
+        assert name in excluded, name
