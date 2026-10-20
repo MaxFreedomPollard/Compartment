@@ -261,6 +261,23 @@ def test_the_bundle_build_is_complete_and_reproducible(tmp_path):
     assert {manifest["icon"], manifest["server"]["entry_point"]} <= names
 
 
+def test_the_bundle_lock_failure_says_what_to_do(tmp_path, monkeypatch):
+    """The lock pins the release, so it only resolves once the release is on
+    PyPI; a build run too early must say so, not end in a traceback."""
+    import subprocess
+    import pytest
+    mod = _build_mcpb()
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit, match="--no-lock"):
+        mod.build(tmp_path, with_lock=True)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(mod.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 1))
+    with pytest.raises(SystemExit, match="after the PyPI publish"):
+        mod.build(tmp_path, with_lock=True)
+    assert not list(tmp_path.glob("*.mcpb*"))
+
+
 def test_the_bundle_build_refuses_a_bundle_for_another_release():
     import pytest
     mod = _build_mcpb()

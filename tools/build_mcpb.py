@@ -109,7 +109,13 @@ def lock(staging: pathlib.Path) -> pathlib.Path:
                          "pass --no-lock for a development build.")
     for name in ("pyproject.toml", ".python-version"):
         shutil.copy2(SRC / name, staging / name)
-    subprocess.run([uv, "lock", "--directory", str(staging)], check=True)
+    if subprocess.run([uv, "lock", "--directory", str(staging)]).returncode:
+        # Almost always the release is not on PyPI yet: the lock pins the
+        # version this bundle installs, so it can only be resolved after
+        # publish.yml has uploaded it. uv has printed its own reason above.
+        raise SystemExit(f"uv could not lock compartment=={package_version()}. "
+                         "If that version is not on PyPI yet, build the bundle "
+                         "after the PyPI publish; --no-lock skips the lock.")
     return staging / "uv.lock"
 
 
