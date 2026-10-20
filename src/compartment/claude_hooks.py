@@ -71,16 +71,9 @@ def is_installed(settings: Path | None = None) -> bool:
 
 
 def _read(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        data = json.loads(text) if text else {}
-    except (json.JSONDecodeError, OSError):
-        raise ValueError(f"{path} is not valid JSON; refusing to touch it")
-    if not isinstance(data, dict):          # null, a list: not settings
-        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
-    return data
+    """settings.json as a dict, or ValueError, through the reader every
+    client config goes through (a byte order mark or UTF-16 is decoded)."""
+    return clients._read_json(path)
 
 
 def install(compartment_bin: str | None = None, vault: str | None = None,

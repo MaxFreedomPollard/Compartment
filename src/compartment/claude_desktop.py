@@ -66,16 +66,10 @@ def is_registered(path: Path | None = None) -> bool:
 
 
 def _read(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        data = json.loads(text) if text else {}
-    except (json.JSONDecodeError, OSError):
-        raise ValueError(f"{path} is not valid JSON; refusing to touch it")
-    if not isinstance(data, dict):          # null, a list: not a config
-        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
-    return data
+    """The config as a dict, or ValueError: the same reader every other
+    client's config goes through, so a file Notepad or PowerShell saved
+    with a byte order mark, or as UTF-16, is read rather than refused."""
+    return clients._read_json(path)
 
 
 def register(command: str, args: list[str], path: Path | None = None) -> dict:

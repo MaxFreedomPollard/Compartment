@@ -34,6 +34,7 @@ put it, which is all the auto-writing ones do anyway, minus the typing.
 """
 from __future__ import annotations
 
+import codecs
 import errno
 import json
 import os
@@ -442,6 +443,46 @@ def snippet(client: Client, vault: str, caller: str | None = None) -> str:
 
 # --- reading and writing ---------------------------------------------------
 
+#: Byte order marks, longest first: UTF-32's little-endian mark begins
+#: with UTF-16's.
+_BOMS = ((codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF32_LE, "utf-32"),
+         (codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF16_LE, "utf-16"),
+         (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+def read_config_text(path: Path) -> str:
+    """A config file's text, in whichever Unicode encoding it was saved.
+
+    Windows editors do not all save UTF-8 without a mark. Notepad before
+    Windows 10 1903 and PowerShell 5's `Out-File -Encoding utf8` put a UTF-8
+    byte order mark first; PowerShell 5's `>` and `Out-File` write UTF-16.
+    Those are the tools the Claude Desktop and Cursor guides send Windows
+    users to, and a file saved by them was refused as "not valid JSON" (the
+    mark is not whitespace to json.loads) or failed to decode at all, so
+    the user got a block to paste into the very file that had just been
+    refused. A marked file is decoded by its mark; anything unmarked must
+    be UTF-8, as before. What is written back is always UTF-8 without a
+    mark, which every client reads: Node's JSON.parse, which Electron
+    clients use, rejects the mark and cannot read UTF-16 at all, so a
+    marked file was already broken for most of them.
+
+    Line endings come back as \\n, as read_text gave them: write_config
+    writes in text mode, and a \\r\\n kept in the text would be written
+    back as \\r\\r\\n on Windows.
+
+    Raises OSError when the file cannot be read and UnicodeDecodeError (a
+    ValueError) when it is not text in any of these encodings.
+    """
+    raw = Path(path).read_bytes()
+    for bom, codec in _BOMS:
+        if raw.startswith(bom):
+            text = raw.decode(codec)
+            break
+    else:
+        text = raw.decode("utf-8")
+    return text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _read_json(path: Path) -> dict:
     """The file as a dict, or a refusal.
 
@@ -452,7 +493,7 @@ def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = read_config_text(path).strip()
         data = json.loads(text) if text else {}
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         raise ValueError(f"{path} is not valid JSON ({exc}); "
@@ -603,7 +644,7 @@ def is_registered(client: Client, path: Path | None = None) -> bool:
         return False
     if client.kind == "toml":
         try:
-            return _toml_has_ours(client, p.read_text(encoding="utf-8"))
+            return _toml_has_ours(client, read_config_text(p))
         except (OSError, ValueError):    # unreadable, not UTF-8, not TOML
             return False
     if client.kind != "json":
@@ -671,7 +712,7 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
     """
     block = _toml_block(entry)
     try:
-        existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        existing = read_config_text(p) if p.exists() else ""
         registered = _toml_has_ours(client, existing)
     except (OSError, UnicodeDecodeError) as exc:
         out["reason"] = f"cannot read {p} ({exc})"
@@ -707,7 +748,7 @@ def unregister(client: Client, path: Path | None = None) -> bool:
 
     if client.kind == "toml":
         try:
-            text = p.read_text(encoding="utf-8")
+            text = read_config_text(p)
             if not _toml_has_ours(client, text):
                 return False
         except ValueError:          # not UTF-8 or not TOML: not ours to guess at
