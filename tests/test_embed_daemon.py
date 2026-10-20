@@ -246,21 +246,79 @@ def test_a_daemon_that_stops_answering_does_not_hang_its_clients(
 
 
 @needs_bind
-def test_a_text_the_model_rejects_is_an_error_not_a_lost_daemon(daemon_env):
-    """A text the tokenizer cannot encode, such as one with a lone surrogate
-    from a cut emoji, comes back from the daemon as an error reply. The
-    client took that for a daemon that had gone: it dropped the connection,
-    loaded a model of its own for the rest of the process, ran the text
-    again there, and the caller saw the tokenizer's bare TypeError."""
+def test_a_text_with_a_lone_surrogate_embeds_through_the_daemon(daemon_env,
+                                                                local):
+    """Half of a cut emoji, which an MCP client may send as a JSON \\ud83d
+    escape, made tokenizers 0.16 and later raise TypeError, in the daemon
+    and in-process alike (0.15 let it through). It now embeds as U+FFFD
+    would, through the same daemon, which stays the one serving."""
     r = RemoteEmbedder.connect()
     r.embed_query("warm up")
     pid = r.daemon_pid
-    with pytest.raises(ValueError, match="TypeError"):
-        r.embed_query("where is the router \ud83d passphrase")
+    vec = r.embed_query("where is the router \ud83d passphrase")
     assert r.shared and r.daemon_pid == pid
     assert embed_daemon.status(daemon_env)["clients"] == 1
+    assert np.array_equal(
+        vec, local.embed_query("where is the router \ufffd passphrase"))
+
+
+def _served(monkeypatch, model=None):
+    """RemoteEmbedder.connect() wired to a daemon's own connection handler
+    over a socketpair, which needs no bind(), so this runs everywhere,
+    sandboxes included. `model` stands in for Embedder in the daemon."""
+    if model is not None:
+        monkeypatch.setattr(embed_daemon, "Embedder", model)
+    daemon = embed_daemon._Daemon(Path("unused.sock"), idle=60)
+
+    def pair(*a, **k):
+        mine, theirs = socket.socketpair(socket.AF_UNIX)
+        threading.Thread(target=daemon._serve, args=(theirs,),
+                         daemon=True).start()
+        return mine
+    monkeypatch.setattr(embed_daemon, "connect_or_spawn", pair)
+    r = RemoteEmbedder.connect(path=Path("unused.sock"), spawn=False)
+    assert r is not None and r.shared
+    return r, daemon
+
+
+def test_a_text_the_model_rejects_is_an_error_not_a_lost_daemon(monkeypatch):
+    """A request the daemon's model fails on comes back as an error reply.
+    The client took that for a daemon that had gone: it dropped the
+    connection, loaded a model of its own for the rest of the process, ran
+    the text again there, and the caller saw the model's bare error."""
+    class Refusing:
+        def __init__(self, name):
+            self.dim = model_info(name).dim
+
+        def embed_query(self, text):
+            if "refuse" in text:
+                raise TypeError("TextInputSequence must be str")
+            return np.ones(self.dim, np.float32)
+
+    r, daemon = _served(monkeypatch, Refusing)
+    pid = r.daemon_pid
+    with pytest.raises(ValueError, match="TypeError"):
+        r.embed_query("please refuse this one")
+    assert r.shared and r.daemon_pid == pid
+    assert daemon._status()["clients"] == 1
     assert r.embed_query("an ordinary query afterwards").shape == (r.dim,)
     assert r.shared
+    r.close()
+
+
+def test_the_daemon_and_this_process_agree_on_a_lone_surrogate(monkeypatch,
+                                                               local):
+    """The daemon gets the text through JSON, where a lone surrogate is a
+    \\ud83d escape; it must embed what this process's own model embeds."""
+    r, _ = _served(monkeypatch)
+    text = "where is the router \ud83d passphrase"
+    assert np.array_equal(r.embed_query(text), local.embed_query(text))
+    assert np.array_equal(r.embed_passages([text, "plain"]),
+                          local.embed_passages([text, "plain"]))
+    long = ("sentence about vaults \udc00 and agents. " * 400)
+    assert r.chunk(long) == local.chunk(long)
+    assert r.shared
+    r.close()
 
 
 @needs_bind

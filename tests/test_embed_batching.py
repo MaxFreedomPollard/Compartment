@@ -141,3 +141,21 @@ def test_a_vault_pinned_to_another_model_is_still_refused(vault, vault_path):
     vault.lock()
     with pytest.raises(Exception, match="does not match the model"):
         Vault.unlock(vault_path, passphrase=PASS)
+
+
+def test_a_lone_surrogate_embeds_as_the_replacement_character(emb):
+    """Half of a cut emoji (a JSON "\\ud83d" escape from an MCP client, or a
+    string sliced in the middle of a pair) made tokenizers 0.16 and later
+    raise TypeError from every embedding call, so a store or a search with
+    one in it failed with a traceback. In a Python str every code point in
+    U+D800..U+DFFF is a lone surrogate, and it now embeds as U+FFFD."""
+    cut, whole = "router \ud83d passphrase", "router � passphrase"
+    assert np.array_equal(emb.embed_query(cut), emb.embed_query(whole))
+    assert np.array_equal(emb.embed_passages([cut, "x \udc00"]),
+                          emb.embed_passages([whole, "x �"]))
+    long = "a sentence about vaults \udfff and agents. " * 400
+    assert emb.chunk(long) == emb.chunk(long.replace("\udfff", "�"))
+    assert np.array_equal(emb.embed_record(long),
+                          emb.embed_record(long.replace("\udfff", "�")))
+    # A real pair, written as one code point, is untouched.
+    assert emb.chunk("a \U0001F600 b") == ["a \U0001F600 b"]

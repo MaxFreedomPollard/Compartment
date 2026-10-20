@@ -12,6 +12,7 @@ import dataclasses
 import functools
 import json
 import os
+import re
 import sys
 import sysconfig
 import threading
@@ -86,6 +87,26 @@ OPTIONAL_MODELS = {
 
 class ModelError(CryptoError):
     pass
+
+
+#: Every code point the tokenizer cannot take. In a Python str a code point
+#: in U+D800..U+DFFF is always a lone surrogate - a pair is one code point
+#: above U+FFFF - and it gets there as half of a cut emoji: a JSON "\\ud83d"
+#: escape an MCP client may legally send, or a string sliced mid-pair.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def well_formed(text: str) -> str:
+    """`text` with each lone surrogate replaced by U+FFFD.
+
+    tokenizers 0.16 and later refuse a str holding one with TypeError
+    ("TextInputSequence must be str"), from every embedding call, so a
+    store or a search with half an emoji in it failed outright, in the
+    shared daemon and in-process alike, while 0.15 let it through. Every
+    path into the tokenizer comes through here, so the daemon and this
+    process embed such a text identically, and as the replacement
+    character any UTF-8 decoder would have put in its place."""
+    return _LONE_SURROGATE.sub("\ufffd", text) if text else text
 
 
 def bundled_model_dir() -> Path:
@@ -375,6 +396,7 @@ class Embedder:
 
     def _encode(self, texts: list[str]) -> list[list[int]]:
         """Token ids per text, truncated to the model's 512, never padded."""
+        texts = [well_formed(t) for t in texts]
         with self._tok_lock:
             return [e.ids for e in self.tok.encode_batch(texts)]
 
@@ -444,6 +466,9 @@ class Embedder:
         """
         if not text:
             return [text]
+        # The windows are cut from the text the tokenizer saw: replacing a
+        # surrogate is one code point for one, so its offsets index this.
+        text = well_formed(text)
         with self._tok_lock:
             self.tok.no_truncation()
             try:
