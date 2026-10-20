@@ -754,17 +754,28 @@ def cmd_unlock(args) -> None:
     v.save()
 
 
+def _signing_identity(path: str, creator: str) -> dict:
+    """The Ed25519 identity that signs a sealed vault or a pack, made on
+    first use.
+
+    The file holds the private seed, so it is written readable by its owner
+    alone: written plainly it took the umask's 0644, and any account on the
+    machine that could read it could sign a pack this user's keys trust, or
+    seal a vault `compartment verify` reports as signed by them."""
+    ident_path = Path(path)
+    if ident_path.exists():
+        return json.loads(ident_path.read_text(encoding="utf-8"))
+    identity = packs.new_identity(creator)
+    ident_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_private(str(ident_path), json.dumps(identity, indent=2))
+    print(f"generated signing identity → {ident_path} (keep it private)")
+    return identity
+
+
 def cmd_lock(args) -> None:
     if args.sign:
         v = _open_vault(args)
-        ident_path = Path(args.identity)
-        if ident_path.exists():
-            identity = json.loads(ident_path.read_text(encoding="utf-8"))
-        else:
-            identity = packs.new_identity(args.creator)
-            ident_path.parent.mkdir(parents=True, exist_ok=True)
-            ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
-            print(f"generated signing identity → {ident_path} (keep it private)")
+        identity = _signing_identity(args.identity, args.creator)
         v.lock(signing_key=packs.load_signing_key(identity))
         print(f"vault sealed + signed by {identity['signer']} "
               f"(pub {identity['pub_hex'][:16]}…); verify with `compartment verify`")
@@ -1549,13 +1560,7 @@ def cmd_pack_build(args) -> None:
         _die("source must be a .jsonl, .csv, or a directory of .md files")
     if not records:
         _die("no records found in source")
-    ident_path = Path(args.identity)
-    if ident_path.exists():
-        identity = json.loads(ident_path.read_text(encoding="utf-8"))
-    else:
-        identity = packs.new_identity(args.creator)
-        ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
-        print(f"generated new signing identity → {ident_path} (keep it private)")
+    identity = _signing_identity(args.identity, args.creator)
     emb = get_embedder(DEFAULT_MODEL)
     vectors = emb.embed_passages([r["text"] for r in records])
     pw = None

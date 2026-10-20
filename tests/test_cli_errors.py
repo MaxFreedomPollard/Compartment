@@ -185,3 +185,25 @@ def test_an_atomize_listing_is_readable_by_its_owner_alone(open_vault,
     cli.main(["--vault", open_vault, "atomize", "--out", str(out),
               "--plaintext"])
     assert os.stat(out).st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+@pytest.mark.parametrize("command", [
+    ["lock", "--sign", "--identity", "{identity}"],
+    ["pack", "build", "{source}", "--name", "notes", "--identity",
+     "{identity}", "--out", "{out}"],
+])
+def test_a_new_signing_identity_is_readable_by_its_owner_alone(
+        open_vault, tmp_path, capsys, command):
+    """identity.json holds the Ed25519 seed that signs packs and sealed
+    vaults, and it was written with the umask's 0644: any local account
+    could have signed packs this user trusts."""
+    identity = tmp_path / "keys" / "identity.json"
+    source = tmp_path / "notes.jsonl"
+    source.write_text('{"text": "The staging database runs Postgres 16"}\n',
+                      encoding="utf-8")
+    cli.main(["--vault", open_vault, *[
+        a.format(identity=identity, source=source,
+                 out=tmp_path / "notes.mpack") for a in command]])
+    assert os.stat(identity).st_mode & 0o777 == 0o600
+    assert "generated signing identity" in capsys.readouterr().out
