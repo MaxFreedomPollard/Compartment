@@ -388,7 +388,7 @@ class Vault:
         #: When the expiry sweep last ran. Zero means never, so the first read
         #: after opening always sweeps.
         self._last_expiry_sweep = 0.0
-        self._disk_state: tuple[int, int, int] | None = None
+        self._disk_state: tuple[int, int, int, str] | None = None
         if os.path.exists(path):
             self._disk_state = self._stat_disk()
         self.index = None
@@ -397,12 +397,14 @@ class Vault:
 
     # -------------------------------------------------- multi-process safety
 
-    def _stat_disk(self) -> tuple[int, int, int]:
+    def _stat_disk(self) -> tuple[int, int, int, str]:
         # The inode as well, as in platforms.file_signature: another
         # process's compaction can leave a file of the same length with, on a
-        # coarse clock, the same time, and only the inode shows it is new.
-        st = os.stat(self.path)
-        return (st.st_ino, st.st_size, st.st_mtime_ns)
+        # coarse clock, the same time, and only the inode shows it is new -
+        # where the filesystem does not hand the new file an old number. The
+        # identity read with them is what shows it everywhere else; see
+        # vaultfile.disk_state.
+        return vaultfile.disk_state(self.path)
 
     def is_stale(self) -> bool:
         """True if the vault file changed under us since we read it.

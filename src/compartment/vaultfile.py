@@ -265,10 +265,11 @@ class LoadedVaultFile:
     #: decrypting the whole payload again.
     journal_start: int = 0
     journal_end: int = 0
-    #: (inode, size, mtime in ns) of the file as it was read - taken before the
-    #: read, from the same open file. What an opener compares against to learn
-    #: that another process wrote while it was reading. See Vault.unlock.
-    disk_state: tuple[int, int, int] | None = None
+    #: (inode, size, mtime in ns, identity) of the file as it was read - taken
+    #: before the read, from the same open file. What an opener compares
+    #: against to learn that another process wrote while it was reading. See
+    #: Vault.unlock and disk_state below.
+    disk_state: tuple[int, int, int, str] | None = None
 
 
 def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
@@ -324,6 +325,53 @@ def parse_journal(raw: bytes, pos: int) -> tuple[list[bytes], int, bool, int]:
     return journal_cts, pos, truncated_tail, tail_bytes
 
 
+#: The most header an identity reads. A real header is a few kilobytes; this
+#: only bounds the read on a file whose length field is garbage.
+_IDENTITY_HEADER_CAP = 1 << 20
+
+
+def _identity_span(head: bytes) -> int:
+    """How many leading bytes identify one write of the file: the header and
+    the payload's nonce, given at least the first ten bytes."""
+    if len(head) >= 10 and head[:4] == MAGIC:
+        (hlen,) = struct.unpack(">I", head[6:10])
+        return 10 + min(hlen, _IDENTITY_HEADER_CAP) + crypto.NONCE_LEN
+    return min(len(head), 10)
+
+
+def _identity(prefix: bytes) -> str:
+    return crypto.sha256(prefix[:_identity_span(prefix)])
+
+
+def disk_state(path: str) -> tuple[int, int, int, str]:
+    """(inode, size, mtime in ns, identity) of the vault file as it is now,
+    all read from one open file.
+
+    The first three are what a stat can say, and between them they miss a
+    rewrite on exactly the disks people carry vaults on. A compaction leaves
+    a file of the same size often - the payload is a whole number of SQLite
+    pages - and FAT and exFAT keep modification times to two seconds or ten
+    milliseconds, hand a new file an inode number derived from where its
+    directory entry or first cluster landed (which a later save reuses), and
+    a clock stepped back can stamp a newer file with an older time anywhere.
+    Missed, another process's save is overwritten by this one's, or this
+    process appends entries sealed to a journal position the new file does
+    not have, and the next open refuses the vault as tampered.
+
+    The identity closes that: every save reseals the payload under a fresh
+    random nonce at its front, so the header plus those bytes differ between
+    any two writes of the file, whatever the filesystem reports. It costs
+    one read of a few kilobytes. The read-only panel helper (vaultview) has
+    told rewrites apart the same way."""
+    with open(path, "rb") as f:
+        st = os.fstat(f.fileno())
+        head = f.read(10)
+        span = _identity_span(head)
+        if span > len(head):
+            head += f.read(span - len(head))
+    return (st.st_ino, st.st_size, st.st_mtime_ns, _identity(head))
+
+
 def read_vault_file(path: str) -> LoadedVaultFile:
     with open(path, "rb") as f:
         # Before the read, so an append that lands during it makes the file
@@ -332,7 +380,8 @@ def read_vault_file(path: str) -> LoadedVaultFile:
         st = os.fstat(f.fileno())
         raw = f.read()
     loaded = parse_vault_bytes(raw, path)
-    loaded.disk_state = (st.st_ino, st.st_size, st.st_mtime_ns)
+    loaded.disk_state = (st.st_ino, st.st_size, st.st_mtime_ns,
+                         _identity(raw))
     return loaded
 
 
