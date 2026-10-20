@@ -62,9 +62,11 @@ def is_ours(command: object) -> bool:
 
 
 def is_installed(settings: Path | None = None) -> bool:
-    data = _read(settings or SETTINGS)
-    for group in (data.get("hooks", {}) or {}).get(EVENT, []) or []:
-        for h in group.get("hooks", []) or []:
+    """Whether compartment's capture hook is in settings.json. Raises
+    ValueError when the file cannot be read as settings."""
+    path = Path(settings) if settings else SETTINGS
+    for group in _groups(_read(path), path):
+        for h in group.get("hooks") or []:
             if is_ours(h.get("command")):
                 return True
     return False
@@ -76,14 +78,48 @@ def _read(path: Path) -> dict:
     return clients._read_json(path)
 
 
+def _groups(data: dict, path: Path) -> list:
+    """The PostToolUse matcher groups, checked for the shape Claude Code
+    reads: `hooks` an object, the event a list of objects, each one's
+    `hooks` a list of objects.
+
+    Anything else is somebody's file in a shape this does not understand,
+    and it is refused as a malformed one is. It used to be walked as if it
+    were right: a list where the object belongs died with AttributeError,
+    which `integrate claude`, `hook status` and the uninstaller do not
+    catch, so the user got a traceback instead of the file's name and what
+    to fix, and an event that was an object was replaced by a list."""
+    hooks = data.get("hooks")
+    if hooks is None:
+        return []
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{path}: \"hooks\" is not an object; refusing to "
+                         "touch it")
+    groups = hooks.get(EVENT)
+    if groups is None:
+        return []
+    if not isinstance(groups, list):
+        raise ValueError(f"{path}: \"hooks.{EVENT}\" is not a list; "
+                         "refusing to touch it")
+    for group in groups:
+        inner = group.get("hooks") if isinstance(group, dict) else None
+        if not isinstance(group, dict) or not (
+                inner is None or (isinstance(inner, list) and all(
+                    isinstance(h, dict) for h in inner))):
+            raise ValueError(f"{path}: an entry in \"hooks.{EVENT}\" is not "
+                             "a matcher with a list of hooks; refusing to "
+                             "touch it")
+    return groups
+
+
 def install(compartment_bin: str | None = None, vault: str | None = None,
             settings: Path | None = None) -> dict:
     """Add (or refresh) compartment's capture hook. Never removes anyone else's."""
     path = Path(settings) if settings else SETTINGS
     data = _read(path)                                  # raises on malformed
+    groups = _groups(data, path)                        # and on a bad shape
 
     hooks = data.setdefault("hooks", {})
-    groups = hooks.setdefault(EVENT, [])
     # drop only our own previous entries, so re-installing updates in place
     kept = []
     for group in groups:
@@ -106,7 +142,7 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
 def uninstall(settings: Path | None = None) -> bool:
     path = Path(settings) if settings else SETTINGS
     data = _read(path)
-    groups = (data.get("hooks", {}) or {}).get(EVENT)
+    groups = _groups(data, path)
     if not groups:
         return False
     kept, removed = [], False
