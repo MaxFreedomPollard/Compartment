@@ -14,11 +14,29 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.12"]
+        # Every Python the package declares. 3.13 and 3.14 were classifiers
+        # nothing ran, and 3.14 is what a fresh Homebrew, Fedora or python.org
+        # install hands people now.
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          # ARM64 Linux (Graviton, Ampere, Raspberry Pi 5, Apple silicon VMs)
+          # and Windows on ARM (Snapdragon laptops): onnxruntime ships wheels
+          # for both, and "it installed but the native library will not load"
+          # is the failure only a real machine of that architecture shows.
+          - os: ubuntu-24.04-arm
+            python: "3.12"
+          - os: windows-11-arm
+            python: "3.12"
+          # Intel Macs. onnxruntime's last macOS x86_64 wheels are 1.23.2,
+          # built for Python up to 3.13, so this is the newest pairing that
+          # installs there, and it proves the code still runs on that older
+          # onnxruntime as well as on the newest one above.
+          - os: macos-15-intel
+            python: "3.13"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Install (network allowed for dependency download only)
@@ -36,13 +54,89 @@ jobs:
       - name: Coverage to Codecov
         # Never fail the build on a reporting service: the offline guard and the
         # test suite are the gate here, not the upload.
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         continue-on-error: true
         with:
           files: ./coverage.xml
           flags: ${{ matrix.os }}-py${{ matrix.python }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  wheel-smoke:
+    # The suite runs against an editable checkout, which hides packaging
+    # mistakes: a model file or the starter pack missing from the wheel, an
+    # entry point that only resolves from source, a server that starts in a
+    # test but not as a console script. This builds the wheel, installs it
+    # the way the README tells people to (pipx), and uses it like a person
+    # and like an MCP client would, offline guard on.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      COMPARTMENT_ASSERT_OFFLINE: "1"
+      COMPARTMENT_PASSPHRASE: ci-only-not-a-secret
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+          ls -l dist
+      - name: Install it with pipx, as the README says
+        shell: bash
+        env:
+          COMPARTMENT_ASSERT_OFFLINE: ""
+        run: |
+          pipx install --python python dist/*.whl
+          pipx ensurepath
+      - name: Create, write, read, verify
+        shell: bash
+        run: |
+          compartment --version
+          compartment init --passphrase ci-only-not-a-secret --no-app
+          compartment store --source "from chat" "Deploys go out Tuesday and Thursday mornings."
+          compartment search "when do deploys go out" | tee search.txt
+          grep -q "Tuesday and Thursday" search.txt
+          compartment selftest
+          compartment status
+      - name: An MCP client's handshake against the installed server
+        shell: bash
+        run: python tools/mcp_smoke.py --command compartment
+
+  lowest-dependencies:
+    # pyproject.toml's lower bounds are a promise to everyone whose distro or
+    # lock file holds an older library. It used to promise mcp>=1.0, and no
+    # release before 1.10 can even start the server (FastMCP arrived in 1.2,
+    # tool titles in 1.10). This installs the lowest version of every direct
+    # dependency the bounds allow and runs the suite, so a bound is a tested
+    # fact rather than a guess.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install at the lowest versions the bounds allow
+        # mcp 1.10-1.12 import pydantic internals that pydantic 2.12 moved, a
+        # pairing their own metadata does not exclude; the constraint keeps
+        # the transitive pydantic to what those releases were built against.
+        run: |
+          python -m pip install uv
+          uv pip install --system --resolution lowest-direct -e ".[dev]" "pydantic<2.12"
+          python -m pip list
+      - name: Test suite with offline guard active
+        env:
+          COMPARTMENT_ASSERT_OFFLINE: "1"
+        run: pytest tests/ -q --ignore=tests/test_dash.py
 
   linux-panel:
     # Linux has no notification area worth relying on, so it draws the same
@@ -52,8 +146,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: The Tk package, which pip cannot install
@@ -129,8 +223,8 @@ jobs:
     # locked, and the next command sat asking for input.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install with the tray extra
@@ -285,7 +379,7 @@ jobs:
                     [System.Drawing.Imaging.ImageFormat]::Png)
           Write-Host "panel: ${w}x${ht}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-tray-screenshot
           path: |

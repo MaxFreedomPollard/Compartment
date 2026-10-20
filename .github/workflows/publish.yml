@@ -23,17 +23,44 @@ jobs:
     environment: pypi
     permissions:
       id-token: write        # required for Trusted Publishing (OIDC)
+      contents: read         # to download the release's own files
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Build wheel + sdist
+      # PyPI gets the very wheel and sdist attached to the GitHub release
+      # (release.yml builds them from the tag and lists their SHA-256 sums),
+      # so "pip install compartment" and the release page hand out identical
+      # bytes. A manual run, or a release drafted by hand without them,
+      # falls back to building from this checkout as before.
+      - name: Take the release's wheel + sdist, or build them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        shell: bash
         run: |
-          python -m pip install --upgrade build
-          python -m build
+          mkdir -p dist
+          if [ -n "$TAG" ]; then
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D dist \
+              -p "compartment-*.whl" -p "compartment-*.tar.gz" || true
+          fi
+          if ls dist/*.whl >/dev/null 2>&1 && ls dist/*.tar.gz >/dev/null 2>&1; then
+            echo "publishing the release's own files:"
+          else
+            rm -rf dist
+            python -m pip install --upgrade build
+            python -m build
+            echo "built from the checkout:"
+          fi
+          ls -l dist
+          if [ -n "$TAG" ]; then
+            v="${TAG#v}"
+            ls dist | grep -q "compartment-$v" || {
+              echo "::error::dist/ holds no compartment-$v files for tag $TAG"; exit 1; }
+          fi
 
       - name: Check metadata
         run: |
@@ -68,9 +95,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

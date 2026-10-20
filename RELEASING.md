@@ -7,14 +7,19 @@ most convenient one. Someone arriving at the release page should not have to
 know which artifact they need, go hunting through PyPI, or find that the only
 link is for a platform they are not on.
 
-Attach all four, and list them together in the notes:
+Attach all of them, and list them together in the notes. The Release
+workflow (`.github/workflows/release.yml`) builds every one from the tag on
+GitHub's machines and attaches them to a draft, so nobody has to remember:
 
 | Artifact | For |
 |---|---|
-| `Compartment-<version>.pkg` | macOS, one click, with the optional menu bar utility |
-| `Compartment-<version>.dmg` | macOS, drag to Applications |
+| `Compartment-<version>.pkg` | macOS on Apple silicon, one click, with the optional menu bar utility |
+| `Compartment-<version>.dmg` | macOS on Apple silicon, drag to Applications |
+| `Compartment-<version>-intel.pkg` | macOS on Intel, one click |
+| `Compartment-<version>-intel.dmg` | macOS on Intel, drag to Applications |
 | `compartment-<version>-py3-none-any.whl` | pip / offline installs, any OS |
 | `compartment-<version>.tar.gz` | source distribution, packagers, air-gapped builds |
+| `SHA256SUMS.txt` | the checksums of everything above |
 
 GitHub adds "Source code (zip/tar.gz)" on its own. The notes should also carry
 the `pip install compartment` line for people who want the CLI and MCP
@@ -53,18 +58,25 @@ server without the app.
 
 python -m pytest -q                          # must be green
 
-# 2. python artifacts
-rm -rf dist && python -m build
+# 2. merge the release PR, then tag the merge commit and push the tag.
+#    That is the whole build: release.yml checks the tag against every
+#    version field, builds the wheel and sdist, builds the macOS app, .pkg
+#    and .dmg on an Apple silicon runner AND an Intel one, and attaches all
+#    of them plus SHA256SUMS.txt to a DRAFT release. Release notes come from
+#    .github/release-notes/vX.Y.Z.md when that file exists.
+git tag vX.Y.Z && git push origin vX.Y.Z
 
-# 3. macOS app + installers (needs a NON-framework Python; see the script)
-python tools/build_macos_app.py --pkg --dmg
+# 3. review the draft on the Releases page, then press Publish. Publishing
+#    triggers publish.yml, which uploads the release's own wheel and sdist to
+#    PyPI (the same bytes as the downloads), and publish-registry.yml.
+#    A rebuild of an existing tag: Actions -> Release -> Run workflow -> tag.
+#
+#    Building by hand still works when it has to, from a Mac:
+#      rm -rf dist && python -m build
+#      python tools/build_macos_app.py --pkg --dmg   # NON-framework Python; see the script
+#      gh release create vX.Y.Z --draft --notes-file NOTES.md build/*.pkg build/*.dmg dist/*
 
-# 4. tag, publish, attach EVERYTHING
-gh release create vX.Y.Z --title "…" --notes-file NOTES.md \
-    build/Compartment-X.Y.Z.pkg \
-    build/Compartment-X.Y.Z.dmg \
-    dist/compartment-X.Y.Z-py3-none-any.whl \
-    dist/compartment-X.Y.Z.tar.gz
+# 4. nothing to do by hand for PyPI or the registry; see "Verify" below.
 
 # 5. the MCP registry entry tracks the version too. Three things bite here.
 #
@@ -80,8 +92,10 @@ gh release create vX.Y.Z --title "…" --notes-file NOTES.md \
 #    c) Published versions are immutable. A wrong pin cannot be edited, only
 #       superseded, so it is worth getting right the first time.
 #
-#    The registry token expires within minutes, so log in immediately before
-#    every publish or status call, even if you logged in one command ago.
+#    publish-registry.yml does this on Publish, authenticated by OIDC. By
+#    hand only when that workflow failed: the registry token expires within
+#    minutes, so log in immediately before every publish or status call,
+#    even if you logged in one command ago.
 mcp-publisher login github --token "$(gh auth token)" \
     && mcp-publisher validate && mcp-publisher publish
 ```

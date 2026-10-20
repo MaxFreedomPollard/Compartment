@@ -26,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security :: Cryptography",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Database :: Database Engines/Servers",
@@ -41,8 +42,12 @@ dependencies = [
     # Both majors. mcp 2.0 (2026-07-28) removed mcp.server.fastmcp in favour
     # of mcp.server.mcpserver; server.py imports whichever is present, so the
     # same wheel runs on 1.x and 2.x and single-version distros are not
-    # stranded on either side of the rename.
-    "mcp>=1.0,<3",
+    # stranded on either side of the rename. The floor is 1.10, not 1.0:
+    # FastMCP only arrived in 1.2 and the tool titles every tool is
+    # registered with in 1.10, so anything older crashed on import while
+    # pip called the install satisfied. CI's lowest-dependencies job runs
+    # the suite at exactly this floor.
+    "mcp>=1.10,<3",
     # The app ships with every install. It is not an add-on: unlocking,
     # locking and changing the passphrase are things people do through a
     # panel, not through a terminal, so an install that only lays down a CLI
