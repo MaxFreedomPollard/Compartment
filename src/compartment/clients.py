@@ -547,13 +547,46 @@ def write_config(path: Path, text: str) -> Path | None:
     return backup
 
 
+#: TOML's short escapes; every other control character is \\uXXXX.
+_TOML_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\t": "\\t",
+                 "\n": "\\n", "\f": "\\f", "\r": "\\r"}
+
+
+def _toml_string(s: str) -> str:
+    """A TOML basic string.
+
+    Not json.dumps, whose escaping looks like TOML's and is not: it writes a
+    character outside the Basic Multilingual Plane as a UTF-16 surrogate
+    pair, \\ud83d\\ude00, and TOML allows only Unicode scalar values in an
+    escape. A vault in a folder named with an emoji, or with a CJK Extension
+    B character in a user name, appended a table that made the whole of
+    config.toml unreadable, and Codex refuses to start on a config it cannot
+    read. Here only what TOML requires is escaped, and the rest is written
+    as itself, in the UTF-8 the file is. A lone surrogate (an undecodable
+    byte in a POSIX path) cannot be written in UTF-8 at all and raises
+    ValueError.
+    """
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[ch])
+        elif o < 0x20 or o == 0x7F:
+            out.append(f"\\u{o:04x}")
+        elif 0xD800 <= o <= 0xDFFF:
+            raise ValueError(f"{s!r} cannot be written as UTF-8 TOML")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def _toml_value(v) -> str:
     """Just enough TOML to emit one table of strings and string arrays."""
     if isinstance(v, list):
         return "[" + ", ".join(_toml_value(x) for x in v) + "]"
     if isinstance(v, bool):
         return "true" if v else "false"
-    return json.dumps(str(v))          # JSON string escaping is TOML's too
+    return _toml_string(str(v))
 
 
 def _toml_block(entry: dict) -> str:
@@ -701,6 +734,31 @@ def register(client: Client, vault: str, caller: str | None = None,
     return out
 
 
+def _toml_breaks(client: Client, before: str, after: str,
+                 entry: dict) -> str | None:
+    """Why `after` must not be written in place of `before`, or None.
+
+    Appending a table is the whole edit, and an appended table is not
+    always a valid one: a config that declares `mcp_servers = { ... }`
+    inline, or as an array, cannot be extended by a [mcp_servers.x] header,
+    and the result is a file Codex will not start with. So the document is
+    read back as Codex will read it: it has to parse, hold exactly our
+    entry, and hold everything else exactly as it did before."""
+    try:
+        doc = tomllib.loads(after)
+        was = tomllib.loads(before)
+    except tomllib.TOMLDecodeError as exc:
+        return f"unreadable ({exc})"
+    servers = doc.get(client.root)
+    if not isinstance(servers, dict) or servers.get(NAME) != entry:
+        return f"without a [{client.root}.{NAME}] table Codex can read"
+    rest = dict(doc)
+    rest[client.root] = {k: v for k, v in servers.items() if k != NAME}
+    if not rest[client.root] and client.root not in was:
+        del rest[client.root]
+    return None if rest == was else "with its other settings changed"
+
+
 def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
     """Codex keeps TOML, and TOML tables are order-independent.
 
@@ -710,7 +768,12 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
     that is already there is reported, not duplicated. A file that does
     not parse is refused, as a JSON one is.
     """
-    block = _toml_block(entry)
+    try:
+        block = _toml_block(entry)
+    except ValueError as exc:
+        out["reason"] = f"cannot be written as TOML ({exc})"
+        out["snippet"] = json.dumps({client.root: {NAME: entry}}, indent=2)
+        return out
     try:
         existing = read_config_text(p) if p.exists() else ""
         registered = _toml_has_ours(client, existing)
@@ -729,8 +792,15 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
         return out
 
     joiner = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
+    text = existing + joiner + block + "\n"
+    broken = _toml_breaks(client, existing, text, entry)
+    if broken:
+        out["reason"] = (f"adding the table would leave {p} {broken}; "
+                         "refusing to touch it")
+        out["snippet"] = block
+        return out
     try:
-        backup = write_config(p, existing + joiner + block + "\n")
+        backup = write_config(p, text)
     except OSError as exc:
         out["reason"] = f"cannot write {p} ({exc})"
         out["snippet"] = block
