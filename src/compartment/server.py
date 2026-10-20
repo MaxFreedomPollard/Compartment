@@ -986,6 +986,9 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     if args.assert_offline:
         offline_guard.activate()
+    # `python -m compartment.server --vault ~/...` from a client config: no
+    # shell expands the ~ there.
+    args.vault = os.path.expanduser(args.vault)
     _state["path"] = args.vault
     _state["caller"] = args.caller
     sig = _credential_signature()

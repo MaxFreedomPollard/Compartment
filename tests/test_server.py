@@ -555,6 +555,33 @@ def _serve(monkeypatch, vault_path, session, passphrase="CorrectHorse"):
             signal.signal(sig, handler)
 
 
+def test_a_vault_path_with_a_tilde_is_the_home_one(vault, vault_path,
+                                                  own_state, monkeypatch,
+                                                  tmp_path):
+    """Run as `python -m compartment.server --vault ~/...` from a client's
+    config, where no shell expands the ~."""
+    vault.lock()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    rel = os.path.relpath(vault_path, tmp_path)
+    seen = []
+    monkeypatch.setattr(server, "_autolock_loop", lambda: None)
+    monkeypatch.setattr(server, "_retag_loop", lambda: None)
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: seen.append(
+        (server._state["path"], server._state["vault"])))
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    handled = [getattr(signal, n) for n in ("SIGTERM", "SIGHUP")
+               if hasattr(signal, n)]
+    before = {sig: signal.getsignal(sig) for sig in handled}
+    try:
+        server.main(["--vault", os.path.join("~", rel)])
+    finally:
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+    (path, opened), = seen
+    assert path == vault_path and opened is not None
+
+
 def _audited_on_disk(vault_path):
     v = Vault.unlock(vault_path, passphrase="CorrectHorse")
     return [r["op"] for r in v.db.conn.execute(

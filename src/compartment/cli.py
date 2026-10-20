@@ -29,7 +29,42 @@ from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, get_embedder, user_
 from .vault import Vault, keychain_clear, keychain_get, keychain_store
 from .vaultfile import read_vault_file, verify_manifest
 
-DEFAULT_VAULT = env("VAULT", str(home() / "memory.vault"))
+def _default_vault() -> str | None:
+    """COMPARTMENT_VAULT (or ENGRAM_VAULT) with ~ expanded, else
+    memory.vault in Compartment's home; None where there is no home to look
+    in.
+
+    Asked when a command runs, not when this module is imported. It was a
+    module constant, so with HOME unset and no password-database entry for
+    the uid, as for a container started with an arbitrary --user, every
+    command died at import with "Could not determine home directory", even
+    `compartment --vault /data/memory.vault serve`, which needs no home.
+    And the variable was taken literally, so a "~/..." an MCP client config
+    passes (no shell expands it there) named a folder called "~" in
+    whatever directory the client started the server in."""
+    explicit = env("VAULT")
+    if explicit:
+        return os.path.expanduser(explicit)
+    try:
+        return str(home() / "memory.vault")
+    except RuntimeError:
+        return None
+
+
+def __getattr__(name: str):
+    # DEFAULT_VAULT stays importable for anything that read it, computed
+    # when it is read.
+    if name == "DEFAULT_VAULT":
+        return _default_vault()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+#: What a command says when there is neither --vault nor a home to find the
+#: default vault in.
+NO_HOME = ("no home directory to find the vault in (HOME is not set and "
+           "this user has no entry in the password database, as for a "
+           "container started with an arbitrary --user): pass --vault PATH, "
+           "or set COMPARTMENT_VAULT")
 
 
 def _utf8_console() -> None:
@@ -791,7 +826,7 @@ def cmd_unlock(args) -> None:
     v.save()
 
 
-def _signing_identity(path: str, creator: str) -> dict:
+def _signing_identity(path: str | None, creator: str) -> dict:
     """The Ed25519 identity that signs a sealed vault or a pack, made on
     first use.
 
@@ -799,7 +834,7 @@ def _signing_identity(path: str, creator: str) -> dict:
     alone: written plainly it took the umask's 0644, and any account on the
     machine that could read it could sign a pack this user's keys trust, or
     seal a vault `compartment verify` reports as signed by them."""
-    ident_path = Path(path)
+    ident_path = Path(path) if path else home() / "identity.json"
     if ident_path.exists():
         return json.loads(ident_path.read_text(encoding="utf-8"))
     identity = packs.new_identity(creator)
@@ -2349,8 +2384,10 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         prog="compartment",
         description="Compartment - high-security offline vector memory for AI agents")
-    ap.add_argument("--vault", default=DEFAULT_VAULT,
-                    help=f"vault path (default {DEFAULT_VAULT})")
+    default_vault = _default_vault()
+    ap.add_argument("--vault", default=default_vault,
+                    help="vault path (default "
+                         f"{default_vault or 'none: no home directory'})")
     ap.add_argument("--caller", default="user")
     ap.add_argument("--keyfile",
                     help="second-factor keyfile (only needed if `compartment 2fa "
@@ -2394,7 +2431,9 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("lock", help="clear stored credential (vault stays sealed)")
     p.add_argument("--sign", action="store_true",
                    help="seal with an Ed25519 signed manifest before locking")
-    p.add_argument("--identity", default=str(home() / "identity.json"))
+    p.add_argument("--identity", default=None,
+                   help="signing identity (default identity.json in "
+                        "Compartment's home)")
     p.add_argument("--creator", default="vault-owner")
     p.set_defaults(fn=cmd_lock)
 
@@ -2697,7 +2736,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--version", default="1.0.0")
     p.add_argument("--description", default="")
     p.add_argument("--creator", default="pack-author")
-    p.add_argument("--identity", default=str(home() / "identity.json"))
+    p.add_argument("--identity", default=None,
+                   help="signing identity (default identity.json in "
+                        "Compartment's home)")
     p.add_argument("--encrypt", action="store_true")
     p.add_argument("--out")
     p.set_defaults(fn=cmd_pack_build)
@@ -2779,6 +2820,12 @@ def main(argv: list[str] | None = None) -> None:
 
     _accept_global_options_anywhere(ap)
     args = ap.parse_args(argv)
+    if args.vault is not None:
+        # "~/..." from an MCP client config or a quoted shell argument:
+        # nothing between there and here expands it.
+        args.vault = os.path.expanduser(args.vault)
+    elif args.fn not in (cmd_embed_daemon, cmd_setup):
+        _die(NO_HOME)
     if args.assert_offline:
         offline_guard.activate()
     try:
