@@ -4,6 +4,8 @@ strictest clients' validators take.
 
 Listed through the SDK the server runs on (mcp 1.x or 2.x), without an
 event loop, as test_server.py calls tools: listing awaits nothing."""
+import pytest
+
 from compartment import server
 
 
@@ -79,3 +81,16 @@ def test_every_input_schema_is_one_strict_clients_accept():
             assert key not in schema, (t["name"], key)
         _typed(schema, t["name"])
         assert set(schema.get("required", [])) <= set(schema["properties"])
+
+
+def test_mcp_1x_does_not_log_every_request(capsys):
+    """mcp 1.x's FastMCP logs at INFO by default, "Processing request of type
+    CallToolRequest" on stderr for every request, which Cursor shows as an
+    [error] line each time. mcp 2.x logs nothing per request."""
+    import logging
+    if not server.MCPServer.__module__.startswith("mcp.server.fastmcp"):
+        pytest.skip("mcp 2.x logs nothing per request")
+    assert server.mcp.settings.log_level == "WARNING"
+    logging.getLogger("mcp.server.lowlevel.server").info(
+        "Processing request of type ListToolsRequest")
+    assert "Processing request" not in capsys.readouterr().err

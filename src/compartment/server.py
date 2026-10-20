@@ -102,7 +102,12 @@ try:
     mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS,
                     version=__version__)
 except TypeError:                                       # mcp 1.x
-    mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS)
+    # WARNING, not the 1.x default of INFO, which logged "Processing request
+    # of type CallToolRequest" to stderr for every request: Cursor shows
+    # each stderr line of a server as an [error], and the root logger it
+    # configures at that level passed every library's INFO lines through.
+    mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS,
+                    log_level="WARNING")
     try:
         mcp._mcp_server.version = __version__
     except Exception:                                   # noqa: BLE001
