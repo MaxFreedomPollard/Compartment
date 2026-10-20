@@ -118,3 +118,30 @@ def test_openbsd_does_not_keep_the_secret_in_a_file_on_disk(
     assert "OpenBSD" in str(err.value)
     assert "COMPARTMENT_PASSPHRASE" in str(err.value)
     assert not session.credential_path(str(tmp_path / "v.vault")).exists()
+
+
+# --- Windows: who the user is must not hang on one environment variable ---
+
+def test_a_windows_process_started_without_username_is_still_the_same_user(
+        monkeypatch):
+    """The holder's name and the wrap key's context both fold in the user.
+    A process started without USERNAME - an MCP client that replaces the
+    environment with its config's `env` block, a service wrapper - called
+    itself "user", found no secret under that holder, and get() deleted the
+    credential every other process of the user was opening."""
+    monkeypatch.delattr(session.os, "getuid", raising=False)
+    monkeypatch.setattr(session, "_windows_account_name", lambda: "Zoë",
+                        raising=False)
+    monkeypatch.setenv("USERNAME", "Zoë")
+    with_variable = session._uid()
+    monkeypatch.delenv("USERNAME")
+    assert session._uid() == with_variable == "Zoë"
+
+
+def test_the_username_variable_still_wins_so_existing_holders_keep_their_name(
+        monkeypatch):
+    monkeypatch.delattr(session.os, "getuid", raising=False)
+    monkeypatch.setattr(session, "_windows_account_name", lambda: "other",
+                        raising=False)
+    monkeypatch.setenv("USERNAME", "Zoë")
+    assert session._uid() == "Zoë"

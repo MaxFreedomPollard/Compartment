@@ -132,9 +132,35 @@ def _boot_time() -> str:
 
 
 def _uid() -> str:
-    # os.getuid() is POSIX-only; on Windows fall back to the username.
+    """Who this is, for the holder's name and the wrap key's context.
+
+    os.getuid() is POSIX-only; Windows uses the account name. USERNAME is
+    where that has always been read from, and it stays first so every
+    existing credential keeps its holder. But it is only an environment
+    variable, and a process can be started without it: an MCP client that
+    replaces the environment with the `env` block of its config, a service
+    wrapper, a scheduler. Such a process used to call itself "user", derive
+    a different holder name, find no secret under it, and delete the one
+    credential file every other process of the user was opening. The
+    account name the variable normally carries is asked of Windows
+    instead."""
     getuid = getattr(os, "getuid", None)
-    return str(getuid()) if getuid else os.environ.get("USERNAME", "user")
+    if getuid:
+        return str(getuid())
+    return os.environ.get("USERNAME") or _windows_account_name() or "user"
+
+
+def _windows_account_name() -> str | None:
+    """GetUserNameW: the logon name Windows itself puts in USERNAME."""
+    try:
+        from ctypes import wintypes
+        size = wintypes.DWORD(257)                 # UNLEN + 1
+        buf = ctypes.create_unicode_buffer(size.value)
+        if ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(size)):
+            return buf.value or None
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
