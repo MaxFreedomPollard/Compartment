@@ -130,6 +130,66 @@ def test_a_clock_step_does_not_kill_the_session_credential(tmp_path, monkeypatch
     assert session._file_for(vault).is_file()
 
 
+def _no_kernel_boot_record(monkeypatch, system):
+    """The sandbox case: kern.boottime refused (Seatbelt under Claude Code and
+    Codex), /proc/stat hidden (Android's SELinux under Termux)."""
+    monkeypatch.setattr(platforms.platform, "system", lambda: system)
+    monkeypatch.setattr(platforms, "_sysctl_boot_estimate", lambda: None)
+    real_open = open
+
+    def no_proc(path, *a, **kw):
+        if str(path).startswith("/proc/"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *a, **kw)
+    monkeypatch.setattr("builtins.open", no_proc)
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux", "FreeBSD"])
+def test_a_sandbox_that_hides_the_boot_record_still_gets_a_boot_token(
+        tmp_path, monkeypatch, system):
+    """Before the clock fallback every vault open from an agent's sandboxed
+    shell raised "Cannot identify this boot session", so `compartment store`
+    run by the agent itself could never use the unlocked vault."""
+    _tmp_session_dir(monkeypatch, tmp_path)
+    _no_kernel_boot_record(monkeypatch, system)
+    clock = "CLOCK_MONOTONIC" if system == "Darwin" else "CLOCK_BOOTTIME"
+    monkeypatch.setattr(platforms.time, clock, 777, raising=False)
+    monkeypatch.setattr(platforms.time, "clock_gettime",
+                        lambda c: 500.0 if c == 777 else 1.0)
+    monkeypatch.setattr(platforms.time, "time", lambda: 10_500.0)
+    assert platforms.boot_time() == platforms.boot_time() == "10000"
+
+
+def test_the_clock_fallback_agrees_with_the_pinned_kernel_reading(
+        tmp_path, monkeypatch):
+    """An unsandboxed process pins the kernel's value; a sandboxed one that
+    can only read the clock a second later must land on the same token, or
+    the credential the first one stored is unreadable to the second."""
+    _tmp_session_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(platforms.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platforms, "_sysctl_boot_estimate",
+                        lambda: (10_000.0, 500.0))
+    assert platforms.boot_time() == "10000"
+    monkeypatch.setattr(platforms, "_sysctl_boot_estimate", lambda: None)
+    monkeypatch.setattr(platforms.time, "clock_gettime", lambda c: 501.0)
+    monkeypatch.setattr(platforms.time, "time", lambda: 10_501.7)
+    assert platforms.boot_time() == "10000"
+
+
+@pytest.mark.skipif(platform.system() not in ("Darwin", "Linux"),
+                    reason="needs a POSIX clock that counts from boot")
+def test_the_clock_estimate_is_close_to_the_kernel_record():
+    """The fallback is only safe if it reads the same boot instant the kernel
+    reports; a clock that skipped sleep would drift from it by hours."""
+    clock = platforms._clock_boot_estimate()
+    assert clock is not None
+    kernel = (platforms._sysctl_boot_estimate() if platform.system() == "Darwin"
+              else None)
+    if kernel is None:
+        pytest.skip("kernel boot record not readable here")
+    assert abs(clock[0] - kernel[0]) < 120
+
+
 def test_filelock_is_exclusive(tmp_path):
     lockpath = str(tmp_path / "x.flock")
     with platforms.FileLock(lockpath, timeout=0.3):

@@ -133,18 +133,10 @@ def _posix_boot_estimate() -> tuple[float, float] | None:
     `kern.boottime` reading, so a step moves both ends equally and cancels.
     """
     system = platform.system()
-    if system == "Darwin":
-        try:
-            out = subprocess.run(["sysctl", "-n", "kern.boottime"],
-                                 capture_output=True, text=True, check=True,
-                                 timeout=_SUBPROCESS_TIMEOUT).stdout
-            import re
-            m = re.search(r"sec = (\d+)", out)
-            if m:
-                sec = float(m.group(1))
-                return sec, time.time() - sec
-        except (OSError, subprocess.SubprocessError, ValueError):
-            pass
+    if system == "Darwin" or system.endswith("BSD") or system == "DragonFly":
+        est = _sysctl_boot_estimate()
+        if est is not None:
+            return est
     elif system == "Linux":
         try:
             btime = None
@@ -159,6 +151,68 @@ def _posix_boot_estimate() -> tuple[float, float] | None:
                 return btime, up
         except (OSError, ValueError):
             pass
+    # The kernel's own boot record could not be read. That is the normal
+    # state inside an agent's sandbox - Claude Code and Codex run shell
+    # commands under macOS Seatbelt, which refuses kern.boottime - and on
+    # Android, where SELinux hides /proc/stat from apps such as Termux. A
+    # clock that counts from boot answers the same question in-process.
+    return _clock_boot_estimate()
+
+
+def _sysctl_boot_estimate() -> tuple[float, float] | None:
+    """kern.boottime on macOS and the BSDs: in-process first, so a vault open
+    does not fork, then through the sysctl binary for a libc without
+    sysctlbyname (OpenBSD)."""
+    import struct
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        buf = ctypes.create_string_buffer(32)
+        size = ctypes.c_size_t(len(buf))
+        if libc.sysctlbyname(b"kern.boottime", buf, ctypes.byref(size), None, 0) == 0:
+            # struct timeval: a 64-bit time_t on every 64-bit system, and a
+            # 32-bit one where the whole struct is 8 bytes.
+            fmt = "=q" if size.value >= 16 else "=i"
+            sec = float(struct.unpack_from(fmt, buf.raw)[0])
+            if sec > 0:
+                return sec, time.time() - sec
+    except (ImportError, OSError, AttributeError, ValueError, struct.error):
+        pass
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                             capture_output=True, text=True, check=True,
+                             timeout=_SUBPROCESS_TIMEOUT).stdout
+        import re
+        m = re.search(r"sec = (\d+)", out)
+        if m:
+            sec = float(m.group(1))
+            return sec, time.time() - sec
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return None
+
+
+def _clock_boot_estimate() -> tuple[float, float] | None:
+    """(boot instant, uptime) from a clock that starts at boot, or None.
+
+    Only clocks that keep counting through sleep qualify, or every resume
+    would read as a reboot: CLOCK_BOOTTIME on Linux, Android and OpenBSD, and
+    CLOCK_MONOTONIC on macOS, where it is mach_continuous_time and includes
+    sleep. The result feeds _pinned_boot_token like any other estimate, so
+    the first value seen this boot is the one every process agrees on."""
+    names = ("CLOCK_MONOTONIC",) if platform.system() == "Darwin" else (
+        "CLOCK_BOOTTIME",)
+    for name in names:
+        clock = getattr(time, name, None)
+        if clock is None:
+            continue
+        try:
+            up = time.clock_gettime(clock)
+        except OSError:
+            continue
+        if up > 0:
+            return time.time() - up, up
     return None
 
 
