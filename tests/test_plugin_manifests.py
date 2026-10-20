@@ -413,3 +413,22 @@ def test_the_omp_extension_declares_what_each_tool_does():
         "memory_search": {"approval": "read", "loadMode": "essential"},
         "memory_store": {"approval": "write", "loadMode": "essential"},
     }
+
+
+# ---------------------------------------------------- Cline (llms-install) --
+def test_llms_install_gets_an_agent_past_the_common_install_failures():
+    """Cline's marketplace installs by handing this file to the agent, which
+    then meets what users meet: pip refusing on an OS-managed Python
+    (PEP 668), a Windows shell, a GUI client that cannot see the PATH."""
+    from compartment import clients
+    text = (ROOT / "llms-install.md").read_text(encoding="utf-8")
+    assert "externally-managed-environment" in text
+    assert "pipx install compartment" in text and "uv tool install compartment" in text
+    # --break-system-packages appears only as something not to do
+    for line in text.splitlines():
+        if "--break-system-packages" in line:
+            assert "do not" in line.lower(), line
+    assert "py -m pip install compartment" in text
+    assert "where compartment" in text and "which compartment" in text
+    for client in re.findall(r"compartment integrate ([a-z0-9][a-z0-9-]*)", text):
+        assert client in clients.CLIENTS, client
