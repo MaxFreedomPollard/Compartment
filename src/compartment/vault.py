@@ -1839,7 +1839,13 @@ class Vault:
         if not self.expiry_enabled():
             return
         now = time.time()
-        if now - self._last_expiry_sweep < self.EXPIRY_SWEEP_SECONDS:
+        # A clock set back - a VM or a laptop restored from a snapshot, a
+        # clock that ran ahead and was corrected - leaves the last sweep in
+        # the future. Read as "swept moments ago", that held every sweep
+        # off until the clock caught up again, which can be months in a
+        # server that stays open. A negative interval says nothing about
+        # when the vault was last tidied, so it sweeps.
+        if 0 <= now - self._last_expiry_sweep < self.EXPIRY_SWEEP_SECONDS:
             return
         try:
             self.expire()
