@@ -311,6 +311,25 @@ _APP_IS_AT = {
 }
 
 
+def _status_bar_argv(app, vault: str) -> list[str]:
+    """The command that starts the status bar app now.
+
+    On Windows the program start at sign-in uses (systray._autostart_parts):
+    pythonw.exe beside this interpreter where there is one. compartment.exe
+    is a console program, and DETACHED_PROCESS only keeps it off this
+    terminal's console: the Python it starts could still open a console
+    window of its own behind a tray app that has no window."""
+    if sys.platform == "win32":
+        parts = getattr(app, "_autostart_parts", None)
+        exe = parts(vault)[0] if parts else None
+        if exe and Path(exe).name.lower() == "pythonw.exe":
+            return [exe, "-m", "compartment.cli", "--vault", vault, "tray"]
+    exe = shutil.which("compartment")
+    return ([exe, "--vault", vault, "menubar"] if exe else
+            [sys.executable, "-m", "compartment.cli", "--vault", vault,
+             "menubar"])
+
+
 def _start_status_bar_app(vault: str) -> None:
     """Put the status bar app up now, and again at every login.
 
@@ -383,10 +402,7 @@ def _start_status_bar_app(vault: str) -> None:
         print("  start at login is registered, but no icon appeared; "
               "starting one now")
     try:
-        exe = shutil.which("compartment")
-        argv = ([exe, "--vault", vault, "menubar"] if exe else
-                [sys.executable, "-m", "compartment.cli", "--vault", vault,
-                 "menubar"])
+        argv = _status_bar_argv(app, vault)
         # stdin included. Without it the app inherits this process's stdin,
         # sees a terminal on the other end, decides it was typed at a prompt
         # and relaunches itself detached - so the copy the installer started
