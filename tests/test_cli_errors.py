@@ -160,3 +160,17 @@ def test_an_import_that_is_not_records_is_refused_by_line(open_vault,
     f.write_text(body, encoding="utf-8")
     err = _ends(["--vault", open_vault, "import", str(f)], capsys)
     assert said in err and "Traceback" not in err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_a_plaintext_export_is_readable_by_its_owner_alone(open_vault,
+                                                          tmp_path, capsys):
+    """Every memory in the clear, credentials included, was written with the
+    umask's 0644: any account on the machine could read an export left in
+    /tmp or in a home other users can enter."""
+    out = tmp_path / "export.jsonl"
+    out.write_text("an older export\n")
+    os.chmod(out, 0o644)
+    cli.main(["--vault", open_vault, "export", str(out), "--plaintext"])
+    assert os.stat(out).st_mode & 0o777 == 0o600
+    assert "an older export" not in out.read_text(encoding="utf-8")

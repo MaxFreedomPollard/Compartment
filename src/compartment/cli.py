@@ -1168,7 +1168,20 @@ def cmd_export(args) -> None:
     data = v.export_jsonl()
     if args.plaintext:
         print("WARNING: exporting PLAINTEXT memories to disk", file=sys.stderr)
-        Path(args.out).write_text(data, encoding="utf-8")
+        # Readable by this user alone, as the vault file is (VAULT_MODE):
+        # this is every memory the vault holds, credentials included, in
+        # the clear, and write_text left it to the umask, 0644 on most
+        # systems, so any local account could read an export made into
+        # /tmp or a shared home. fchmod for a file that already existed,
+        # whose mode O_CREAT leaves as it was.
+        fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if hasattr(os, "fchmod"):
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError:
+                    pass
+            f.write(data)
         # Count the lines actually written rather than newline characters:
         # export_jsonl ends with a trailing newline only when it is non-empty,
         # so a newline count is one off the moment that changes.
