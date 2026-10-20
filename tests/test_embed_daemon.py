@@ -765,3 +765,30 @@ def test_a_daemon_run_where_it_cannot_listen_says_why(sandboxed, monkeypatch,
     assert e.value.code == 1
     err = capsys.readouterr().err
     assert "cannot listen" in err and os.strerror(errno.EPERM) in err
+
+
+# ------------------------------------------------- the shared temp directory --
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_a_link_left_at_the_lock_files_name_is_not_written_through(
+        tmp_path, link, capsys):
+    """A home too deep for an AF_UNIX path puts the socket, and its lock and
+    spawn files, in the shared temp directory under names anyone can work
+    out from the home path. Another user's symlink or hard link there led
+    the daemon to truncate what it pointed at, the user's own shell profile
+    say, and write its pid into it. Linux refuses to follow a stranger's
+    link in /tmp; the BSDs do not."""
+    profile = tmp_path / "profile"
+    profile.write_text("export PATH=/opt/bin:$PATH\n")
+    sock = tmp_path / "compartment-1000-abc.sock"
+    for suffix in (".lock", ".spawn"):
+        target = Path(str(sock) + suffix)
+        if link == "symlink":
+            target.symlink_to(profile)
+        else:
+            os.link(profile, target)
+    code = embed_daemon._Daemon(sock, idle=1).run()
+    assert profile.read_text() == "export PATH=/opt/bin:$PATH\n"
+    assert code == 1 and "lock file" in capsys.readouterr().err
+    assert RemoteEmbedder.connect(path=sock, wait=0.5) is None
+    assert embed_daemon._locked_pid(sock) is None
+    assert profile.read_text() == "export PATH=/opt/bin:$PATH\n"

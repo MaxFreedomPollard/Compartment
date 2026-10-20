@@ -269,6 +269,32 @@ def _peer_uid(conn: socket.socket) -> int | None:
     return None
 
 
+def _open_private(name: str, create: bool = True) -> int:
+    """A descriptor on this user's own regular file `name`, made 0600 if
+    it is not there, for the daemon's lock and spawn files.
+
+    They sit beside the socket, and a home too deep for an AF_UNIX path puts
+    the socket in the shared temp directory (see socket_path), where the
+    names are predictable from the home path. Opened plainly, a symlink or a
+    hard link another user left at the lock file's name led the daemon to
+    truncate whatever it pointed at and write its pid there: the user's own
+    shell profile, say. Linux refuses to follow a stranger's link in /tmp
+    (fs.protected_symlinks), the BSDs and others do not. So a link is never
+    followed, and a file that is not this user's alone is refused."""
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(name, flags | (os.O_CREAT if create else 0), 0o600)
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+            or st.st_nlink != 1):
+        os.close(fd)
+        raise PermissionError(f"{name} is not a file of this user's own")
+    return fd
+
+
 def _owned_socket(p: Path) -> bool:
     """True if `p` is a socket file that belongs to this user."""
     try:
@@ -297,8 +323,14 @@ class _Daemon:
 
     # -- lifecycle ---------------------------------------------------------
     def run(self) -> int:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self._take_lock():
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            locked = self._take_lock()
+        except OSError as exc:
+            print(f"compartment: the embedding daemon cannot take its lock "
+                  f"file beside {self.path}: {exc}", file=sys.stderr)
+            return 1
+        if not locked:
             return 0                    # another daemon owns this socket
         try:
             self.path.unlink()          # a socket file a dead daemon left
@@ -347,7 +379,7 @@ class _Daemon:
         return 0
 
     def _take_lock(self) -> bool:
-        fd = os.open(str(self.path) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fd = _open_private(str(self.path) + ".lock")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -677,7 +709,7 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
     if s is not None or not spawn or _refused is not None:
         return s
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path) + ".spawn", os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _open_private(str(path) + ".spawn")
     try:
         deadline = time.monotonic() + wait
         while True:
@@ -1023,7 +1055,7 @@ def _connect_probe(path: Path) -> bool:
 def _locked_pid(path: Path) -> int | None:
     """The pid written into the lock file, if a live daemon holds the lock."""
     try:
-        fd = os.open(str(path) + ".lock", os.O_RDWR)
+        fd = _open_private(str(path) + ".lock", create=False)
     except OSError:
         return None
     try:
