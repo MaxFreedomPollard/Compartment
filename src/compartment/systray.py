@@ -175,11 +175,12 @@ def _winreg():
 def _autostart_command(vault: str | None = None) -> str:
     """What Windows runs at sign-in.
 
-    Two things this has to get right. It launches through the console script
-    or pythonw.exe rather than python.exe, because python.exe opens a console
-    window behind a tray app that has no window, at every single sign-in. And
-    it carries the vault path, because a user running a non-default vault
-    would otherwise silently get the default one back after a reboot.
+    Two things this has to get right. It launches through pythonw.exe, the
+    one interpreter that opens no console, because anything else opens a
+    console window behind a tray app that has no window, at every single
+    sign-in. And it carries the vault path, because a user running a
+    non-default vault would otherwise silently get the default one back
+    after a reboot.
     """
     exe, args = _autostart_parts(vault)
     return f'"{exe}" {args}'
@@ -188,14 +189,25 @@ def _autostart_command(vault: str | None = None) -> str:
 def _autostart_parts(vault: str | None = None) -> tuple[str, str]:
     """The same command, split. A scheduled task wants the program and its
     arguments in separate XML elements, and re-parsing a quoted command line
-    to get them back would be a second place for the quoting to be wrong."""
+    to get them back would be a second place for the quoting to be wrong.
+
+    pythonw.exe beside this interpreter comes first, and the console script
+    only when there is none. compartment.exe, which pip and uv write for the
+    console script, is a console program like python.exe: started at
+    sign-in it opened a console window that stayed for the whole session,
+    since that process IS the tray app, and closing the window quit it. It
+    used to come first. Every venv, uv tool environment and python.org
+    install has a pythonw.exe beside python.exe, and it runs the same
+    environment's compartment.
+    """
     vault = vault or env("VAULT") or str(home() / "memory.vault")
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    if pyw.is_file():
+        return str(pyw), f'-m compartment.cli --vault "{vault}" tray'
     exe = shutil.which("compartment")
     if exe:
         return exe, f'--vault "{vault}" tray'
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    runner = str(pyw) if pyw.is_file() else sys.executable
-    return runner, f'-m compartment.cli --vault "{vault}" tray'
+    return sys.executable, f'-m compartment.cli --vault "{vault}" tray'
 
 
 # --- the Linux application entry --------------------------------------------
