@@ -279,12 +279,13 @@ def test_goose_on_windows_is_under_appdata_block(home, monkeypatch):
 
 
 def test_goose_path_root_moves_its_config(home, monkeypatch, tmp_path):
+    monkeypatch.delenv("GOOSE_PATH_ROOT", raising=False)
+    default = clients.CLIENTS["goose"].config_path()   # per-OS default
     monkeypatch.setenv("GOOSE_PATH_ROOT", str(tmp_path / "g"))
     assert clients.CLIENTS["goose"].config_path() == (
         tmp_path / "g" / "config" / "config.yaml")
     monkeypatch.setenv("GOOSE_PATH_ROOT", "relative")      # ignored by Goose
-    assert clients.CLIENTS["goose"].config_path() == (
-        home / ".config" / "goose" / "config.yaml")
+    assert clients.CLIENTS["goose"].config_path() == default
 
 
 # ---------------------------------------------------------- newer clients

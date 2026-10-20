@@ -177,7 +177,10 @@ def test_the_capture_hook_names_a_compartment_that_exists(
     cmd = _installed_command(home.settings)
     assert cmd == claude_hooks.hook_command(exe, vault_path)
     assert claude_hooks.hook_command(vault=vault_path) == cmd   # hook install
-    assert f'--vault "{vault_path}"' in cmd
+    # Windows: written with forward slashes, which Git Bash, cmd and
+    # PowerShell all read as the same path (see claude_hooks._shell_word).
+    shown = vault_path.replace("\\", "/") if os.name == "nt" else vault_path
+    assert f'--vault "{shown}"' in cmd
 
     if os.name != "nt":                 # run it the way Claude Code does
         edit = json.dumps({"tool_name": "Edit",

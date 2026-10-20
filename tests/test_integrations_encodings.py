@@ -122,7 +122,10 @@ def test_a_codex_config_saved_by_a_windows_editor_is_registered(how,
     assert doc["model"] == "o3" and doc["mcp_servers"]["other"] == {
         "command": "x"}
     assert doc["mcp_servers"]["compartment"]["args"][1] == VAULT
-    assert raw.decode("utf-8").startswith("# mine\n")
+    text = raw.decode("utf-8")
+    assert text.replace("\r\n", "\n").startswith("# mine\n")
+    # The file keeps the line endings it had, on every system.
+    assert ("\r\n" in text) == ("CRLF" in how)
     assert clients.is_registered(codex, path=p) is True
     assert clients.unregister(codex, path=p) is True
     assert "compartment" not in tomllib.loads(

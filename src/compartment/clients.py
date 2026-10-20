@@ -744,9 +744,8 @@ def read_config_text(path: Path) -> str:
     clients use, rejects the mark and cannot read UTF-16 at all, so a
     marked file was already broken for most of them.
 
-    Line endings come back as \\n, as read_text gave them: write_config
-    writes in text mode, and a \\r\\n kept in the text would be written
-    back as \\r\\r\\n on Windows.
+    Line endings come back as \\n; write_config puts back the ones the file
+    had.
 
     Raises OSError when the file cannot be read and UnicodeDecodeError (a
     ValueError) when it is not text in any of these encodings.
@@ -1128,12 +1127,32 @@ def write_config(path: Path, text: str) -> Path | None:
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES),
                               str(target))
     backup = None
+    crlf = False
     if existed:
         backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
         shutil.copy2(target, backup)
+        try:
+            raw = target.read_bytes()
+            for bom, codec in _BOMS:            # CRLF inside UTF-16 too
+                if raw.startswith(bom):
+                    raw = raw.decode(codec, "replace").encode("utf-8")
+                    break
+            crlf = b"\r\n" in raw
+        except OSError:
+            pass
+    # The file keeps its own line endings, on every system. Text comes in
+    # with "\n" (the reader normalises), and a text-mode write used to turn
+    # every "\n" into "\r\n" on Windows only, so the same `integrate` gave
+    # a different file depending on where it ran, and a CRLF file that kept
+    # a "\r\n" through some other path came out with "\r\r\n", which is
+    # not valid TOML. Written verbatim: CRLF if the file had CRLF, LF
+    # otherwise and for a new file.
+    text = text.replace("\r\n", "\n")
+    if crlf:
+        text = text.replace("\n", "\r\n")
     tmp = target.with_name(f"{target.name}.{secrets.token_hex(8)}.tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
             if existed and os.name != "nt":
                 shutil.copymode(target, tmp)    # before any text is in it
             f.write(text)
