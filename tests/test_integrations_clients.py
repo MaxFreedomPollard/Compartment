@@ -208,3 +208,34 @@ def test_lm_studio_without_a_pointer_uses_its_default_home(home):
     (home / ".cache" / "lm-studio").mkdir(parents=True)
     assert clients.CLIENTS["lmstudio"].config_path() == (
         home / ".cache" / "lm-studio" / "mcp.json")
+
+
+# --------------------------------------------------------------- Continue
+
+def test_continue_is_wired_with_a_file_of_its_own(home):
+    """Continue was print-only, since its config.yaml is YAML with comments.
+    It also loads every JSON file in ~/.continue/mcpServers in the Claude
+    Desktop shape, so it gets a file of its own and nothing of the user's
+    is edited."""
+    cont = home / ".continue"
+    cont.mkdir()
+    (cont / "config.yaml").write_text("# mine\nname: x\n", encoding="utf-8")
+    c = clients.CLIENTS["continue"]
+    assert c.writes is True and c.present() is True
+
+    res = clients.register(c, VAULT)
+    assert res["written"] is True
+    p = cont / "mcpServers" / "compartment.json"
+    assert json.loads(p.read_text(encoding="utf-8"))["mcpServers"][
+        "compartment"]["args"][:2] == ["--vault", VAULT]
+    assert (cont / "config.yaml").read_text(encoding="utf-8") == (
+        "# mine\nname: x\n")
+    assert clients.unregister(c) is True
+
+
+def test_continue_follows_its_global_dir_variable(home, monkeypatch,
+                                                  tmp_path):
+    monkeypatch.setenv("CONTINUE_GLOBAL_DIR", str(tmp_path / "cont"))
+    assert clients.CLIENTS["continue"].config_path() == (
+        tmp_path / "cont" / "mcpServers" / "compartment.json")
+    assert clients.CLIENTS["continue"].present() is False

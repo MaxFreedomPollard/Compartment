@@ -392,15 +392,25 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
                     if sys.platform == "darwin" or os.name == "nt"
                     else _xdg() / "trae" / "mcp.json")),
 
+    # Continue loads every *.json under its global mcpServers folder, in the
+    # Claude Desktop shape (core/context/mcp/json/loadJsonMcpConfigs.ts), so
+    # it gets a file of its own: nothing of the user's is edited, and its
+    # config.yaml, whose comments a rewrite would lose, is never touched.
+    Client("continue", "Continue",
+           lambda: (_home_from("CONTINUE_GLOBAL_DIR", ".continue")
+                    / "mcpServers" / "compartment.json"),
+           installed=lambda: _home_from("CONTINUE_GLOBAL_DIR",
+                                        ".continue").is_dir(),
+           jsonc=True,
+           note="Continue loads it from its mcpServers folder; reload the "
+                "editor window to pick it up"),
+
     # -- known, documented, but not ours to write --------------------------
     #
     # Each of these keeps its configuration somewhere a merge cannot be made
     # safely: a YAML document whose comments and anchors we would flatten, or
     # an application database, or a settings blob with no stable on-disk
     # shape. Printing the exact block is honest; writing a guess is not.
-    Client("continue", "Continue", _home(".continue", "config.yaml"),
-           kind="manual", writes=False,
-           note="paste under `mcpServers:` in config.yaml"),
     Client("goose", "Goose", lambda: _xdg() / "goose" / "config.yaml",
            kind="manual", writes=False,
            note="or run `goose configure` and add it as an extension"),
