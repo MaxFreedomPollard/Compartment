@@ -12,6 +12,8 @@ import dataclasses
 import functools
 import json
 import os
+import sys
+import sysconfig
 import threading
 from pathlib import Path
 
@@ -179,9 +181,45 @@ def _missing_runtime_error(exc: ImportError) -> ModelError | None:
         return ModelError(
             "onnxruntime cannot load: this Windows machine is missing the "
             "Microsoft Visual C++ runtime it is built against. Install "
-            "https://aka.ms/vs/17/release/vc_redist.x64.exe (one small "
-            "installer, no restart needed), then run this command again.")
+            f"https://aka.ms/vs/17/release/vc_redist.{_vc_redist_arch()}.exe "
+            "(one small installer, no restart needed), then run this "
+            "command again.")
     return None
+
+
+def _vc_redist_arch() -> str:
+    """Which Visual C++ runtime installer this Python needs: the one for
+    the architecture the interpreter was BUILT for, not the machine's. On
+    Windows on ARM an ARM64 Python needs vc_redist.arm64.exe, and the x64
+    installer the message used to name installs a runtime it cannot load;
+    an x64 Python running under emulation there needs the x64 one."""
+    plat = sysconfig.get_platform()
+    if plat == "win-arm64":
+        return "arm64"
+    if plat == "win32":
+        return "x86"
+    return "x64"
+
+
+def _runtime_not_installed(exc: ModuleNotFoundError) -> ModelError | None:
+    """The actionable form of onnxruntime or tokenizers simply not being
+    importable, or None for any other missing module.
+
+    pip installs both with Compartment wherever it can, but onnxruntime
+    publishes no wheel for some platforms (musl/Alpine, 32-bit ARM, the
+    BSDs, Android), where an install made with --no-deps or from a
+    distribution's packages can lack it. The bare error was a traceback in
+    the CLI, and in the MCP server, which passes the model only the text of
+    its own errors, "Error executing tool" with no reason at all."""
+    if exc.name not in ("onnxruntime", "tokenizers"):
+        return None
+    return ModelError(
+        f"{exc.name} is not installed for this Python ({sys.executable}), "
+        "and embedding needs it. Install it with: "
+        f"{sys.executable} -m pip install {exc.name}. Where pip has no "
+        f"{exc.name} build for this platform ({sysconfig.get_platform()}), "
+        "install your system's own package of it, or run Compartment on a "
+        "glibc-based Python (a Debian or Ubuntu image rather than Alpine).")
 
 
 class Embedder:
@@ -200,12 +238,17 @@ class Embedder:
         os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
         try:
             import onnxruntime as ort      # local import: keeps CLI startup fast
+            from tokenizers import Tokenizer
+        except ModuleNotFoundError as exc:
+            better = _runtime_not_installed(exc)
+            if better is not None:
+                raise better from exc
+            raise
         except ImportError as exc:
             better = _missing_runtime_error(exc)
             if better is not None:
                 raise better from exc
             raise
-        from tokenizers import Tokenizer
 
         # Errors only, and for the DEFAULT logger, not just the session's:
         # device discovery runs under the default logger and its warnings go
