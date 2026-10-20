@@ -136,7 +136,8 @@ def open_vault(vault, vault_path, monkeypatch):
     return vault_path
 
 
-@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-16-le",
+                                      "utf-32", "utf-32-be"])
 def test_an_import_saved_by_a_windows_tool_is_read(open_vault, tmp_path,
                                                    capsys, encoding):
     """PowerShell 5.1 writes UTF-8 with a BOM, or UTF-16 for `>`: the first

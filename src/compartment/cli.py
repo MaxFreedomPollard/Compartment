@@ -1316,13 +1316,15 @@ def _read_text_file(path: str) -> str:
     utf8`) and UTF-16 for a plain `>` redirect; Notepad wrote a BOM for
     years. Read as bare UTF-8, the first gave JSONDecodeError "Unexpected
     UTF-8 BOM" and the second UnicodeDecodeError, both as tracebacks. The
-    BOM says which it is; with none, the file is UTF-8, as `export` writes
-    it, and anything else is refused by name."""
+    encoding is found as json finds it (UTF-8 with or without a BOM,
+    UTF-16, UTF-32), and anything that does not decode is refused by
+    name."""
     raw = Path(path).read_bytes()
     try:
-        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-            return raw.decode("utf-16")
-        return raw.decode("utf-8-sig")
+        # json's own detection: the BOM where there is one, else the zero
+        # bytes an ASCII "{" leaves in UTF-16 or UTF-32, else UTF-8.
+        enc = json.detect_encoding(raw)
+        return raw.decode("utf-8-sig" if enc == "utf-8" else enc)
     except UnicodeDecodeError as exc:
         _die(f"{path} is not UTF-8 text (byte {exc.start}): save it as "
              "UTF-8 and import it again")
