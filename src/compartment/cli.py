@@ -2065,6 +2065,22 @@ def _integrate_client(client, args, brief: bool = False) -> None:
 #: small step for that program; one busy updating itself is no reason to
 #: hold an install for as long as that takes.
 AGENT_TOOL_TIMEOUT = 120
+def _quit_claude_desktop(platform: str | None = None) -> str:
+    """How to make Claude Desktop load a config just written.
+
+    Quit, not close: closing its window leaves Claude Desktop running (in
+    the notification area on Windows), so it never rereads the file, and a
+    copy still running can write the config it holds back over this one.
+    "Restart Claude Desktop" read as closing the window."""
+    platform = platform or sys.platform
+    where = ("right-click its icon in the notification area and choose "
+             "Quit" if platform == "win32" else
+             "Claude > Quit Claude, or Cmd-Q" if platform == "darwin"
+             else "quit it")
+    return (f"Quit Claude Desktop completely ({where}; closing its window "
+            "leaves it running), then open it again to load it.")
+
+
 def _hermes_home() -> Path:
     """Hermes Agent's home, found the way Hermes finds it
     (hermes_constants.get_hermes_home): HERMES_HOME, with ~ and variables
@@ -2271,7 +2287,7 @@ def _integrate_target(args) -> None:
                 print(f"  ✓ registered in {reg['config']}")
                 if reg["backup"]:
                     print(f"    (previous config backed up to {reg['backup']})")
-                print("    Restart Claude Desktop to load it.")
+                print(f"    {_quit_claude_desktop()}")
             except ValueError as exc:    # malformed config - never guess
                 print(f"  ! {exc}")
                 print("    fix the file, then run `compartment integrate "

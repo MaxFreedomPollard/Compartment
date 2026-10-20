@@ -21,3 +21,32 @@ def test_claude_md_still_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "moved"))
     monkeypatch.setenv("CLAUDE_MD", str(tmp_path / "explicit.md"))
     assert cli._claude_md_path() == tmp_path / "explicit.md"
+
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("platform, words", [
+    ("win32", "notification area"), ("darwin", "Cmd-Q"), ("linux", "quit")])
+def test_the_desktop_hint_says_to_quit_it_not_close_it(platform, words):
+    """"Restart Claude Desktop" read as closing its window, which leaves it
+    running (in the notification area on Windows): it never rereads its
+    config, and a copy still running can write the old one back."""
+    hint = cli._quit_claude_desktop(platform)
+    assert hint.startswith("Quit Claude Desktop completely") and words in hint
+
+
+def test_connecting_claude_desktop_prints_that_hint(tmp_path, monkeypatch,
+                                                    capsys):
+    from compartment import claude_desktop
+    monkeypatch.setattr(cli.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(claude_desktop, "present", lambda: True)
+    monkeypatch.setattr(claude_desktop, "register", lambda exe, args: {
+        "config": str(tmp_path / "claude_desktop_config.json"),
+        "backup": None})
+    monkeypatch.setenv("CLAUDE_MD", str(tmp_path / "CLAUDE.md"))
+    cli._integrate_target(cli.argparse.Namespace(
+        target="claude", vault=str(tmp_path / "v.vault"), no_import=True,
+        no_hooks=True))
+    assert cli._quit_claude_desktop() in capsys.readouterr().out
