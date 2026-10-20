@@ -63,12 +63,12 @@ jobs:
       - name: Test suite with offline guard active
         env:
           COMPARTMENT_ASSERT_OFFLINE: "1"
-        run: python tools/ci_report.py tests/ -q --timeout=300 --cov=compartment --cov-report=xml --cov-append
+        run: python tools/ci_report.py tests/ -q --timeout=300 -o faulthandler_timeout=120 --cov=compartment --cov-report=xml --cov-append
 
       - name: Dashboard tests (loopback socket; offline guard intentionally off)
         # `compartment dash` binds 127.0.0.1 by design and is never run under the
         # offline guard, so its tests run here with the guard off.
-        run: python tools/ci_report.py tests/test_dash.py -q --timeout=300 --cov=compartment --cov-report=xml --cov-append
+        run: python tools/ci_report.py tests/test_dash.py -q --timeout=300 -o faulthandler_timeout=120 --cov=compartment --cov-report=xml --cov-append
 
       - name: Coverage to Codecov
         # Never fail the build on a reporting service: the offline guard and the
@@ -80,6 +80,29 @@ jobs:
           flags: ${{ matrix.os }}-py${{ matrix.python }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  real-sockets:
+    # The shared embedding daemon and the stdio server need real Unix sockets
+    # and pipes, which agent sandboxes refuse, so these are the tests that
+    # only ever run on a CI runner. They run here on their own, verbose, with
+    # every thread's stack dumped for a test that stalls, so a hang names
+    # itself within minutes instead of holding a runner until its timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[dev]
+      - name: Daemon and stdio tests, verbose
+        env:
+          CI_REPORT_STALL_S: "75"
+        run: python tools/ci_report.py tests/test_embed_daemon.py tests/test_server_stdio.py -v --timeout=120 -o faulthandler_timeout=60
 
   wheel-smoke:
     # The suite runs against an editable checkout, which hides packaging
@@ -207,7 +230,7 @@ jobs:
       - name: Test suite with offline guard active
         env:
           COMPARTMENT_ASSERT_OFFLINE: "1"
-        run: python tools/ci_report.py tests/ -q --timeout=300 --ignore=tests/test_dash.py
+        run: python tools/ci_report.py tests/ -q --timeout=300 -o faulthandler_timeout=120 --ignore=tests/test_dash.py
 
   linux-panel:
     # Linux has no notification area worth relying on, so it draws the same
