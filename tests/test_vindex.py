@@ -167,3 +167,23 @@ def test_an_add_writes_one_row_instead_of_copying_the_index():
             moves += 1
         before = built._mat
     assert moves <= 2, f"the rows moved on {moves} of 1,000 adds"
+
+
+def test_a_mistyped_precision_setting_still_builds_an_index(capsys):
+    """index_precision is hand-edited JSON, and usearch raised KeyError for
+    anything it does not spell. Above the brute-force limit the index is
+    built on every open, so one typo meant the vault would not open."""
+    import pytest
+    pytest.importorskip("usearch")
+    from compartment.vindex import build_index
+    rng = np.random.default_rng(3)
+    mat = rng.standard_normal((50, 16)).astype(np.float32)
+    for setting in ("int-8", 8, None, "b1", ["f32"]):
+        idx = build_index(16, list(range(1, 51)), mat, precision=setting,
+                          force="hnsw")
+        assert idx.kind == "hnsw/usearch (f32)"
+        assert idx.search(mat[7], 1)[0][0] == 8
+    assert "index_precision" in capsys.readouterr().err
+    for spelled, kind in (("INT8", "i8"), (" i8", "i8"), ("float16", "f16")):
+        assert build_index(16, list(range(1, 51)), mat, precision=spelled,
+                           force="hnsw").kind == f"hnsw/usearch ({kind})"

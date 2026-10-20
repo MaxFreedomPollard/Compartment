@@ -117,6 +117,35 @@ class UsearchIndex(VectorIndex):
 
 
 _HNSW_WARNED = False
+_PRECISION_WARNED: set[str] = set()
+
+#: What `index_precision` may name: the float widths and int8, each under the
+#: spellings usearch itself accepts. The setting lives in a JSON file people
+#: edit by hand, and usearch raised KeyError for anything else ("int-8", 8,
+#: "INT8 " with a space): above BRUTE_FORCE_LIMIT records the index is built
+#: on every open, so one typo meant the vault could not be opened at all.
+#: Its bit and unsigned kinds ("b1", "u8") are refused too: under the cosine
+#: metric they do not approximate the vectors, they discard them.
+PRECISIONS = {
+    "f32": "f32", "float32": "f32", "f16": "f16", "float16": "f16",
+    "bf16": "bf16", "bfloat16": "bf16", "f64": "f64", "float64": "f64",
+    "i8": "i8", "int8": "i8",
+}
+
+
+def _precision(value) -> str:
+    """The usearch dtype `value` names, or f32 with a notice once."""
+    name = PRECISIONS.get(str(value).strip().lower())
+    if name is not None:
+        return name
+    if repr(value) not in _PRECISION_WARNED:
+        import sys
+        print(f"notice: index_precision {value!r} is not one of "
+              f"{', '.join(sorted(set(PRECISIONS.values())))}; using f32. "
+              "Set it with `compartment reindex --int8` or `--f32`.",
+              file=sys.stderr)
+        _PRECISION_WARNED.add(repr(value))
+    return "f32"
 
 
 def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
@@ -130,7 +159,8 @@ def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
     if force == "brute" or (force is None and len(ikeys) < BRUTE_FORCE_LIMIT):
         return BruteForceIndex.build(dim, ikeys, mat)
     try:
-        return UsearchIndex.build(dim, ikeys, mat, precision=precision)
+        return UsearchIndex.build(dim, ikeys, mat,
+                                  precision=_precision(precision))
     except ImportError:
         global _HNSW_WARNED
         if not _HNSW_WARNED:
