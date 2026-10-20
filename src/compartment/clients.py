@@ -38,6 +38,7 @@ import codecs
 import errno
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -129,6 +130,9 @@ class Client:
     writes: bool = True            #: whether we are willing to edit it
     note: str = ""                 #: anything the user needs to know after
     aliases: tuple[str, ...] = field(default=())
+    #: Whether the client reads its file as JSON with comments, so a file
+    #: holding comments or trailing commas is edited as text, not refused.
+    jsonc: bool = False
 
     def config_path(self) -> Path:
         return self.path()
@@ -186,16 +190,16 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
 
     # -- coding agents that spell the key differently ----------------------
     Client("vscode", "VS Code", lambda: _vscode_user() / "mcp.json",
-           root="servers", entry=_entry_vscode),
+           root="servers", entry=_entry_vscode, jsonc=True),
     Client("vscode-insiders", "VS Code Insiders",
            lambda: _vscode_user("Code - Insiders") / "mcp.json",
-           root="servers", entry=_entry_vscode),
+           root="servers", entry=_entry_vscode, jsonc=True),
+    # Zed writes its settings.json with a block of // comments on first
+    # run, so it is edited as JSON with comments: comments kept.
     Client("zed", "Zed",
            lambda: (_appdata() / "Zed" / "settings.json" if os.name == "nt"
                     else _xdg() / "zed" / "settings.json"),
-           root="context_servers",
-           note="Zed allows comments in settings.json; if yours has any, "
-                "the block is printed rather than written"),
+           root="context_servers", jsonc=True),
     Client("opencode", "OpenCode",
            lambda: _xdg() / "opencode" / "opencode.json",
            root="mcp", entry=_entry_opencode),
@@ -503,6 +507,330 @@ def _read_json(path: Path) -> dict:
     return data
 
 
+# --- JSONC: the comments and trailing commas some clients allow ------------
+#
+# VS Code (and Insiders and VSCodium), Zed, Gemini CLI, Qwen Code and
+# OpenCode read their config as JSON with comments: // and /* */, and a
+# comma after the last member. Zed writes its own settings.json that way on
+# first run, with a block of // lines above the opening brace, so a strict
+# JSON reader refused every Zed user's file and printed the block instead.
+#
+# Re-serialising would parse, but it would delete every comment the user
+# wrote. So the edit is textual: the document is parsed with the position
+# of every object member, our member is spliced in (or out) as text, and
+# the result is parsed again and must equal the original data with exactly
+# our change applied. Anything this cannot do cleanly - a duplicate key, a
+# root that is not an object, a result that does not read back - is
+# refused, and the user gets the block to paste, as before.
+
+_JSONC_SCALAR = re.compile(
+    r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null")
+
+
+class _JsoncObject(dict):
+    """A parsed object that remembers where it is in the text: its braces,
+    and for each member the start of its key and the span of its value."""
+
+    def __init__(self, open_at: int):
+        super().__init__()
+        self.open = open_at
+        self.close = -1
+        self.spans: dict[str, tuple[int, int, int]] = {}
+
+
+class _JsoncParser:
+    def __init__(self, text: str):
+        self.t, self.i = text, 0
+
+    def fail(self, what: str):
+        line = self.t.count("\n", 0, self.i) + 1
+        raise ValueError(f"{what} at line {line}")
+
+    def skip(self) -> None:
+        t, n = self.t, len(self.t)
+        while self.i < n:
+            c = t[self.i]
+            if c in " \t\r\n":
+                self.i += 1
+            elif t.startswith("//", self.i):
+                j = t.find("\n", self.i)
+                self.i = n if j < 0 else j + 1
+            elif t.startswith("/*", self.i):
+                j = t.find("*/", self.i + 2)
+                if j < 0:
+                    self.fail("unterminated comment")
+                self.i = j + 2
+            else:
+                return
+
+    def at(self, ch: str) -> bool:
+        return self.t.startswith(ch, self.i)
+
+    def document(self):
+        self.skip()
+        value = self.value()
+        self.skip()
+        if self.i != len(self.t):
+            self.fail("text after the end of the document")
+        return value
+
+    def value(self):
+        self.skip()
+        if self.at("{"):
+            return self.object()
+        if self.at("["):
+            return self.array()
+        if self.at('"'):
+            return self.string()
+        m = _JSONC_SCALAR.match(self.t, self.i)
+        if not m:
+            self.fail("unexpected character")
+        self.i = m.end()
+        return json.loads(m.group())
+
+    def string(self) -> str:
+        try:
+            s, self.i = json.decoder.scanstring(self.t, self.i + 1, True)
+        except json.JSONDecodeError as exc:
+            raise ValueError(str(exc)) from exc
+        return s
+
+    def object(self) -> _JsoncObject:
+        obj = _JsoncObject(self.i)
+        self.i += 1
+        while True:
+            self.skip()
+            if self.at("}"):
+                break
+            if not self.at('"'):
+                self.fail("expected a quoted key")
+            key_at = self.i
+            key = self.string()
+            self.skip()
+            if not self.at(":"):
+                self.fail("expected ':'")
+            self.i += 1
+            self.skip()
+            value_at = self.i
+            value = self.value()
+            if key in obj:
+                # Which one a client honours is the client's business; an
+                # edit that guessed could change the one it reads.
+                self.fail(f"duplicate key {key!r}")
+            obj[key] = value
+            obj.spans[key] = (key_at, value_at, self.i)
+            self.skip()
+            if self.at(","):
+                self.i += 1
+                continue
+            if not self.at("}"):
+                self.fail("expected ',' or '}'")
+            break
+        obj.close = self.i
+        self.i += 1
+        return obj
+
+    def array(self) -> list:
+        out = []
+        self.i += 1
+        while True:
+            self.skip()
+            if self.at("]"):
+                break
+            out.append(self.value())
+            self.skip()
+            if self.at(","):
+                self.i += 1
+                continue
+            if not self.at("]"):
+                self.fail("expected ',' or ']'")
+            break
+        self.i += 1
+        return out
+
+
+def _jsonc_parse(text: str):
+    """The data in a JSONC document. Raises ValueError."""
+    return _JsoncParser(text).document()
+
+
+def _plain(value):
+    """`value` as plain dicts and lists, for comparing and copying."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
+
+
+def _line_start(text: str, i: int) -> int:
+    return text.rfind("\n", 0, i) + 1
+
+
+def _own_line_indent(text: str, i: int) -> str | None:
+    """The indentation before position `i`, when nothing else is before it
+    on its line."""
+    lead = text[_line_start(text, i):i]
+    return lead if not lead.strip() else None
+
+
+def _line_indent(text: str, i: int) -> str:
+    """The indentation of the line holding position `i`."""
+    start = _line_start(text, i)
+    line = text[start:]
+    return line[:len(line) - len(line.lstrip(" \t"))]
+
+
+def _indent_unit(text: str, root: _JsoncObject) -> str:
+    """One level of indentation, as the document's own first member has."""
+    for key_at, _, _ in sorted(root.spans.values()):
+        lead = _own_line_indent(text, key_at)
+        if lead:
+            return lead
+        break
+    return "  "
+
+
+def _jsonc_dump(value, indent: str, unit: str) -> str:
+    """`value` as JSON, continuation lines indented to sit at `indent`."""
+    return json.dumps(value, indent=unit).replace("\n", "\n" + indent)
+
+
+def _jsonc_insert(text: str, obj: _JsoncObject, key: str, value,
+                  unit: str) -> str:
+    """`text` with `"key": value` added as the last member of `obj`."""
+    if not obj.spans:
+        close_indent = _line_indent(text, obj.open)
+        member_indent = close_indent + unit
+        member = f"{json.dumps(key)}: {_jsonc_dump(value, member_indent, unit)}"
+        inside = text[obj.open + 1:obj.close]
+        if not inside.strip():
+            return (text[:obj.open + 1] + "\n" + member_indent + member
+                    + "\n" + close_indent + text[obj.close:])
+        return (text[:obj.open + 1] + "\n" + member_indent + member
+                + text[obj.open + 1:])
+
+    first_key = min(k for k, _, _ in obj.spans.values())
+    last_key, _, last_end = max(obj.spans.values())
+    member_indent = _own_line_indent(text, first_key)
+    if member_indent is None:                   # a one-line object
+        compact = json.dumps(value)
+        return (text[:last_end] + f", {json.dumps(key)}: {compact}"
+                + text[last_end:])
+    member = f"{json.dumps(key)}: {_jsonc_dump(value, member_indent, unit)}"
+    eol = text.find("\n", last_end)
+    tail = text[last_end:] if eol < 0 else text[last_end:eol]
+    after = tail.lstrip(" \t")
+    trailing_comma = after.startswith(",")
+    if trailing_comma:
+        after = after[1:].lstrip(" \t")
+    if eol >= 0 and (not after or after.startswith("//")):
+        # The last member ends its line, perhaps with a comma or a comment
+        # after it: the new member goes on a line of its own below.
+        comma = "" if trailing_comma else ","
+        return (text[:last_end] + comma + text[last_end:eol] + "\n"
+                + member_indent + member + ("," if trailing_comma else "")
+                + text[eol:])
+    compact = json.dumps(value)
+    return (text[:last_end] + f", {json.dumps(key)}: {compact}"
+            + text[last_end:])
+
+
+def _jsonc_set(text: str, root: str, name: str, entry: dict) -> str:
+    """`text` with root[name] set to `entry`, every comment and every other
+    byte left where it was. Raises ValueError when that cannot be done and
+    proven."""
+    doc = _jsonc_parse(text)
+    if not isinstance(doc, _JsoncObject):
+        raise ValueError("not a JSON object")
+    unit = _indent_unit(text, doc)
+    expected = _plain(doc)
+    if root in doc:
+        servers = doc[root]
+        if not isinstance(servers, _JsoncObject):
+            raise ValueError(f"{root} is not an object")
+        if name in servers:
+            key_at, value_at, value_end = servers.spans[name]
+            indent = _line_indent(text, key_at)
+            new = (text[:value_at] + _jsonc_dump(entry, indent, unit)
+                   + text[value_end:])
+        else:
+            new = _jsonc_insert(text, servers, name, entry, unit)
+        expected[root][name] = entry
+    else:
+        new = _jsonc_insert(text, doc, root, {name: entry}, unit)
+        expected[root] = {name: entry}
+    if _plain(_jsonc_parse(new)) != expected:
+        raise ValueError("the edited file would not read back as intended")
+    return new
+
+
+def _skip_blank(text: str, i: int) -> int:
+    """The first position at or after `i` that is not whitespace or a
+    comment."""
+    p = _JsoncParser(text)
+    p.i = i
+    p.skip()
+    return p.i
+
+
+def _jsonc_delete(text: str, root: str, name: str) -> str | None:
+    """`text` with root[name] taken out and nothing else changed, or None
+    when it is not there. Raises ValueError when it cannot be taken out
+    cleanly."""
+    doc = _jsonc_parse(text)
+    if not isinstance(doc, _JsoncObject):
+        raise ValueError("not a JSON object")
+    servers = doc.get(root)
+    if not isinstance(servers, _JsoncObject) or name not in servers:
+        return None
+    order = sorted(servers.spans, key=lambda k: servers.spans[k][0])
+    idx = order.index(name)
+    key_at, _, value_end = servers.spans[name]
+    cuts: list[tuple[int, int]] = []
+
+    def member_span(start: int, end: int) -> tuple[int, int]:
+        """Widen [start, end) to whole lines when the member has its lines
+        to itself."""
+        eol = text.find("\n", end)
+        rest = text[end:] if eol < 0 else text[end:eol]
+        if _own_line_indent(text, start) is not None and not rest.strip():
+            return _line_start(text, start), (len(text) if eol < 0
+                                              else eol + 1)
+        return start, end
+
+    if idx < len(order) - 1:
+        comma = _skip_blank(text, value_end)
+        if not text.startswith(",", comma):
+            raise ValueError("no comma after the entry")
+        cuts.append(member_span(key_at, comma + 1))
+    elif idx > 0:
+        prev_end = servers.spans[order[idx - 1]][2]
+        comma = _skip_blank(text, prev_end)
+        if not text.startswith(",", comma):
+            raise ValueError("no comma before the entry")
+        end = value_end
+        trailing = _skip_blank(text, value_end)
+        if text.startswith(",", trailing):      # it had a trailing comma
+            end = trailing + 1
+        cuts.append((comma, comma + 1))
+        cuts.append(member_span(key_at, end))
+    else:
+        end = value_end
+        trailing = _skip_blank(text, value_end)
+        if text.startswith(",", trailing):
+            end = trailing + 1
+        cuts.append(member_span(key_at, end))
+    new = text
+    for start, end in sorted(cuts, reverse=True):
+        new = new[:start] + new[end:]
+    expected = _plain(doc)
+    del expected[root][name]
+    if _plain(_jsonc_parse(new)) != expected:
+        raise ValueError("the edited file would not read back as intended")
+    return new
+
+
 def write_config(path: Path, text: str) -> Path | None:
     """Replace a file the user or another program owns with `text`. Returns
     the byte-exact backup taken first, beside it, or None when there was no
@@ -716,6 +1044,13 @@ def is_registered(client: Client, path: Path | None = None) -> bool:
     try:
         return NAME in (_read_json(p).get(client.root) or {})
     except ValueError:
+        if not client.jsonc:
+            return False
+    try:
+        doc = _jsonc_parse(read_config_text(p))
+        servers = doc.get(client.root) if isinstance(doc, dict) else None
+        return isinstance(servers, dict) and NAME in servers
+    except (OSError, ValueError):
         return False
 
 
@@ -744,6 +1079,9 @@ def register(client: Client, vault: str, caller: str | None = None,
     try:
         data = _read_json(p)
     except ValueError as exc:
+        if client.jsonc:
+            return _register_jsonc(client, p, entry, out, str(exc),
+                                   snippet(client, vault, caller))
         out["reason"] = str(exc)
         out["snippet"] = snippet(client, vault, caller)
         return out
@@ -759,6 +1097,30 @@ def register(client: Client, vault: str, caller: str | None = None,
     except OSError as exc:
         out["reason"] = f"cannot write {p} ({exc})"
         out["snippet"] = snippet(client, vault, caller)
+        return out
+    out["backup"] = str(backup) if backup else None
+    out["written"] = True
+    return out
+
+
+def _register_jsonc(client: Client, p: Path, entry: dict, out: dict,
+                    strict_error: str, block: str) -> dict:
+    """Register in a file that is not strict JSON but that this client
+    reads as JSON with comments: spliced in as text, every comment kept,
+    and proven by reading it back. When it cannot be, the strict reader's
+    refusal stands and the block is printed."""
+    try:
+        new = _jsonc_set(read_config_text(p), client.root, NAME, entry)
+    except (OSError, ValueError) as exc:
+        out["reason"] = (f"{strict_error}; nor could it be edited as JSON "
+                         f"with comments ({exc})")
+        out["snippet"] = block
+        return out
+    try:
+        backup = write_config(p, new)
+    except OSError as exc:
+        out["reason"] = f"cannot write {p} ({exc})"
+        out["snippet"] = block
         return out
     out["backup"] = str(backup) if backup else None
     out["written"] = True
@@ -899,7 +1261,16 @@ def unregister(client: Client, path: Path | None = None) -> bool:
     try:
         data = _read_json(p)
     except ValueError:
-        return False
+        if not client.jsonc:
+            return False
+        try:
+            rest = _jsonc_delete(read_config_text(p), client.root, NAME)
+        except (OSError, ValueError):   # left for the user to take out
+            return False
+        if rest is None:
+            return False
+        write_config(p, rest)
+        return True
     servers = data.get(client.root) or {}
     if not isinstance(servers, dict) or NAME not in servers:
         return False
