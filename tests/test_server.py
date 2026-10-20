@@ -522,6 +522,40 @@ def test_a_locked_vault_tells_the_model_what_to_run(vault_path, monkeypatch):
     assert "compartment unlock" in str(e.value), str(e.value)
 
 
+def test_a_vault_that_is_not_there_is_not_called_locked(tmp_path,
+                                                        monkeypatch):
+    """A client configured before `compartment init` ran, or with a --vault
+    that points nowhere: every tool said the vault was locked and to run
+    `compartment unlock`, which cannot make a vault that is not there."""
+    missing = str(tmp_path / "nowhere.vault")
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    for key, value in (("vault", None), ("path", missing),
+                       ("caller", "agent")):
+        monkeypatch.setitem(server._state, key, value)
+    with pytest.raises(Exception) as e:
+        _through_the_sdk(monkeypatch, "memory_search", {"query": "anything"})
+    assert f"No vault at {missing}" in str(e.value), str(e.value)
+    assert "compartment init" in str(e.value)
+    status = json.loads(server.memory_status.__wrapped__())
+    assert status["exists"] is False and "compartment init" in \
+        status["message"]
+
+
+def test_a_failure_that_is_not_the_vaults_own_still_reaches_the_model(
+        serving, monkeypatch):
+    """mcp 2.x passes the model the text of a ToolError only. A full disk, a
+    file this user cannot read, the embedding process refusing a text, all
+    arrived as "Error executing tool memory_store" and nothing else."""
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(serving, "store", full)
+    with pytest.raises(Exception) as e:
+        _through_the_sdk(monkeypatch, "memory_store",
+                         {"text": "The staging database runs Postgres 16",
+                          "source": "from chat"})
+    assert "No space left on device" in str(e.value), str(e.value)
+
+
 @pytest.fixture()
 def own_state(monkeypatch):
     """A copy of server._state for this test, so that main() leaves nothing
@@ -533,8 +567,8 @@ def _serve(monkeypatch, vault_path, session, passphrase="CorrectHorse"):
     """server.main() with `session` in place of the stdio transport, its two
     background loops not started, and the passphrase in the environment as
     the only credential (no keychain lookup; None for no credential at
-    all). main() handles SIGTERM for the whole process, so the handler it
-    found is put back."""
+    all). main() handles SIGTERM and SIGHUP for the whole process, so the
+    handlers it found are put back."""
     from compartment import vault as vault_module
     monkeypatch.setattr(vault_module, "keychain_get", lambda path: None)
     monkeypatch.delenv("ENGRAM_PASSPHRASE", raising=False)
@@ -545,11 +579,41 @@ def _serve(monkeypatch, vault_path, session, passphrase="CorrectHorse"):
     monkeypatch.setattr(server, "_autolock_loop", lambda: None)
     monkeypatch.setattr(server, "_retag_loop", lambda: None)
     monkeypatch.setattr(server.mcp, "run", lambda *a, **k: session())
-    before = signal.getsignal(signal.SIGTERM)
+    handled = [getattr(signal, n) for n in ("SIGTERM", "SIGHUP")
+               if hasattr(signal, n)]
+    before = {sig: signal.getsignal(sig) for sig in handled}
     try:
         server.main(["--vault", vault_path, "--caller", "agent"])
     finally:
-        signal.signal(signal.SIGTERM, before)
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+
+
+def test_a_vault_path_with_a_tilde_is_the_home_one(vault, vault_path,
+                                                  own_state, monkeypatch,
+                                                  tmp_path):
+    """Run as `python -m compartment.server --vault ~/...` from a client's
+    config, where no shell expands the ~."""
+    vault.lock()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    rel = os.path.relpath(vault_path, tmp_path)
+    seen = []
+    monkeypatch.setattr(server, "_autolock_loop", lambda: None)
+    monkeypatch.setattr(server, "_retag_loop", lambda: None)
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: seen.append(
+        (server._state["path"], server._state["vault"])))
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    handled = [getattr(signal, n) for n in ("SIGTERM", "SIGHUP")
+               if hasattr(signal, n)]
+    before = {sig: signal.getsignal(sig) for sig in handled}
+    try:
+        server.main(["--vault", os.path.join("~", rel)])
+    finally:
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+    (path, opened), = seen
+    assert path == vault_path and opened is not None
 
 
 def _audited_on_disk(vault_path):
@@ -595,6 +659,39 @@ def test_a_server_stopped_with_sigterm_saves_them_too(
         signal.raise_signal(signal.SIGTERM)
     _serve(monkeypatch, vault_path, session)
     assert ended == [(os.getpid(), signal.SIGTERM, signal.SIG_DFL, "search")]
+
+
+def test_a_server_whose_vault_is_missing_still_starts(tmp_path, own_state,
+                                                      monkeypatch):
+    """With the passphrase in the environment, a vault path that pointed
+    nowhere raised FileNotFoundError out of main(): the client showed a
+    server that failed to start, the reason in a log nobody opens."""
+    ran = []
+    _serve(monkeypatch, str(tmp_path / "nowhere.vault"),
+           lambda: ran.append(True))
+    assert ran == [True] and server._state["vault"] is None
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"),
+                    reason="Windows has no SIGHUP")
+def test_a_server_whose_terminal_closes_saves_them_too(
+        vault, vault_path, own_state, monkeypatch):
+    """A client running in a terminal starts its servers in its process
+    group, and closing the terminal sends them all SIGHUP, whose default
+    action ended the server with the session's audited reads unsaved."""
+    vault.lock()
+    ended = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: ended.append(
+        (pid, sig, signal.getsignal(sig), _audited_on_disk(vault_path)[-1])))
+
+    def session():
+        _call(server.memory_search, "which Postgres version does staging run")
+        if not callable(signal.getsignal(signal.SIGHUP)):
+            pytest.fail("compartment serve leaves SIGHUP to end it on the "
+                        "spot, with nothing saved")
+        signal.raise_signal(signal.SIGHUP)
+    _serve(monkeypatch, vault_path, session)
+    assert ended == [(os.getpid(), signal.SIGHUP, signal.SIG_DFL, "search")]
 
 
 def _set(vault_path, **settings):

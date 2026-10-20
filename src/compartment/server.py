@@ -102,7 +102,12 @@ try:
     mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS,
                     version=__version__)
 except TypeError:                                       # mcp 1.x
-    mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS)
+    # WARNING, not the 1.x default of INFO, which logged "Processing request
+    # of type CallToolRequest" to stderr for every request: Cursor shows
+    # each stderr line of a server as an [error], and the root logger it
+    # configures at that level passed every library's INFO lines through.
+    mcp = MCPServer("compartment", instructions=COMPARTMENT_INSTRUCTIONS,
+                    log_level="WARNING")
     try:
         mcp._mcp_server.version = __version__
     except Exception:                                   # noqa: BLE001
@@ -193,6 +198,10 @@ def _credential_gone(v: Vault) -> bool:
     return False
 
 
+class VaultMissingError(CryptoError):
+    """The vault this server was pointed at does not exist."""
+
+
 def _vault() -> Vault:
     v = _state["vault"]
     if v is not None and not v._locked and _credential_gone(v):
@@ -211,6 +220,13 @@ def _vault() -> Vault:
         _state["vault"] = None
         stale, v = v, None
     if v is None or v._locked:
+        if not os.path.exists(_state["path"]):
+            # Not "locked": `compartment unlock` cannot make a vault that is
+            # not there, and that is what the locked message sent people to.
+            raise VaultMissingError(
+                f"No vault at {_state['path']}. Create one with `compartment "
+                "init` on this machine, or point --vault in this client's "
+                "MCP config at the vault that exists.")
         # try silent re-unlock via keychain/env (user intent persists until
         # `compartment lock` clears the credential)
         sig = _credential_signature()
@@ -404,9 +420,33 @@ def _offload(fn):
     async def wrapper(*args, **kwargs):
         def _call():
             with _toolgate:
-                return fn(*args, **kwargs)
+                try:
+                    return fn(*args, **kwargs)
+                except ToolError:
+                    raise
+                except Exception as exc:                # noqa: BLE001
+                    # mcp 2.x passes the model the text of a ToolError
+                    # only; anything else arrives as "Error executing tool
+                    # <name>" and nothing more. A full disk, a vault file
+                    # this user cannot read, the shared embedding process
+                    # refusing a text: each says what it is, so the model
+                    # can tell the user, as mcp 1.x always let it.
+                    raise _fail(exc) from exc
         return await anyio.to_thread.run_sync(_call)
     return wrapper
+
+
+def _hints(title: str, **hints) -> ToolAnnotations:
+    """A tool's annotations, with openWorldHint=False on every one.
+
+    The spec's value for an absent openWorldHint is true: "this tool may
+    interact with an open world of external entities", the way a web search
+    does. Left out, every memory tool told the client it might reach beyond
+    this machine, which is the one thing Compartment never does: clients
+    that weigh the hint (to group, flag or confirm such tools) treated a
+    fully offline vault as an internet tool. Every tool works on the local
+    vault alone, so all of them say so."""
+    return ToolAnnotations(title=title, openWorldHint=False, **hints)
 
 
 IMPORTANCE_DEFAULT = 0.5
@@ -433,8 +473,8 @@ def _importance(value: float) -> float:
     return min(1.0, max(0.0, v))
 
 
-@mcp.tool(title="Store a memory", annotations=ToolAnnotations(
-    title="Store a memory", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(title="Store a memory", annotations=_hints(
+    "Store a memory", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_store(text: str, source: str, namespace: str | None = None,
                  tags: list[str] | None = None, importance: float = 0.5,
@@ -560,8 +600,8 @@ def _prevalidate_facts(v: Vault, facts: list, namespace: str | None = None,
                 raise MemoryToolError(f"facts[{i}]: {exc}") from None
 
 
-@mcp.tool(title="Store several memories", annotations=ToolAnnotations(
-    title="Store several memories", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(title="Store several memories", annotations=_hints(
+    "Store several memories", readOnlyHint=False, destructiveHint=False))
 @_offload
 def memory_store_many(facts: list[dict], source: str,
                       namespace: str | None = None,
@@ -636,8 +676,8 @@ def memory_store_many(facts: list[dict], source: str,
     return json.dumps({"stored": results, "count": len(results)})
 
 
-@mcp.tool(title="Search memory", annotations=ToolAnnotations(
-    title="Search memory", readOnlyHint=True))
+@mcp.tool(title="Search memory", annotations=_hints(
+    "Search memory", readOnlyHint=True))
 @_offload
 def memory_search(query: str, namespace: str | None = None,
                   tags: list[str] | None = None, top_k: int = 8,
@@ -668,8 +708,9 @@ def memory_search(query: str, namespace: str | None = None,
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Link two entities", annotations=ToolAnnotations(
-    title="Link two entities", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(title="Link two entities", annotations=_hints(
+    "Link two entities", readOnlyHint=False, destructiveHint=False,
+    idempotentHint=True))
 @_offload
 def memory_link(subject: str, predicate: str, object: str,
                 src_id: str | None = None, valid_from: float | None = None,
@@ -691,8 +732,8 @@ def memory_link(subject: str, predicate: str, object: str,
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Query the memory graph", annotations=ToolAnnotations(
-    title="Query the memory graph", readOnlyHint=True))
+@mcp.tool(title="Query the memory graph", annotations=_hints(
+    "Query the memory graph", readOnlyHint=True))
 @_offload
 def memory_relations(entity: str | None = None, subject: str | None = None,
                      predicate: str | None = None, object: str | None = None,
@@ -719,8 +760,9 @@ def memory_relations(entity: str | None = None, subject: str | None = None,
     return json.dumps(out)
 
 
-@mcp.tool(title="Remove a relation", annotations=ToolAnnotations(
-    title="Remove a relation", readOnlyHint=False, destructiveHint=True))
+@mcp.tool(title="Remove a relation", annotations=_hints(
+    "Remove a relation", readOnlyHint=False, destructiveHint=True,
+    idempotentHint=True))
 @_offload
 def memory_unlink(relation_id: str) -> str:
     """Remove one relation from the memory graph (memories stay untouched)."""
@@ -731,8 +773,8 @@ def memory_unlink(relation_id: str) -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Fetch a memory", annotations=ToolAnnotations(
-    title="Fetch a memory", readOnlyHint=True))
+@mcp.tool(title="Fetch a memory", annotations=_hints(
+    "Fetch a memory", readOnlyHint=True))
 @_offload
 def memory_get(record_id: str) -> str:
     """Fetch one memory by id."""
@@ -743,8 +785,9 @@ def memory_get(record_id: str) -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Forget a memory", annotations=ToolAnnotations(
-    title="Forget a memory", readOnlyHint=False, destructiveHint=True))
+@mcp.tool(title="Forget a memory", annotations=_hints(
+    "Forget a memory", readOnlyHint=False, destructiveHint=True,
+    idempotentHint=True))
 @_offload
 def memory_forget(record_id: str, shred: bool = False) -> str:
     """Delete a memory. shred=True crypto-shreds it (unrecoverable from this vault)."""
@@ -755,8 +798,8 @@ def memory_forget(record_id: str, shred: bool = False) -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="List namespaces", annotations=ToolAnnotations(
-    title="List namespaces", readOnlyHint=True))
+@mcp.tool(title="List namespaces", annotations=_hints(
+    "List namespaces", readOnlyHint=True))
 @_offload
 def memory_list_namespaces() -> str:
     """List namespaces and record counts."""
@@ -766,8 +809,8 @@ def memory_list_namespaces() -> str:
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Recent memories", annotations=ToolAnnotations(
-    title="Recent memories", readOnlyHint=True))
+@mcp.tool(title="Recent memories", annotations=_hints(
+    "Recent memories", readOnlyHint=True))
 @_offload
 def memory_recent(limit: int = 20, namespace: str | None = None,
                   include_seeded: bool = False) -> str:
@@ -785,8 +828,8 @@ def memory_recent(limit: int = 20, namespace: str | None = None,
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Vault status", annotations=ToolAnnotations(
-    title="Vault status", readOnlyHint=True))
+@mcp.tool(title="Vault status", annotations=_hints(
+    "Vault status", readOnlyHint=True))
 @_offload
 def memory_status() -> str:
     """Vault status: lock state, counts, packs, model, index, RAM, audit head."""
@@ -801,12 +844,15 @@ def memory_status() -> str:
         # genuinely locked: say so, do not fail the call
         return json.dumps({"vault": _state["path"], "locked": True,
                            "message": str(exc)})
+    except VaultMissingError as exc:
+        return json.dumps({"vault": _state["path"], "exists": False,
+                           "message": str(exc)})
     except CryptoError as exc:
         raise _fail(exc) from exc
 
 
-@mcp.tool(title="Memory self-test", annotations=ToolAnnotations(
-    title="Memory self-test", readOnlyHint=True))
+@mcp.tool(title="Memory self-test", annotations=_hints(
+    "Memory self-test", readOnlyHint=True))
 @_offload
 def memory_selftest() -> str:
     """Health check: canned queries against the built-in seed pack, with latencies."""
@@ -834,8 +880,9 @@ def _drop_key(v: Vault) -> None:
     v._id_by_ikey = {}
 
 
-@mcp.tool(title="Lock the vault", annotations=ToolAnnotations(
-    title="Lock the vault", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(title="Lock the vault", annotations=_hints(
+    "Lock the vault", readOnlyHint=False, destructiveHint=False,
+    idempotentHint=True))
 @_offload
 def memory_lock() -> str:
     """PANIC LOCK: flush, seal, and drop key material now. Always available.
@@ -882,8 +929,9 @@ def memory_lock() -> str:
     return json.dumps(out)
 
 
-@mcp.tool(title="Unlock the vault", annotations=ToolAnnotations(
-    title="Unlock the vault", readOnlyHint=False, destructiveHint=False))
+@mcp.tool(title="Unlock the vault", annotations=_hints(
+    "Unlock the vault", readOnlyHint=False, destructiveHint=False,
+    idempotentHint=True))
 @_offload
 def memory_unlock(passphrase: str) -> str:
     """Unlock the vault for this session so the other memory tools can use it
@@ -941,11 +989,11 @@ def _save_on_exit() -> None:
 
 
 def _stop(signum, frame) -> None:
-    """SIGTERM: the save a closed stdin gets, then the end SIGTERM always
-    meant. Not SystemExit raised through the event loop: anyio tells its
-    idle worker threads to stop only when the server's task ends, and the
-    interpreter waits for them on the way out, so a server ended that way
-    never exited. A second SIGTERM during the save is ignored: the process
+    """SIGTERM or SIGHUP: the save a closed stdin gets, then the end the
+    signal always meant. Not SystemExit raised through the event loop:
+    anyio tells its idle worker threads to stop only when the server's task
+    ends, and the interpreter waits for them on the way out, so a server
+    ended that way never exited. A second signal during the save is ignored: the process
     ends as soon as the save is done."""
     signal.signal(signum, signal.SIG_IGN)
     try:
@@ -963,6 +1011,9 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     if args.assert_offline:
         offline_guard.activate()
+    # `python -m compartment.server --vault ~/...` from a client config: no
+    # shell expands the ~ there.
+    args.vault = os.path.expanduser(args.vault)
     _state["path"] = args.vault
     _state["caller"] = args.caller
     sig = _credential_signature()
@@ -975,9 +1026,24 @@ def main(argv: list[str] | None = None) -> None:
         _read_settings()
     except CryptoError:
         _state["vault"] = None  # start locked; tools will say so
+    except OSError as exc:
+        # The file is missing or unreadable. Starting anyway gives the
+        # client a server whose tools say what is wrong; dying here gave it
+        # a server that "failed to start", with the reason in a log file.
+        print(f"compartment: cannot open the vault at {args.vault}: {exc}",
+              file=sys.stderr, flush=True)
+        _state["vault"] = None
     threading.Thread(target=_autolock_loop, daemon=True).start()
     threading.Thread(target=_retag_loop, daemon=True).start()
-    signal.signal(signal.SIGTERM, _stop)
+    # SIGHUP too, where there is one: a client running in a terminal, as
+    # Claude Code, Codex and Gemini CLI do, starts its servers in its own
+    # process group, and closing that terminal hangs them all up. Its
+    # default action ended the server on the spot, and the reads it had
+    # audited only in RAM with it.
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _stop)
     try:
         mcp.run()  # stdio transport
     finally:

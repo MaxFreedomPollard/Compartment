@@ -10,6 +10,7 @@ import argparse
 import datetime
 import getpass
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -22,13 +23,48 @@ from pathlib import Path
 from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
                claude_memory, clients, gate, offline_guard, packs, selftest,
                session)
-from .acl import VaultConfig
+from .acl import ConfigError, VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, get_embedder, user_model_dir
 from .vault import Vault, keychain_clear, keychain_get, keychain_store
 from .vaultfile import read_vault_file, verify_manifest
 
-DEFAULT_VAULT = env("VAULT", str(home() / "memory.vault"))
+def _default_vault() -> str | None:
+    """COMPARTMENT_VAULT (or ENGRAM_VAULT) with ~ expanded, else
+    memory.vault in Compartment's home; None where there is no home to look
+    in.
+
+    Asked when a command runs, not when this module is imported. It was a
+    module constant, so with HOME unset and no password-database entry for
+    the uid, as for a container started with an arbitrary --user, every
+    command died at import with "Could not determine home directory", even
+    `compartment --vault /data/memory.vault serve`, which needs no home.
+    And the variable was taken literally, so a "~/..." an MCP client config
+    passes (no shell expands it there) named a folder called "~" in
+    whatever directory the client started the server in."""
+    explicit = env("VAULT")
+    if explicit:
+        return os.path.expanduser(explicit)
+    try:
+        return str(home() / "memory.vault")
+    except RuntimeError:
+        return None
+
+
+def __getattr__(name: str):
+    # DEFAULT_VAULT stays importable for anything that read it, computed
+    # when it is read.
+    if name == "DEFAULT_VAULT":
+        return _default_vault()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+#: What a command says when there is neither --vault nor a home to find the
+#: default vault in.
+NO_HOME = ("no home directory to find the vault in (HOME is not set and "
+           "this user has no entry in the password database, as for a "
+           "container started with an arbitrary --user): pass --vault PATH, "
+           "or set COMPARTMENT_VAULT")
 
 
 def _utf8_console() -> None:
@@ -89,6 +125,11 @@ def _can_prompt() -> bool:
 
 
 def _open_vault(args) -> Vault:
+    if not os.path.exists(args.vault):
+        # Before the credential: with none stored, a missing vault was
+        # reported as a locked one, and `compartment unlock` cannot help.
+        _die(f"no vault at {args.vault} (run `compartment init`, or pass "
+             "--vault PATH)")
     try:
         pw, key = Vault.resolve_credential(args.vault)
     except CryptoError:
@@ -207,9 +248,21 @@ def cmd_init(args) -> None:
         keychain_store(path, v._master)
         print("  keychain credential stored (persists across reboots)")
     elif not args.no_session:
-        session.store(path, v._master)
-        print("  unlocked: stays open until the next restart/power loss or "
-              "`compartment lock`")
+        try:
+            session.store(path, v._master)
+            print("  unlocked: stays open until the next restart/power loss "
+                  "or `compartment lock`")
+        except CryptoError as exc:
+            # No volatile holder for the per-boot secret here (no shared
+            # memory: Termux, OpenBSD, a container without /dev/shm). The
+            # vault is made and seeded; dying at this point left the rest of
+            # init undone (the save, the agent wiring, the app) over a
+            # credential the vault does not need to exist.
+            print(f"  the vault is created and stays locked: this machine "
+                  f"cannot hold an unlock credential ({exc}).")
+            print("  Give agents and commands the passphrase in "
+                  "COMPARTMENT_PASSPHRASE, or check it with "
+                  "`compartment unlock --once`.")
     st = v.status()
     v.save()
     # Before the app appears, so the first thing anyone sees is a panel whose
@@ -305,6 +358,25 @@ _APP_IS_AT = {
 }
 
 
+def _status_bar_argv(app, vault: str) -> list[str]:
+    """The command that starts the status bar app now.
+
+    On Windows the program start at sign-in uses (systray._autostart_parts):
+    pythonw.exe beside this interpreter where there is one. compartment.exe
+    is a console program, and DETACHED_PROCESS only keeps it off this
+    terminal's console: the Python it starts could still open a console
+    window of its own behind a tray app that has no window."""
+    if sys.platform == "win32":
+        parts = getattr(app, "_autostart_parts", None)
+        exe = parts(vault)[0] if parts else None
+        if exe and Path(exe).name.lower() == "pythonw.exe":
+            return [exe, "-m", "compartment.cli", "--vault", vault, "tray"]
+    exe = shutil.which("compartment")
+    return ([exe, "--vault", vault, "menubar"] if exe else
+            [sys.executable, "-m", "compartment.cli", "--vault", vault,
+             "menubar"])
+
+
 def _start_status_bar_app(vault: str) -> None:
     """Put the status bar app up now, and again at every login.
 
@@ -326,6 +398,24 @@ def _start_status_bar_app(vault: str) -> None:
         print("  The CLI and the MCP server are ready, and `compartment "
               "dash` opens the vault in a browser.")
         return
+    if linux and not _linux_gui_available():
+        # Before start at login is registered, not after: an autostart
+        # entry or a systemd user unit for a panel that cannot import
+        # tkinter fails at every login from then on, with nothing on screen
+        # to say why.
+        hint = getattr(app, "tk_install_hint", None)
+        print("  the panel needs tkinter, which this Python does not have.")
+        print("  Quickest fix, a Python that includes it:")
+        print("    uv tool install compartment")
+        print("  or give this Python tkinter:")
+        print(f"    {hint()}" if hint else
+              "    install your distribution's Tk package for Python "
+              "(often python3-tk or python3-tkinter)")
+        print("  then turn start at login on with `compartment panel "
+              "--login on`.")
+        print("  Everything else works now: the CLI, the MCP server, and "
+              "`compartment dash`.")
+        return
     state = ""
     try:
         state = app.set_login(True, vault)
@@ -340,15 +430,6 @@ def _start_status_bar_app(vault: str) -> None:
             print("  applications menu entry: on")
     except Exception as exc:                     # noqa: BLE001
         print(f"  could not register the app ({exc})")
-    if linux and not _linux_gui_available():
-        print("  the panel needs tkinter, which this Python does not have.")
-        print("  Quickest fix, a Python that includes it:")
-        print("    uv tool install compartment")
-        print("  or install your distribution's package (Debian/Ubuntu: "
-              "python3-tk, Fedora: python3-tkinter).")
-        print("  Everything else works now: the CLI, the MCP server, and "
-              "`compartment dash`.")
-        return
     # Let the supervisor start it where there is one, so the copy that comes
     # up is the copy that gets restarted if it dies. On macOS bootstrapping
     # the agent a moment ago already did it (RunAtLoad); on Linux and Windows
@@ -368,10 +449,7 @@ def _start_status_bar_app(vault: str) -> None:
         print("  start at login is registered, but no icon appeared; "
               "starting one now")
     try:
-        exe = shutil.which("compartment")
-        argv = ([exe, "--vault", vault, "menubar"] if exe else
-                [sys.executable, "-m", "compartment.cli", "--vault", vault,
-                 "menubar"])
+        argv = _status_bar_argv(app, vault)
         # stdin included. Without it the app inherits this process's stdin,
         # sees a terminal on the other end, decides it was typed at a prompt
         # and relaunches itself detached - so the copy the installer started
@@ -428,10 +506,26 @@ def _wait_for_status_bar_app(timeout: float = 15.0) -> bool:
 
 
 def _install_kind() -> tuple[str, list[str]]:
-    """How this copy was installed, and the command that upgrades it."""
-    exe = Path(sys.argv[0]).resolve()
-    if "uv/tools" in str(exe) or shutil.which("uv") and "uv/tools" in str(
-            Path(shutil.which("compartment") or "").resolve()):
+    """How this copy was installed, and the command that upgrades it.
+
+    Asked of the environment this interpreter runs in, which each tool marks
+    the same way on every platform: `uv tool install` leaves uv-receipt.toml
+    at its root and `pipx install` leaves pipx_metadata.json. The path of the
+    running script, which is all this looked at before, says "uv/tools" only
+    where the launcher is a symlink into uv's directory and the separators
+    are forward slashes: on Windows, where uv's launcher is an .exe of its
+    own in ~/.local/bin, a uv install was taken for pip, and `update` ran
+    `python -m pip` in an environment uv builds without pip. A pipx install
+    was taken for pip everywhere: `update` left pipx's record of it stale,
+    and the last step `uninstall` printed left pipx a broken install."""
+    prefix = Path(sys.prefix)
+    if (prefix / "uv-receipt.toml").is_file():
+        return "uv", ["uv", "tool", "upgrade", "compartment"]
+    if (prefix / "pipx_metadata.json").is_file():
+        return "pipx", ["pipx", "upgrade", "compartment"]
+    exe = Path(sys.argv[0]).resolve().as_posix()
+    if "uv/tools" in exe or shutil.which("uv") and "uv/tools" in Path(
+            shutil.which("compartment") or "").resolve().as_posix():
         return "uv", ["uv", "tool", "upgrade", "compartment"]
     return "pip", [sys.executable, "-m", "pip", "install", "--upgrade",
                    "compartment"]
@@ -443,6 +537,7 @@ def cmd_update(args) -> None:
     if args.source:
         target = "git+https://github.com/MaxFreedomPollard/Compartment@main"
         cmd = (["uv", "tool", "install", "--force", target] if kind == "uv"
+               else ["pipx", "install", "--force", target] if kind == "pipx"
                else [sys.executable, "-m", "pip", "install", "--upgrade",
                      "--force-reinstall", target])
     print(f"Compartment {__version__} - updating ({kind} install)")
@@ -604,26 +699,25 @@ def cmd_uninstall(args) -> None:
                       f"compartment from {client.config_path()} by hand")
         except Exception as exc:                         # noqa: BLE001
             print(f"  {client.display}: {exc}")
-    openclaw = Path(os.environ.get("OPENCLAW_HOME",
-                                   Path.home() / ".openclaw")) / "openclaw.json"
+    openclaw = None
     try:
+        from . import menubar
+        openclaw = menubar._openclaw_config()
         cfg = (json.loads(openclaw.read_text(encoding="utf-8"))
                if openclaw.is_file() else {})
-        servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
-        if isinstance(servers, dict) and "compartment" in servers:
-            del servers["compartment"]
+        if isinstance(cfg, dict) and _openclaw_unregister(cfg):
             # As integrate wrote it: backed up, then replaced whole.
             clients.write_config(openclaw, json.dumps(cfg, indent=2))
             print(f"  OpenClaw registration removed from {openclaw}")
     except Exception as exc:                             # noqa: BLE001
-        print(f"  OpenClaw: {openclaw} left as it is ({exc})")
+        print(f"  OpenClaw: {openclaw or 'its config'} left as it is ({exc})")
     try:
         md = _remove_managed_claude_md()
         if md:
             print(f"  compartment block removed from {md}")
     except Exception as exc:                             # noqa: BLE001
         print(f"  CLAUDE.md: {exc}")
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    hermes_home = _hermes_home()
     plugin = hermes_home / "plugins" / "compartment"
     try:
         files = ("__init__.py", "plugin.yaml")
@@ -665,6 +759,7 @@ def cmd_uninstall(args) -> None:
         print("  delete it yourself, or re-run with --purge, once you are sure")
     kind, _ = _install_kind()
     final = ("uv tool uninstall compartment" if kind == "uv"
+             else "pipx uninstall compartment" if kind == "pipx"
              else f"{sys.executable} -m pip uninstall compartment")
     print("\nOne step left, which cannot remove itself while it is running:")
     print(f"  {final}")
@@ -730,17 +825,28 @@ def cmd_unlock(args) -> None:
     v.save()
 
 
+def _signing_identity(path: str | None, creator: str) -> dict:
+    """The Ed25519 identity that signs a sealed vault or a pack, made on
+    first use.
+
+    The file holds the private seed, so it is written readable by its owner
+    alone: written plainly it took the umask's 0644, and any account on the
+    machine that could read it could sign a pack this user's keys trust, or
+    seal a vault `compartment verify` reports as signed by them."""
+    ident_path = Path(path) if path else home() / "identity.json"
+    if ident_path.exists():
+        return json.loads(ident_path.read_text(encoding="utf-8"))
+    identity = packs.new_identity(creator)
+    ident_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_private(str(ident_path), json.dumps(identity, indent=2))
+    print(f"generated signing identity → {ident_path} (keep it private)")
+    return identity
+
+
 def cmd_lock(args) -> None:
     if args.sign:
         v = _open_vault(args)
-        ident_path = Path(args.identity)
-        if ident_path.exists():
-            identity = json.loads(ident_path.read_text(encoding="utf-8"))
-        else:
-            identity = packs.new_identity(args.creator)
-            ident_path.parent.mkdir(parents=True, exist_ok=True)
-            ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
-            print(f"generated signing identity → {ident_path} (keep it private)")
+        identity = _signing_identity(args.identity, args.creator)
         v.lock(signing_key=packs.load_signing_key(identity))
         print(f"vault sealed + signed by {identity['signer']} "
               f"(pub {identity['pub_hex'][:16]}…); verify with `compartment verify`")
@@ -775,6 +881,25 @@ def cmd_status(args) -> None:
         _print({"vault": args.vault, "locked": False, "error": str(exc)})
         return
     _print(v.status())
+
+
+def _write_private(path: str, text: str) -> None:
+    """Write decrypted memory text where only this user can read it.
+
+    Readable by its owner alone, as the vault file is (VAULT_MODE): an
+    export is every memory the vault holds, credentials included, in the
+    clear, and a plain write left it to the umask, 0644 on most systems, so
+    any local account could read one made into /tmp or a shared home.
+    fchmod for a file that already existed, whose mode O_CREAT leaves as it
+    was."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if hasattr(os, "fchmod"):
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
+        f.write(text)
 
 
 def cmd_store(args) -> None:
@@ -829,8 +954,7 @@ def cmd_atomize(args) -> None:
     lines = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     if args.out:
         try:
-            with open(args.out, "w", encoding="utf-8") as f:
-                f.write(lines)
+            _write_private(args.out, lines)
         except OSError as exc:
             _die(f"cannot write {args.out}: {exc}")
     else:
@@ -1005,11 +1129,29 @@ def cmd_menubar(args) -> None:
     sys.exit(app.run(args.vault, show=args.show, render_to=args.render))
 
 
+def _hook_payload() -> io.StringIO:
+    """The hook's JSON from stdin, decoded as the UTF-8 Claude Code writes.
+
+    Python decodes a piped stdin with the locale's encoding, which on
+    Windows is the ANSI code page: JSON.stringify leaves non-ASCII as it
+    is, so the path of a memory note under C:\\Users\\José\\.claude arrived
+    as C:\\Users\\JosÃ©\\.claude, which does not exist, and every capture on
+    such a machine was dropped as "file no longer exists"."""
+    buf = getattr(sys.stdin, "buffer", None)
+    try:
+        raw = buf.read() if buf is not None else sys.stdin.read()
+    except (OSError, ValueError):
+        raw = b""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8-sig", errors="replace")
+    return io.StringIO(raw)
+
+
 def cmd_hook(args) -> None:
     """Deterministic capture, so remembering does not depend on the model
     choosing to call a tool."""
     if args.hook_cmd == "capture":
-        res = claude_hooks.capture(vault_path=args.vault)
+        res = claude_hooks.capture(_hook_payload(), vault_path=args.vault)
         if args.json:
             _print(res)
         sys.exit(0)          # never fail a user's edit over a memory write
@@ -1026,12 +1168,22 @@ def cmd_hook(args) -> None:
         print("  Claude Code memory writes now land in the vault "
               "automatically (restart Claude Code to load it)")
     elif args.hook_cmd == "uninstall":
-        print("capture hook removed" if claude_hooks.uninstall()
+        # A settings.json that is not JSON (hand-edited, cut short) is
+        # refused with ValueError naming the file, as install already said.
+        try:
+            removed = claude_hooks.uninstall()
+        except ValueError as exc:
+            _die(str(exc))
+        print("capture hook removed" if removed
               else "no compartment hook was installed")
     else:
         # No subcommand given (bare `compartment hook`) behaves like `status`,
         # then points at the rest of the group instead of failing.
-        print("installed" if claude_hooks.is_installed() else "not installed")
+        try:
+            installed = claude_hooks.is_installed()
+        except ValueError as exc:
+            _die(str(exc))
+        print("installed" if installed else "not installed")
         if getattr(args, "hook_cmd", None) is None:
             print("  subcommands: status | install | uninstall | capture")
 
@@ -1145,7 +1297,7 @@ def cmd_export(args) -> None:
     data = v.export_jsonl()
     if args.plaintext:
         print("WARNING: exporting PLAINTEXT memories to disk", file=sys.stderr)
-        Path(args.out).write_text(data, encoding="utf-8")
+        _write_private(args.out, data)
         # Count the lines actually written rather than newline characters:
         # export_jsonl ends with a trailing newline only when it is non-empty,
         # so a newline count is one off the moment that changes.
@@ -1156,9 +1308,49 @@ def cmd_export(args) -> None:
     _save_reads(v)
 
 
+def _read_text_file(path: str) -> str:
+    """A text file the user handed the CLI, as text, whatever Windows tool
+    saved it.
+
+    PowerShell 5.1 writes UTF-8 with a byte-order mark (`Out-File -Encoding
+    utf8`) and UTF-16 for a plain `>` redirect; Notepad wrote a BOM for
+    years. Read as bare UTF-8, the first gave JSONDecodeError "Unexpected
+    UTF-8 BOM" and the second UnicodeDecodeError, both as tracebacks. The
+    encoding is found as json finds it (UTF-8 with or without a BOM,
+    UTF-16, UTF-32), and anything that does not decode is refused by
+    name."""
+    raw = Path(path).read_bytes()
+    try:
+        # json's own detection: the BOM where there is one, else the zero
+        # bytes an ASCII "{" leaves in UTF-16 or UTF-32, else UTF-8.
+        enc = json.detect_encoding(raw)
+        return raw.decode("utf-8-sig" if enc == "utf-8" else enc)
+    except UnicodeDecodeError as exc:
+        _die(f"{path} is not UTF-8 text (byte {exc.start}): save it as "
+             "UTF-8 and import it again")
+
+
+def _check_jsonl(path: str, text: str) -> None:
+    """Refuse a JSONL file by line number before anything is imported: a
+    line that is not JSON, or a record with no text, ended the import in a
+    traceback that named neither the file's line nor the field."""
+    for no, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError as exc:
+            _die(f"{path}, line {no}: not JSON ({exc.msg}). Each line must "
+                 "be one record, as `compartment export` writes them")
+        if not isinstance(rec, dict) or not isinstance(rec.get("text"), str):
+            _die(f"{path}, line {no}: a record needs a \"text\" string")
+
+
 def cmd_import(args) -> None:
+    text = _read_text_file(args.file)
+    _check_jsonl(args.file, text)
     v = _open_vault(args)
-    n = v.import_jsonl(Path(args.file).read_text(encoding="utf-8"), namespace=args.namespace)
+    n = v.import_jsonl(text, namespace=args.namespace)
     print(f"imported {n} {'record' if n == 1 else 'records'}")
 
 
@@ -1451,13 +1643,7 @@ def cmd_pack_build(args) -> None:
         _die("source must be a .jsonl, .csv, or a directory of .md files")
     if not records:
         _die("no records found in source")
-    ident_path = Path(args.identity)
-    if ident_path.exists():
-        identity = json.loads(ident_path.read_text(encoding="utf-8"))
-    else:
-        identity = packs.new_identity(args.creator)
-        ident_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
-        print(f"generated new signing identity → {ident_path} (keep it private)")
+    identity = _signing_identity(args.identity, args.creator)
     emb = get_embedder(DEFAULT_MODEL)
     vectors = emb.embed_passages([r["text"] for r in records])
     pw = None
@@ -1548,13 +1734,25 @@ _CLAUDE_MD_BODY = (
     "`memory_search` does not return, store it into compartment.")
 
 
+def _claude_md_path() -> Path:
+    """The user CLAUDE.md Claude Code loads: CLAUDE_MD when set (an
+    override for tests and unusual setups), else CLAUDE.md in Claude
+    Code's own directory, which CLAUDE_CONFIG_DIR moves. The block was
+    always written to ~/.claude/CLAUDE.md, which a Claude Code run with
+    CLAUDE_CONFIG_DIR (a second account, a dotfiles tree) never reads."""
+    explicit = os.environ.get("CLAUDE_MD")
+    if explicit:
+        return Path(explicit)
+    return claude_memory.claude_config_dir() / "CLAUDE.md"
+
+
 def _write_managed_claude_md() -> Path:
     """Write an idempotent, sentinel-fenced compartment block into the user's
     CLAUDE.md. Only ever rewrites BETWEEN the markers - the user's own text
     above and below is never touched; re-running updates the block in place.
     (Belt-and-suspenders: the authoritative behavioral instruction rides the
     MCP `initialize` handshake; this covers hosts that under-weight it.)"""
-    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    md = _claude_md_path()
     md.parent.mkdir(parents=True, exist_ok=True)
     block = f"{_CLAUDE_MD_BEGIN}\n{_CLAUDE_MD_BODY}\n{_CLAUDE_MD_END}"
     text = md.read_text(encoding="utf-8") if md.exists() else ""
@@ -1574,7 +1772,7 @@ def _remove_managed_claude_md() -> Path | None:
     """Take the fenced block back out of the user's CLAUDE.md: the inverse
     of _write_managed_claude_md, leaving everything outside the markers as
     it is. Returns the file, or None when it holds no block."""
-    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    md = _claude_md_path()
     if not md.is_file():
         return None
     text = md.read_text(encoding="utf-8")
@@ -1703,7 +1901,7 @@ def _refresh_installed() -> list[str]:
     the user had turned off), no registration, no import. An edited skill is
     backed up before it is replaced, as `integrate` does."""
     done: list[str] = []
-    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    md = _claude_md_path()
     try:
         before = md.read_text(encoding="utf-8") if md.is_file() else ""
         if _CLAUDE_MD_BEGIN in before and _CLAUDE_MD_END in before:
@@ -1728,7 +1926,7 @@ def _refresh_installed() -> list[str]:
             line += f" (the previous copy is kept at {r['backup']})"
         done.append(line)
 
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    hermes_home = _hermes_home()
     plug_src = _data_dir() / "hermes-plugin"
     plug_dst = hermes_home / "plugins" / "compartment"
     if (plug_dst / "plugin.yaml").is_file():
@@ -1879,6 +2077,78 @@ def _integrate_client(client, args, brief: bool = False) -> None:
 #: small step for that program; one busy updating itself is no reason to
 #: hold an install for as long as that takes.
 AGENT_TOOL_TIMEOUT = 120
+def _quit_claude_desktop(platform: str | None = None) -> str:
+    """How to make Claude Desktop load a config just written.
+
+    Quit, not close: closing its window leaves Claude Desktop running (in
+    the notification area on Windows), so it never rereads the file, and a
+    copy still running can write the config it holds back over this one.
+    "Restart Claude Desktop" read as closing the window."""
+    platform = platform or sys.platform
+    where = ("right-click its icon in the notification area and choose "
+             "Quit" if platform == "win32" else
+             "Claude > Quit Claude, or Cmd-Q" if platform == "darwin"
+             else "quit it")
+    return (f"Quit Claude Desktop completely ({where}; closing its window "
+            "leaves it running), then open it again to load it.")
+
+
+def _hermes_home() -> Path:
+    """Hermes Agent's home, found the way Hermes finds it
+    (hermes_constants.get_hermes_home): HERMES_HOME, with ~ and variables
+    expanded, else the platform default.
+
+    On Windows that default is %LOCALAPPDATA%\\hermes, not ~/.hermes, and the
+    Windows installer does not export HERMES_HOME. Looking only in ~/.hermes,
+    `integrate hermes` on native Windows put the provider plugin where
+    Hermes never reads it and reported it installed, never found the
+    Hermes venv to put compartment into, and uninstall and the refresh
+    after an update looked in the same wrong place."""
+    from . import menubar           # one rule for the CLI and the panel
+    return menubar.hermes_home()
+
+
+def _openclaw_register(cfg: dict, entry: dict) -> None:
+    """Put compartment's entry where current OpenClaw reads MCP servers,
+    `mcp.servers`, and take back one an earlier release wrote at the top
+    level as `mcpServers`.
+
+    OpenClaw's root schema rejects keys it does not know
+    (src/config/zod-schema.ts), so that top-level entry was never loaded as
+    a server, and could keep the whole config from loading."""
+    mcp = cfg.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise ValueError('its "mcp" is not a JSON object')
+    servers = mcp.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError('its "mcp.servers" is not a JSON object')
+    servers["compartment"] = entry
+    _drop_legacy_openclaw_entry(cfg)
+
+
+def _drop_legacy_openclaw_entry(cfg: dict) -> bool:
+    legacy = cfg.get("mcpServers")
+    if not isinstance(legacy, dict) or "compartment" not in legacy:
+        return False
+    del legacy["compartment"]
+    if not legacy:
+        del cfg["mcpServers"]         # a key OpenClaw would refuse
+    return True
+
+
+def _openclaw_unregister(cfg: dict) -> bool:
+    """Take compartment out of an OpenClaw config, from `mcp.servers` and
+    from the top-level `mcpServers` earlier releases wrote. True if
+    anything was removed."""
+    removed = _drop_legacy_openclaw_entry(cfg)
+    mcp = cfg.get("mcp")
+    servers = mcp.get("servers") if isinstance(mcp, dict) else None
+    if isinstance(servers, dict) and "compartment" in servers:
+        del servers["compartment"]
+        removed = True
+    return removed
+
+
 #: The `import compartment` check in Hermes's own interpreter.
 HERMES_IMPORT_TIMEOUT = 30
 #: pip installing compartment into Hermes's own environment.
@@ -1892,7 +2162,7 @@ def _integrate_target(args) -> None:
     vault = args.vault
 
     if target == "hermes":
-        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        hermes_home = _hermes_home()
         plug_src = _data_dir() / "hermes-plugin"
         plug_dst = hermes_home / "plugins" / "compartment"
         plug_dst.mkdir(parents=True, exist_ok=True)
@@ -1900,7 +2170,8 @@ def _integrate_target(args) -> None:
             shutil.copy2(plug_src / f, plug_dst / f)
         print(f"✓ provider plugin installed → {plug_dst}")
         # compartment must be importable from Hermes's own venv
-        hermes_py = hermes_home / "hermes-agent" / "venv" / "bin" / "python"
+        hermes_py = hermes_home / "hermes-agent" / "venv" / (
+            "Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         if hermes_py.exists():
             # No stdin for any program run here: a question one of them asks
             # must fail, not wait on the user's keyboard, and a failure or a
@@ -1954,8 +2225,8 @@ def _integrate_target(args) -> None:
         compartment_bin = clients.executable()
         entry = {"command": compartment_bin,
                  "args": ["--vault", vault, "--caller", "openclaw", "serve"]}
-        cfg_path = Path(os.environ.get("OPENCLAW_HOME",
-                                       Path.home() / ".openclaw")) / "openclaw.json"
+        from . import menubar
+        cfg_path = menubar._openclaw_config()
         wrote = False
         # An OpenClaw that has not written its config yet is a normal first
         # install, not a reason to hand the JSON back for pasting: it reads
@@ -1967,7 +2238,7 @@ def _integrate_target(args) -> None:
                        if existed else {})
                 if not isinstance(cfg, dict):      # null, a list: not a config
                     raise ValueError("not a JSON object")
-                cfg.setdefault("mcpServers", {})["compartment"] = entry
+                _openclaw_register(cfg, entry)
                 # A byte-exact backup first, then the file replaced whole.
                 backup = clients.write_config(cfg_path,
                                               json.dumps(cfg, indent=2))
@@ -1979,9 +2250,10 @@ def _integrate_target(args) -> None:
             except (ValueError, OSError) as exc:
                 print(f"  could not edit {cfg_path} automatically ({exc});")
         if not wrote:
-            print("  add this under \"mcpServers\" in ~/.openclaw/openclaw.json, "
+            print(f"  add this to {cfg_path}, merged into what is there, "
                   "then run `openclaw gateway restart`:")
-            print(json.dumps({"compartment": entry}, indent=2))
+            print(json.dumps({"mcp": {"servers": {"compartment": entry}}},
+                             indent=2))
         if not os.path.exists(vault):
             print(f"\n! no vault at {vault} - run `compartment init` to create one")
 
@@ -2027,7 +2299,7 @@ def _integrate_target(args) -> None:
                 print(f"  ✓ registered in {reg['config']}")
                 if reg["backup"]:
                     print(f"    (previous config backed up to {reg['backup']})")
-                print("    Restart Claude Desktop to load it.")
+                print(f"    {_quit_claude_desktop()}")
             except ValueError as exc:    # malformed config - never guess
                 print(f"  ! {exc}")
                 print("    fix the file, then run `compartment integrate "
@@ -2187,8 +2459,10 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         prog="compartment",
         description="Compartment - high-security offline vector memory for AI agents")
-    ap.add_argument("--vault", default=DEFAULT_VAULT,
-                    help=f"vault path (default {DEFAULT_VAULT})")
+    default_vault = _default_vault()
+    ap.add_argument("--vault", default=default_vault,
+                    help="vault path (default "
+                         f"{default_vault or 'none: no home directory'})")
     ap.add_argument("--caller", default="user")
     ap.add_argument("--keyfile",
                     help="second-factor keyfile (only needed if `compartment 2fa "
@@ -2232,7 +2506,9 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("lock", help="clear stored credential (vault stays sealed)")
     p.add_argument("--sign", action="store_true",
                    help="seal with an Ed25519 signed manifest before locking")
-    p.add_argument("--identity", default=str(home() / "identity.json"))
+    p.add_argument("--identity", default=None,
+                   help="signing identity (default identity.json in "
+                        "Compartment's home)")
     p.add_argument("--creator", default="vault-owner")
     p.set_defaults(fn=cmd_lock)
 
@@ -2535,7 +2811,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--version", default="1.0.0")
     p.add_argument("--description", default="")
     p.add_argument("--creator", default="pack-author")
-    p.add_argument("--identity", default=str(home() / "identity.json"))
+    p.add_argument("--identity", default=None,
+                   help="signing identity (default identity.json in "
+                        "Compartment's home)")
     p.add_argument("--encrypt", action="store_true")
     p.add_argument("--out")
     p.set_defaults(fn=cmd_pack_build)
@@ -2615,13 +2893,104 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_setup)
     ps.set_defaults(fn=cmd_setup, setup_cmd=None)
 
+    _accept_global_options_anywhere(ap)
     args = ap.parse_args(argv)
+    if args.vault is not None:
+        # "~/..." from an MCP client config or a quoted shell argument:
+        # nothing between there and here expands it.
+        args.vault = os.path.expanduser(args.vault)
+    elif args.fn not in (cmd_embed_daemon, cmd_setup):
+        _die(NO_HOME)
     if args.assert_offline:
         offline_guard.activate()
     try:
         args.fn(args)
-    except CryptoError as exc:
+        # Inside the try: buffered output reaches a pipe here, and a reader
+        # that has gone away fails this flush, not one at interpreter exit.
+        # A stdout already closed is left alone: mcp 1.x's stdio transport
+        # closes the buffer under sys.stdout when `serve` ends.
+        if not sys.stdout.closed:
+            sys.stdout.flush()
+    except (CryptoError, ConfigError) as exc:
+        # ConfigError: a <vault>.config.json that cannot be used, which
+        # names the file and what to do; a ValueError, so it was a
+        # traceback.
         _die(str(exc))
+    except BrokenPipeError:
+        # `compartment recent --all | head`: the reader took what it wanted
+        # and closed the pipe. Not a failure of the command, and not a
+        # traceback; stdout goes to the null device so that the flush at
+        # exit does not raise the same error again.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        sys.exit(130)
+    except OSError as exc:
+        # A file named on the command line that is not there or cannot be
+        # read, a folder that cannot be written, a full disk: said in one
+        # line naming the path, instead of a traceback an agent running
+        # the CLI has to read to the bottom of to find the same thing.
+        _die(_os_error_message(exc, args))
+
+
+#: The options of `compartment` itself, which every subcommand also takes
+#: after its own name. Help text only: the value comes from the top level.
+_GLOBAL_OPTIONS = (
+    (("--vault",), {"help": "vault path (also accepted before the "
+                            "subcommand)"}),
+    (("--caller",), {"help": "who is asking, for the ACL and the audit log"}),
+    (("--keyfile",), {"help": "second-factor keyfile, if 2FA moved it"}),
+    (("--assert-offline",), {"action": "store_true",
+                             "help": "abort if anything attempts network "
+                                     "access"}),
+)
+
+
+def _accept_global_options_anywhere(parser: argparse.ArgumentParser) -> None:
+    """Let `--vault`, `--caller`, `--keyfile` and `--assert-offline` follow
+    the subcommand as well as precede it.
+
+    argparse takes a parent's options only before the subcommand, so
+    `compartment serve --vault ~/v.vault` died with "unrecognized arguments:
+    --vault". That is the order MCP client configs are written in by hand
+    and by registries ("command": "compartment", "args": ["serve",
+    "--vault", ...]), and the order people type, and `compartment serve
+    --help` did not mention --vault at all. Each subcommand that does not
+    define one of these itself gets it with a SUPPRESS default, so it sets
+    the value only when it is given there, and the top-level value or
+    default stands otherwise."""
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        seen = set()
+        for child in action.choices.values():
+            if id(child) in seen:               # an alias: the same parser
+                continue
+            seen.add(id(child))
+            for flags, kw in _GLOBAL_OPTIONS:
+                if not any(f in child._option_string_actions for f in flags):
+                    child.add_argument(*flags, default=argparse.SUPPRESS,
+                                       **kw)
+            _accept_global_options_anywhere(child)
+
+
+def _os_error_message(exc: OSError, args) -> str:
+    """One line for an OSError that ended a command, naming the file."""
+    where = exc.filename
+    vault = getattr(args, "vault", None)
+    if (isinstance(exc, FileNotFoundError) and where is not None and vault
+            and os.path.abspath(os.fsdecode(where)) == os.path.abspath(vault)):
+        return (f"no vault at {vault} (run `compartment init`, or pass "
+                "--vault PATH)")
+    if where is None:
+        return str(exc)
+    if exc.filename2 is not None:
+        where = f"{os.fsdecode(where)} -> {os.fsdecode(exc.filename2)}"
+    return f"{exc.strerror or exc}: {os.fsdecode(where)}"
 
 
 if __name__ == "__main__":

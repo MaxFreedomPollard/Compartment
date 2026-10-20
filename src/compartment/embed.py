@@ -12,6 +12,9 @@ import dataclasses
 import functools
 import json
 import os
+import re
+import sys
+import sysconfig
 import threading
 from pathlib import Path
 
@@ -86,12 +89,37 @@ class ModelError(CryptoError):
     pass
 
 
+#: Every code point the tokenizer cannot take. In a Python str a code point
+#: in U+D800..U+DFFF is always a lone surrogate - a pair is one code point
+#: above U+FFFF - and it gets there as half of a cut emoji: a JSON "\\ud83d"
+#: escape an MCP client may legally send, or a string sliced mid-pair.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def well_formed(text: str) -> str:
+    """`text` with each lone surrogate replaced by U+FFFD.
+
+    tokenizers 0.16 and later refuse a str holding one with TypeError
+    ("TextInputSequence must be str"), from every embedding call, so a
+    store or a search with half an emoji in it failed outright, in the
+    shared daemon and in-process alike, while 0.15 let it through. Every
+    path into the tokenizer comes through here, so the daemon and this
+    process embed such a text identically, and as the replacement
+    character any UTF-8 decoder would have put in its place."""
+    return _LONE_SURROGATE.sub("\ufffd", text) if text else text
+
+
 def bundled_model_dir() -> Path:
     return Path(__file__).resolve().parent / "models" / DEFAULT_MODEL
 
 
 def user_model_dir() -> Path:
-    return Path(env("MODEL_DIR", home() / "models"))
+    # COMPARTMENT_MODEL_DIR first, and the home only without it: the default
+    # was computed even when the variable was set, so with no home directory
+    # (HOME unset and no password-database entry) naming the folder did not
+    # help, and a downloaded model could not be found.
+    explicit = env("MODEL_DIR")
+    return Path(explicit) if explicit else home() / "models"
 
 
 def resolve_model_dir(name: str) -> Path:
@@ -179,9 +207,124 @@ def _missing_runtime_error(exc: ImportError) -> ModelError | None:
         return ModelError(
             "onnxruntime cannot load: this Windows machine is missing the "
             "Microsoft Visual C++ runtime it is built against. Install "
-            "https://aka.ms/vs/17/release/vc_redist.x64.exe (one small "
-            "installer, no restart needed), then run this command again.")
+            f"https://aka.ms/vs/17/release/vc_redist.{_vc_redist_arch()}.exe "
+            "(one small installer, no restart needed), then run this "
+            "command again.")
     return None
+
+
+def _vc_redist_arch() -> str:
+    """Which Visual C++ runtime installer this Python needs: the one for
+    the architecture the interpreter was BUILT for, not the machine's. On
+    Windows on ARM an ARM64 Python needs vc_redist.arm64.exe, and the x64
+    installer the message used to name installs a runtime it cannot load;
+    an x64 Python running under emulation there needs the x64 one."""
+    plat = sysconfig.get_platform()
+    if plat == "win-arm64":
+        return "arm64"
+    if plat == "win32":
+        return "x86"
+    return "x64"
+
+
+def _runtime_not_installed(exc: ModuleNotFoundError) -> ModelError | None:
+    """The actionable form of onnxruntime or tokenizers simply not being
+    importable, or None for any other missing module.
+
+    pip installs both with Compartment wherever it can, but onnxruntime
+    publishes no wheel for some platforms (musl/Alpine, 32-bit ARM, the
+    BSDs, Android), where an install made with --no-deps or from a
+    distribution's packages can lack it. The bare error was a traceback in
+    the CLI, and in the MCP server, which passes the model only the text of
+    its own errors, "Error executing tool" with no reason at all."""
+    if exc.name not in ("onnxruntime", "tokenizers"):
+        return None
+    return ModelError(
+        f"{exc.name} is not installed for this Python ({sys.executable}), "
+        "and embedding needs it. Install it with: "
+        f"{sys.executable} -m pip install {exc.name}. Where pip has no "
+        f"{exc.name} build for this platform ({sysconfig.get_platform()}), "
+        "install your system's own package of it, or run Compartment on a "
+        "glibc-based Python (a Debian or Ubuntu image rather than Alpine).")
+
+
+def _cgroup_cpu_limit(root: str = "/sys/fs/cgroup",
+                      own: str = "/proc/self/cgroup") -> float | None:
+    """The CPUs a cgroup quota grants this process (2.0 for `docker run
+    --cpus 2`), or None where no quota applies.
+
+    cgroup v2 keeps "<quota> <period>" in cpu.max, at every level of the
+    hierarchy, and the tightest one on the way up from this process's own
+    group is the one that binds; inside a container the namespace makes
+    that group the root. cgroup v1 keeps the two numbers in separate files
+    of the cpu controller's mount."""
+    limits: list[float] = []
+    rel = None
+    try:
+        with open(own, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("0::"):
+                    rel = line[3:].strip()
+    except OSError:
+        pass
+    if rel is not None:
+        top = Path(root)
+        here = top / rel.lstrip("/")
+        while here == top or top in here.parents:
+            try:
+                quota, period = (here / "cpu.max").read_text(
+                    encoding="ascii").split()[:2]
+                if quota != "max" and int(period) > 0:
+                    limits.append(int(quota) / int(period))
+            except (OSError, ValueError):
+                pass
+            if here == top:
+                break
+            here = here.parent
+    for d in ("cpu", "cpu,cpuacct", "cpuacct,cpu"):
+        try:
+            quota = int((Path(root) / d / "cpu.cfs_quota_us").read_text(
+                encoding="ascii"))
+            period = int((Path(root) / d / "cpu.cfs_period_us").read_text(
+                encoding="ascii"))
+        except (OSError, ValueError):
+            continue
+        if quota > 0 and period > 0:
+            limits.append(quota / period)
+        break
+    return min(limits) if limits else None
+
+
+def intra_op_threads() -> int:
+    """Threads for one inference, or 0 for onnxruntime's own choice.
+
+    onnxruntime sizes its pool from the machine's cores. It does not see a
+    container's CPU quota, so under `docker run --cpus 2` on a 64-core host
+    it ran 32 threads that the kernel let use two CPUs between them: the
+    quota was spent in the first few milliseconds of each period and every
+    search then waited, throttled, for the next one. Nor, before Python
+    3.13 made it easy to ask, a CPU set narrowed with taskset or cpuset.
+    So when either leaves this process at most half of the machine, the
+    pool is sized to what it may use. Half, because onnxruntime's own
+    choice is the PHYSICAL cores, half the logical ones where each core
+    runs two threads: above half, its default already fits on such a
+    machine, and setting more threads than that would only add contention.
+    """
+    total = os.cpu_count() or 1
+    usable = total
+    count = getattr(os, "process_cpu_count", None)
+    try:
+        if count is not None:
+            usable = count() or total
+        elif hasattr(os, "sched_getaffinity"):
+            usable = len(os.sched_getaffinity(0)) or total
+    except OSError:
+        pass
+    if sys.platform.startswith("linux"):
+        limit = _cgroup_cpu_limit()
+        if limit is not None:
+            usable = min(usable, max(1, int(limit)))
+    return usable if usable <= total // 2 else 0
 
 
 class Embedder:
@@ -200,12 +343,17 @@ class Embedder:
         os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
         try:
             import onnxruntime as ort      # local import: keeps CLI startup fast
+            from tokenizers import Tokenizer
+        except ModuleNotFoundError as exc:
+            better = _runtime_not_installed(exc)
+            if better is not None:
+                raise better from exc
+            raise
         except ImportError as exc:
             better = _missing_runtime_error(exc)
             if better is not None:
                 raise better from exc
             raise
-        from tokenizers import Tokenizer
 
         # Errors only, and for the DEFAULT logger, not just the session's:
         # device discovery runs under the default logger and its warnings go
@@ -243,6 +391,9 @@ class Embedder:
         # the arena the same work returns to under 90 MB when it is done, at
         # the same speed for the batch sizes BATCH_TOKENS allows.
         so.enable_cpu_mem_arena = False
+        threads = intra_op_threads()
+        if threads:
+            so.intra_op_num_threads = threads
         self.sess = ort.InferenceSession(str(info.onnx), so,
                                          providers=["CPUExecutionProvider"])
         self._needs_token_type = any(
@@ -250,6 +401,7 @@ class Embedder:
 
     def _encode(self, texts: list[str]) -> list[list[int]]:
         """Token ids per text, truncated to the model's 512, never padded."""
+        texts = [well_formed(t) for t in texts]
         with self._tok_lock:
             return [e.ids for e in self.tok.encode_batch(texts)]
 
@@ -319,6 +471,9 @@ class Embedder:
         """
         if not text:
             return [text]
+        # The windows are cut from the text the tokenizer saw: replacing a
+        # surrogate is one code point for one, so its offsets index this.
+        text = well_formed(text)
         with self._tok_lock:
             self.tok.no_truncation()
             try:
