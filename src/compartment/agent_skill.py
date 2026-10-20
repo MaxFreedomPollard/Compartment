@@ -55,12 +55,21 @@ def _openclaw_dir() -> Path | None:
     return None
 
 
+def _claude_dir() -> Path | None:
+    """Claude Code's directory when CLAUDE_CONFIG_DIR moves it, by the same
+    rule the hook and the import use (an absolute path only)."""
+    if not os.environ.get("CLAUDE_CONFIG_DIR", "").strip():
+        return None
+    from .claude_memory import claude_config_dir
+    return claude_config_dir()
+
+
 #: Every agent known to read the Agent Skills layout, and what relocates
 #: its home: the environment variable naming it, or a function working it
 #: out. Claude Code's is CLAUDE_CONFIG_DIR, which moves its skills/ with
 #: everything else.
 SKILL_TARGETS = {
-    "claude": ("CLAUDE_CONFIG_DIR", Path.home() / ".claude"),
+    "claude": (_claude_dir, Path.home() / ".claude"),
     "hermes": ("HERMES_HOME", Path.home() / ".hermes"),
     "openclaw": (_openclaw_dir, Path.home() / ".openclaw"),
 }

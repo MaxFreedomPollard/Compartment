@@ -42,3 +42,18 @@ def test_openclaw_without_any_variable_is_in_the_home_directory(
     assert r["action"] == "written"
     assert agent_skill.is_current("openclaw")
     assert agent_skill.remove("openclaw") is True
+
+
+def test_a_relative_claude_config_dir_does_not_scatter_the_skill(
+        monkeypatch, tmp_path):
+    """The hook and the import ignore a CLAUDE_CONFIG_DIR that is not
+    absolute, as Claude Code's own VS Code extension does; the skill must
+    not land relative to whatever directory the command ran in."""
+    monkeypatch.setitem(agent_skill.SKILL_TARGETS, "claude",
+                        (agent_skill._claude_dir, tmp_path / ".claude"))
+    monkeypatch.setattr(agent_skill.Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative/claude")
+    assert agent_skill.agent_home("claude") == tmp_path / ".claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "abs"))
+    assert agent_skill.agent_home("claude") == tmp_path / "abs"
