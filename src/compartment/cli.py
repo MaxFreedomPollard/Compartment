@@ -1168,12 +1168,22 @@ def cmd_hook(args) -> None:
         print("  Claude Code memory writes now land in the vault "
               "automatically (restart Claude Code to load it)")
     elif args.hook_cmd == "uninstall":
-        print("capture hook removed" if claude_hooks.uninstall()
+        # A settings.json that is not JSON (hand-edited, cut short) is
+        # refused with ValueError naming the file, as install already said.
+        try:
+            removed = claude_hooks.uninstall()
+        except ValueError as exc:
+            _die(str(exc))
+        print("capture hook removed" if removed
               else "no compartment hook was installed")
     else:
         # No subcommand given (bare `compartment hook`) behaves like `status`,
         # then points at the rest of the group instead of failing.
-        print("installed" if claude_hooks.is_installed() else "not installed")
+        try:
+            installed = claude_hooks.is_installed()
+        except ValueError as exc:
+            _die(str(exc))
+        print("installed" if installed else "not installed")
         if getattr(args, "hook_cmd", None) is None:
             print("  subcommands: status | install | uninstall | capture")
 

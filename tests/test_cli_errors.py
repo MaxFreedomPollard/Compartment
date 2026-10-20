@@ -220,3 +220,20 @@ def test_serve_ending_with_stdout_closed_by_the_transport_exits_cleanly(
     monkeypatch.setattr("sys.stdout", out)
     monkeypatch.setattr(cli, "cmd_serve", lambda args: out.buffer.close())
     cli.main(["--vault", str(tmp_path / "v.vault"), "serve"])
+
+
+@pytest.mark.parametrize("command", [["hook", "status"], ["hook", "uninstall"],
+                                     ["hook"]])
+def test_a_claude_settings_file_that_is_not_json_is_named(tmp_path,
+                                                          monkeypatch, capsys,
+                                                          command):
+    """`hook status` and `hook uninstall` let claude_hooks' ValueError for a
+    malformed settings.json out as a traceback; `hook install` already
+    said it in one line."""
+    from compartment import claude_hooks
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"hooks": {', encoding="utf-8")
+    monkeypatch.setattr(claude_hooks, "SETTINGS", settings, raising=False)
+    err = _ends(command, capsys)
+    assert str(settings) in err and "Traceback" not in err
+
