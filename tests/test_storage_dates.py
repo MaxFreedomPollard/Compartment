@@ -105,3 +105,37 @@ def test_a_vault_an_older_build_broke_is_repaired_when_it_opens(vault,
     third = Vault.unlock(vault_path, passphrase=PASS)
     assert [r["op"] for r in third.db.conn.execute(
         "SELECT op FROM audit")].count("repair") == 1
+
+
+def test_a_discovery_date_in_milliseconds_is_the_day_it_names(vault):
+    """A JavaScript client sends Date.now(). The store raised "year 56759 is
+    out of range" and the memory was lost."""
+    from compartment.vault import discovery_date
+    ms = datetime.datetime(2024, 5, 1, 12).timestamp() * 1000
+    assert discovery_date(ms) == "2024-05-01"
+    out = vault.store("The office moved to the fourth floor.", caller="t",
+                      discovered=ms)
+    assert out["discovered"] == "2024-05-01"
+
+
+def test_a_discovery_number_that_names_no_day_is_kept_as_written():
+    """The field's rule for anything unparseable: keep what the caller
+    meant, never raise, never invent a date that reads as verified."""
+    from compartment.vault import discovery_date
+    assert discovery_date(1e300) == "1e+300"
+    assert discovery_date(float("nan")) == "nan"
+
+
+@pytest.mark.parametrize("expires", ["9999y", float("nan"),
+                                     float("inf")])
+def test_an_expiry_nothing_can_date_is_refused_with_a_reason(vault, expires):
+    """These escaped as ValueError and OverflowError from date arithmetic,
+    which no surface reports as a refusal with a fix."""
+    from compartment.crypto import CryptoError
+    from compartment.vault import expiry_date
+    with pytest.raises(CryptoError, match="expires="):
+        expiry_date(expires)
+    with pytest.raises(CryptoError, match="expires="):
+        vault.store("The trial licence lapses eventually.", caller="t",
+                    expires=expires)
+    assert vault.db.count() == 0

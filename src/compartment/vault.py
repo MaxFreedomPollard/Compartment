@@ -157,8 +157,18 @@ def discovery_date(value=None) -> str:
     time and lives in `created`."""
     if value in (None, ""):
         return datetime.date.today().isoformat()
-    if isinstance(value, (int, float)):
-        return datetime.date.fromtimestamp(float(value)).isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Through instant, so milliseconds (what a JavaScript client sends)
+        # read as the day they name, and a number that names no day is kept
+        # as written below instead of raising "year 56759 is out of range"
+        # out of the store.
+        t = instant(value)
+        if t is not None:
+            try:
+                return datetime.date.fromtimestamp(t).isoformat()
+            except (ValueError, OverflowError, OSError):
+                pass
+        return str(value)[:40]
     s = str(value).strip()
     try:
         return datetime.date.fromisoformat(s[:10]).isoformat()
@@ -280,6 +290,11 @@ def expiry_date(value, today: datetime.date | None = None,
     if value in (None, ""):
         return None
     today = today or datetime.date.today()
+    if isinstance(value, float) and not math.isfinite(value):
+        raise CryptoError(
+            f"expires={value!r} is not a date or a duration. Give the last "
+            f"day it is true (2026-09-03), or how long it lasts (14d, 2w, "
+            f"3m, 1y).")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         s = str(int(value))
     else:
@@ -293,12 +308,20 @@ def expiry_date(value, today: datetime.date | None = None,
             raise CryptoError(
                 f"expires={value!r}: a duration has to be at least one day")
         unit = (m.group(2) or "d").lower()
-        if unit == "m":
-            return _add_months(today, n).isoformat()
-        if unit == "y":
-            return _add_months(today, n * 12).isoformat()
-        return (today + datetime.timedelta(
-            days=n * (7 if unit == "w" else 1))).isoformat()
+        try:
+            if unit == "m":
+                return _add_months(today, n).isoformat()
+            if unit == "y":
+                return _add_months(today, n * 12).isoformat()
+            return (today + datetime.timedelta(
+                days=n * (7 if unit == "w" else 1))).isoformat()
+        except (ValueError, OverflowError):
+            # `9999y` lands past the year 9999, the last a date can name.
+            # A fact meant to outlast that is a fact with no expiry.
+            raise CryptoError(
+                f"expires={value!r} runs past the year 9999. A fact that "
+                f"lasts that long does not expire: leave the expiry off."
+            ) from None
     try:
         day = datetime.date.fromisoformat(s[:10])
     except ValueError:
