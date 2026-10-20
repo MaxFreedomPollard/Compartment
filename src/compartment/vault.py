@@ -2193,6 +2193,11 @@ class Vault:
         # trailing \r from CRLF is whitespace to json.loads.
         records = [json.loads(l) for l in text.lstrip("\ufeff").split("\n")
                    if l.strip()]
+        # Cleaned here, not only in store(): the vectors below are computed
+        # before store() sees the text, and the tokenizer refuses a lone
+        # surrogate exactly as it does there.
+        for r in records:
+            r["text"] = clean_text(r["text"])
         # What store() embeds: the claim without its provenance clause, every
         # window of it. All of them go in one batched call, and each record
         # is handed its own block of rows. A claim of at most CHUNK_WINDOW

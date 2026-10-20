@@ -50,3 +50,29 @@ def test_the_graph_takes_and_finds_the_same_text(vault):
     rels = vault.relations("t", entity="Ana " + HALF_EMOJI)["relations"]
     assert [(r["subject"], r["object"]) for r in rels] == [
         ("Ana cut here \ufffd", "the \ufffdrelease")]
+
+
+def test_an_import_line_with_half_an_emoji_is_imported(vault):
+    """The import computes its vectors before store() sees the text, so the
+    tokenizer refused it there and the whole import failed."""
+    line = '{"text": "Imported with half an emoji \\ud83d at the end."}\n'
+    assert vault.import_jsonl(line, caller="t") == 1
+    hit = vault.search("imported half an emoji \ud83d", caller="t")
+    assert hit["results"][0]["text"].startswith(
+        "Imported with half an emoji � at the end.")
+
+
+def test_a_pack_record_with_half_an_emoji_reads_clean():
+    """Pack records are JSON lines too; a recomputed vector or the insert
+    refused the lone surrogate the escape decodes to."""
+    import numpy as np
+
+    from compartment import packs
+    ident = packs.new_identity("tester")
+    blob = packs.build_pack(
+        name="t", version="1.0.0", description="", identity=ident,
+        records=[{"id": "r1", "text": "Pack fact with half an emoji \ud83d"}],
+        vectors=np.zeros((1, 4), dtype=np.float32),
+        model={"name": "m", "sha256": "0", "dim": 4})
+    _, records, _ = packs.read_pack(blob, trusted_keys=[ident["pub_hex"]])
+    assert records[0]["text"] == "Pack fact with half an emoji �"
