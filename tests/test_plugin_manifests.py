@@ -135,3 +135,53 @@ def test_codex_gets_a_listing_of_its_own_from_the_agent_plugins_manifest():
     for field in ("websiteURL", "privacyPolicyURL"):
         assert ui[field].startswith("https://")
     assert ui["logo"].startswith("./") and (ROOT / ui["logo"]).is_file()
+
+
+# ------------------------------------------------------ one-click pages -----
+def _deeplinks(rel: str) -> list[str]:
+    """The meta refresh and the fallback anchor, which must be one link."""
+    import html
+    s = (ROOT / rel).read_text(encoding="utf-8")
+    refresh = re.search(r'http-equiv="refresh" content="0; url=([^"]+)"', s).group(1)
+    anchors = re.findall(r'<a href="((?!https?:)[a-z]+://[^"]+)"', s)
+    return [html.unescape(refresh)] + [html.unescape(a) for a in anchors]
+
+
+def _caller(args: list[str]) -> str:
+    return args[args.index("--caller") + 1]
+
+
+def test_the_lm_studio_button_registers_what_integrate_registers():
+    """The caller names the client in the audit log and is the key an ACL
+    entry is written against; `integrate lmstudio` writes `lmstudio`, so a
+    vault configured for that caller must see the same name from the
+    button. The manual block on the page is the same entry."""
+    import base64
+    from urllib.parse import parse_qs, urlsplit
+    from compartment import clients
+    links = _deeplinks("add/lmstudio.html")
+    assert len(set(links)) == 1, links
+    q = parse_qs(urlsplit(links[0]).query)
+    assert q["name"] == ["compartment"]
+    entry = json.loads(base64.b64decode(q["config"][0]))
+    assert entry["command"] == "compartment" and entry["args"][-1] == "serve"
+    assert _caller(entry["args"]) == clients.CLIENTS["lmstudio"].key
+    page = (ROOT / "add/lmstudio.html").read_text(encoding="utf-8")
+    manual = json.loads(re.search(r"<pre>(.*?)</pre>", page, re.S).group(1))
+    assert manual["mcpServers"]["compartment"] == entry
+
+
+def test_the_goose_button_uses_a_command_goose_accepts():
+    """goose refuses a deeplink whose command is not one of its launchers
+    (cu, docker, jbang, npx, uvx, goose), so the bare `compartment` the
+    other manifests use would be rejected; uvx runs the PyPI package."""
+    from urllib.parse import parse_qs, urlsplit
+    from compartment import clients
+    links = _deeplinks("add/goose.html")
+    assert len(set(links)) == 1, links
+    q = parse_qs(urlsplit(links[0]).query)
+    assert q["cmd"] == ["uvx"] and q["name"] == ["Compartment"]
+    assert q["arg"][0] == "compartment" and q["arg"][-1] == "serve"
+    assert _caller(q["arg"]) == clients.CLIENTS["goose"].key
+    page = (ROOT / "add/goose.html").read_text(encoding="utf-8")
+    assert f"<pre>uvx {' '.join(q['arg'])}</pre>" in page
