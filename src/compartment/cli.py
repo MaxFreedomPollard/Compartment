@@ -1722,13 +1722,25 @@ _CLAUDE_MD_BODY = (
     "`memory_search` does not return, store it into compartment.")
 
 
+def _claude_md_path() -> Path:
+    """The user CLAUDE.md Claude Code loads: CLAUDE_MD when set (an
+    override for tests and unusual setups), else CLAUDE.md in Claude
+    Code's own directory, which CLAUDE_CONFIG_DIR moves. The block was
+    always written to ~/.claude/CLAUDE.md, which a Claude Code run with
+    CLAUDE_CONFIG_DIR (a second account, a dotfiles tree) never reads."""
+    explicit = os.environ.get("CLAUDE_MD")
+    if explicit:
+        return Path(explicit)
+    return claude_memory.claude_config_dir() / "CLAUDE.md"
+
+
 def _write_managed_claude_md() -> Path:
     """Write an idempotent, sentinel-fenced compartment block into the user's
     CLAUDE.md. Only ever rewrites BETWEEN the markers - the user's own text
     above and below is never touched; re-running updates the block in place.
     (Belt-and-suspenders: the authoritative behavioral instruction rides the
     MCP `initialize` handshake; this covers hosts that under-weight it.)"""
-    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    md = _claude_md_path()
     md.parent.mkdir(parents=True, exist_ok=True)
     block = f"{_CLAUDE_MD_BEGIN}\n{_CLAUDE_MD_BODY}\n{_CLAUDE_MD_END}"
     text = md.read_text(encoding="utf-8") if md.exists() else ""
@@ -1748,7 +1760,7 @@ def _remove_managed_claude_md() -> Path | None:
     """Take the fenced block back out of the user's CLAUDE.md: the inverse
     of _write_managed_claude_md, leaving everything outside the markers as
     it is. Returns the file, or None when it holds no block."""
-    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    md = _claude_md_path()
     if not md.is_file():
         return None
     text = md.read_text(encoding="utf-8")
@@ -1877,7 +1889,7 @@ def _refresh_installed() -> list[str]:
     the user had turned off), no registration, no import. An edited skill is
     backed up before it is replaced, as `integrate` does."""
     done: list[str] = []
-    md = Path(os.environ.get("CLAUDE_MD", Path.home() / ".claude" / "CLAUDE.md"))
+    md = _claude_md_path()
     try:
         before = md.read_text(encoding="utf-8") if md.is_file() else ""
         if _CLAUDE_MD_BEGIN in before and _CLAUDE_MD_END in before:
