@@ -189,10 +189,13 @@ def test_codex_gets_a_table_appended_and_keeps_the_rest(tmp_path):
 def test_codex_is_not_registered_twice(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[mcp_servers.compartment]\ncommand = "compartment"\n')
+    clients.register(clients.CLIENTS["codex"], VAULT, path=p)
     res = clients.register(clients.CLIENTS["codex"], VAULT, path=p)
 
     assert res["written"] is False
     assert p.read_text().count("[mcp_servers.compartment]") == 1
+    entry = tomllib.loads(p.read_text())["mcp_servers"]["compartment"]
+    assert entry["args"][:2] == ["--vault", VAULT]     # refreshed once
 
 
 def test_codex_unregister_takes_only_our_table(tmp_path):

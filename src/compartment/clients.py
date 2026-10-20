@@ -580,18 +580,42 @@ def _toml_string(s: str) -> str:
     return '"' + "".join(out) + '"'
 
 
+def _toml_key(k: str) -> str:
+    """A key, bare when TOML allows it bare."""
+    return k if k and all(c.isascii() and (c.isalnum() or c in "-_")
+                          for c in k) else _toml_string(k)
+
+
 def _toml_value(v) -> str:
-    """Just enough TOML to emit one table of strings and string arrays."""
-    if isinstance(v, list):
-        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    """A TOML value for anything tomllib reads back: our own strings and
+    string arrays, and whatever else the user put in our table (a
+    startup_timeout_sec, an env table, enabled = false), which a refresh
+    carries over."""
     if isinstance(v, bool):
         return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if v != v:
+            return "nan"
+        if v in (float("inf"), float("-inf")):
+            return "inf" if v > 0 else "-inf"
+        return repr(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(x)}"
+                                for k, x in v.items()) + " }"
+    if hasattr(v, "isoformat"):                 # datetime, date, time
+        return v.isoformat()
     return _toml_string(str(v))
 
 
 def _toml_block(entry: dict) -> str:
     lines = [f"[mcp_servers.{NAME}]"]
-    lines += [f"{k} = {_toml_value(v)}" for k, v in entry.items()]
+    lines += [f"{_toml_key(k)} = {_toml_value(v)}" for k, v in entry.items()]
     return "\n".join(lines)
 
 
@@ -662,6 +686,13 @@ def _toml_without_ours(client: Client, text: str) -> str | None:
             j += 1
         for k in range(i, last + 1):
             keep[k] = False
+        # The blank line that set our table off goes with it when another
+        # follows, so taking it out (or refreshing it) leaves one, not two.
+        after = next((k for k in range(last + 1, len(stmts)) if keep[k]),
+                     None)
+        if (i > 0 and keep[i - 1] and not stmts[i - 1][0].strip()
+                and (after is None or not stmts[after][0].strip())):
+            keep[i - 1] = False
         i = j
     out = "".join(s for (s, _), k in zip(stmts, keep) if k)
     try:
@@ -764,9 +795,22 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
 
     So the whole edit is appending one table, which leaves every comment,
     every ordering and every hand-made formatting decision in the file
-    exactly as its owner left it. Re-registering rewrites nothing: an entry
-    that is already there is reported, not duplicated. A file that does
-    not parse is refused, as a JSON one is.
+    exactly as its owner left it. Re-registering with the same command and
+    arguments rewrites nothing. A file that does not parse is refused, as a
+    JSON one is.
+
+    Re-registering with a different command or vault refreshes the entry,
+    as it does for every JSON client. It used to report "already
+    registered; left as it is" whatever the entry said, so a config that
+    named a bare `compartment` Codex could not find, a console script that
+    an upgrade had moved, or last month's vault could not be put right by
+    running `integrate codex` again: the user had to remove it first,
+    which nothing told them. Our table is taken out exactly as
+    `unregister` takes it out and appended again with the new command and
+    arguments, and whatever else the user had put in it (a
+    startup_timeout_sec, an env table, enabled = false) is carried over.
+    When the table cannot be taken out cleanly (an inline entry, dotted
+    keys), the file is left as it is and the block is printed.
     """
     try:
         block = _toml_block(entry)
@@ -787,15 +831,38 @@ def _register_toml(client: Client, p: Path, entry: dict, out: dict) -> dict:
         return out
 
     if registered:
-        out["reason"] = "already registered; left as it is"
-        out["snippet"] = block
-        return out
+        old = tomllib.loads(existing)[client.root][NAME]
+        if not isinstance(old, dict) or all(old.get(k) == v
+                                            for k, v in entry.items()):
+            out["reason"] = "already registered; left as it is"
+            out["snippet"] = block
+            return out
+        rest = _toml_without_ours(client, existing)
+        if rest is None:
+            out["reason"] = ("registered with another command, written in a "
+                             "form that cannot be updated without breaking "
+                             f"{p}; left as it is. Replace the entry with "
+                             "this one")
+            out["snippet"] = block
+            return out
+        entry = {**entry, **{k: v for k, v in old.items() if k not in entry}}
+        try:
+            refreshed = _toml_block(entry)
+        except ValueError as exc:
+            out["reason"] = f"cannot be written as TOML ({exc})"
+            out["snippet"] = block
+            return out
+        before, verb = rest, "updating"
+    else:
+        before, refreshed, verb = existing, block, "adding"
 
-    joiner = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
-    text = existing + joiner + block + "\n"
-    broken = _toml_breaks(client, existing, text, entry)
+    # One blank line before the table, however many times it is refreshed.
+    joiner = ("" if not before or before.endswith("\n\n")
+              else "\n" if before.endswith("\n") else "\n\n")
+    text = before + joiner + refreshed + "\n"
+    broken = _toml_breaks(client, before, text, entry)
     if broken:
-        out["reason"] = (f"adding the table would leave {p} {broken}; "
+        out["reason"] = (f"{verb} the table would leave {p} {broken}; "
                          "refusing to touch it")
         out["snippet"] = block
         return out
