@@ -106,9 +106,20 @@ _RACE_TIMEOUT = 2.0
 
 
 def _session_dir() -> Path:
+    """The session store, created 0700 if it is not there yet.
+
+    The mode is narrowed only when it is wrong, not on every call. A chmod
+    is a write, and the processes that most need to READ a stored credential
+    are often not allowed to write here: an agent's shell under Claude Code
+    or Codex runs in a macOS Seatbelt profile whose write allowlist is the
+    project and the temp directory, and there chmod on the user's own 0700
+    session directory fails with EPERM. Calling it unconditionally made
+    every `compartment search` the agent ran die with PermissionError
+    before it could look at the credential the user had unlocked."""
     d = Path(env("SESSION_DIR", home() / "session"))
     d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
+    if stat.S_IMODE(d.stat().st_mode) != 0o700:
+        os.chmod(d, 0o700)
     return d
 
 
@@ -393,7 +404,9 @@ def _forget_boot_secret() -> bool:
     try:
         name = _holder()
         return _win_forget(name) if IS_WINDOWS else _posix_forget(name)
-    except CryptoError:
+    except (CryptoError, OSError):
+        # OSError: the session directory, which names the holder, cannot be
+        # made here. Then no credential was ever stored in it either.
         return False
 
 
@@ -540,8 +553,15 @@ def get(vault_path: str) -> bytes | None:
 
     None means locked. A CryptoError means something is wrong that deleting
     the credential would not fix - an unreadable file, no boot clock - and in
-    that case nothing is deleted."""
-    p = _file_for(vault_path)
+    that case nothing is deleted.
+
+    Looking costs nothing on disk: with no credential there, nothing is
+    created. Every vault open starts here, before the Keychain and before
+    COMPARTMENT_PASSPHRASE are consulted, so a lookup that insisted on
+    making the session directory first took down every open where that
+    directory cannot be made - a container run as an arbitrary uid, whose
+    HOME is `/`, or a read-only root - even with the passphrase exported."""
+    p = credential_path(vault_path)
     if not p.is_file():
         return None
     try:
@@ -590,10 +610,10 @@ def clear(vault_path: str) -> bool:
     If that was the last one in this store, destroy the per-boot secret too:
     keeping it would leave key material in memory that nothing on disk can
     use, and a panic-lock should not leave that lying about."""
-    p = _file_for(vault_path)
+    p = credential_path(vault_path)
     existed = p.is_file()
     if existed:
         p.unlink()
-    if not any(_session_dir().glob("*.session")):
+    if not p.parent.is_dir() or not any(p.parent.glob("*.session")):
         _forget_boot_secret()
     return existed
