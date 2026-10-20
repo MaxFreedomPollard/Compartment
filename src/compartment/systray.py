@@ -1570,10 +1570,27 @@ def run(vault: str | None = None, show: bool = False,
     return 0
 
 
-#: Every process on Windows with the command line that started it, as CSV.
+#: Every process on Windows with the command line that started it and the
+#: sign-in session it runs in, as CSV. SessionId is last, so the first three
+#: columns are where they always were.
 _WINDOWS_PROCESSES = ("Get-CimInstance Win32_Process | Select-Object "
-                      "ProcessId, ParentProcessId, CommandLine | "
+                      "ProcessId, ParentProcessId, CommandLine, SessionId | "
                       "ConvertTo-Csv -NoTypeInformation")
+
+
+def _windows_session() -> str | None:
+    """The Windows session this process runs in (one per signed-in user,
+    fast user switching included), or None if it cannot be asked."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        sid = wintypes.DWORD()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(),
+                                                       ctypes.byref(sid)):
+            return str(sid.value)
+    except Exception:                                 # noqa: BLE001
+        pass
+    return None
 
 #: A Windows command line that is the panel: the CLI, then its subcommand.
 _WINDOWS_APP = re.compile(r"compartment.*\s(menubar|panel|tray)(\s|$)",
@@ -1603,12 +1620,19 @@ def running_pids() -> list[int]:
         except (OSError, subprocess.SubprocessError):
             return []
         mine, pids = {os.getpid(), os.getppid()}, []
+        # Only this session's. With fast user switching, a second person
+        # signed in on the same PC has a tray app of their own, and from an
+        # elevated prompt their command lines are readable too: `init` then
+        # took theirs as this user's app coming up, and started none.
+        session = _windows_session()
         # Anything that is not a row - the header, a message instead of a
         # table - has no pid in its first field to misread.
         for row in csv.reader((out or "").splitlines()):
             if (len(row) > 2 and row[0].isdigit()
                     and int(row[0]) not in mine
-                    and _WINDOWS_APP.search(row[2])):
+                    and _WINDOWS_APP.search(row[2])
+                    and (session is None or len(row) < 4
+                         or row[3] == session)):
                 pids.append(int(row[0]))
         return pids
     # The app's own command line and this user's processes, as on macOS:

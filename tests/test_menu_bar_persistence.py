@@ -1053,6 +1053,33 @@ def test_windows_stops_only_the_tray_app(monkeypatch, tmp_path):
     assert not [c for c in ran if c[0] == "taskkill"]
 
 
+def test_windows_counts_only_the_tray_app_of_this_session(monkeypatch):
+    """Fast user switching: a second person signed in on the same PC runs a
+    tray app of their own, and from an elevated prompt its command line is
+    readable. `init` took it as this user's app coming up and started none;
+    an update counted it as the copy to wait for."""
+    _as_windows(monkeypatch)
+    exe = WINDOWS_EXE
+    mine = f'"{exe}" --vault "C:\\Users\\ana\\.compartment\\memory.vault" tray'
+    theirs = f'"{exe}" --vault "C:\\Users\\bo\\.compartment\\memory.vault" tray'
+    table = ('"ProcessId","ParentProcessId","CommandLine","SessionId"\r\n'
+             + f'"4100","900","{mine.replace(chr(34), chr(34) * 2)}","1"\r\n'
+             + f'"6100","950","{theirs.replace(chr(34), chr(34) * 2)}","2"\r\n')
+    asked = []
+
+    def fake_run(argv, *a, **k):
+        asked.append(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, table, "")
+    monkeypatch.setattr(systray.subprocess, "run", fake_run)
+    monkeypatch.setattr(systray, "_windows_session", lambda: "1",
+                        raising=False)
+    assert systray.running_pids() == [4100]
+    assert "SessionId" in asked[-1], "the session has to be asked for"
+    # Where the session cannot be told, nothing is left out.
+    monkeypatch.setattr(systray, "_windows_session", lambda: None)
+    assert systray.running_pids() == [4100, 6100]
+
+
 def test_the_task_restarts_a_panel_that_failed(monkeypatch):
     _as_windows(monkeypatch)
     xml = systray.scheduled_task_xml("C:\\v\\memory.vault")
