@@ -394,3 +394,22 @@ def test_no_listing_claims_a_tool_count_the_server_does_not_have():
         for n in re.findall(r"\b(\d+) (?:memory |MCP )?tools\b",
                             p.read_text(encoding="utf-8")):
             assert int(n) == count, (rel, n, count)
+
+
+# ------------------------------------------------------------- Oh My Pi -----
+def test_the_omp_extension_declares_what_each_tool_does():
+    """omp's ToolDefinition treats a missing `approval` as "exec" and a
+    missing `loadMode` on an extension tool as "discoverable" (removed from
+    the top-level tool list, found by search). Recall must not be gated
+    like running code, and a tool the model is told to call before
+    answering must be in front of it."""
+    src = (ROOT / "integrations/omp/extension.ts").read_text(encoding="utf-8")
+    tools = {}
+    for block in src.split("pi.registerTool({")[1:]:
+        name = re.search(r'name:\s*"([^"]+)"', block).group(1)
+        head = block.split("async execute")[0]
+        tools[name] = dict(re.findall(r'\b(approval|loadMode):\s*"([^"]+)"', head))
+    assert tools == {
+        "memory_search": {"approval": "read", "loadMode": "essential"},
+        "memory_store": {"approval": "write", "loadMode": "essential"},
+    }
