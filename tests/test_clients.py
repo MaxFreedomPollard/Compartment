@@ -438,7 +438,7 @@ def test_a_client_known_by_a_bare_filename_is_not_found_everywhere(
     assert clients.CLIENTS["librechat"].present() is True
     assert clients.CLIENTS["open-webui"].present() is False
     cli.main(["--vault", VAULT, "integrate", "librechat"])
-    assert '"mcpServers"' in capsys.readouterr().out
+    assert "mcpServers:" in capsys.readouterr().out
 
 
 def test_one_client_that_fails_does_not_stop_integrate_all(tmp_path,

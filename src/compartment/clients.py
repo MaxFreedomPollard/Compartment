@@ -243,6 +243,55 @@ def _lmstudio_home() -> Path:
     return legacy if legacy.is_dir() else h / ".lmstudio"
 
 
+def _goose_config() -> Path:
+    """Goose's config.yaml (crates/goose/src/config/paths.rs):
+    $GOOSE_PATH_ROOT/config when that is an absolute path; otherwise the
+    XDG config directory on macOS and Linux, and on Windows
+    %APPDATA%\\Block\\goose\\config, where the XDG path that was printed
+    named a file Goose never reads."""
+    root = _env_dir("GOOSE_PATH_ROOT")
+    if root is not None and root.is_absolute():
+        return root / "config" / "config.yaml"
+    if os.name == "nt":
+        return _appdata() / "Block" / "goose" / "config" / "config.yaml"
+    return _xdg() / "goose" / "config.yaml"
+
+
+def _yaml_str(v: str) -> str:
+    """A YAML double-quoted scalar. YAML 1.2 is a superset of JSON, so a
+    JSON string is one, escapes and all."""
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _goose_block(entry: dict) -> str:
+    """The extension as Goose's config.yaml spells it: under `extensions:`,
+    with `cmd` rather than `command` and a `type` (ExtensionConfig::Stdio in
+    crates/goose/src/agents/extension.rs). The `mcpServers` JSON that used
+    to be printed for Goose is not a shape Goose reads at all."""
+    return "\n".join([
+        "extensions:",
+        f"  {NAME}:",
+        "    enabled: true",
+        "    type: stdio",
+        f"    name: {NAME}",
+        "    description: Encrypted offline memory",
+        f"    cmd: {_yaml_str(entry['command'])}",
+        "    args: [" + ", ".join(_yaml_str(a) for a in entry["args"]) + "]",
+        "    timeout: 300",
+    ])
+
+
+def _librechat_block(entry: dict) -> str:
+    """The server under librechat.yaml's `mcpServers:` mapping, as YAML."""
+    return "\n".join([
+        "mcpServers:",
+        f"  {NAME}:",
+        "    type: stdio",
+        f"    command: {_yaml_str(entry['command'])}",
+        "    args: [" + ", ".join(_yaml_str(a) for a in entry["args"]) + "]",
+    ])
+
+
 # --- the shape each client wants an entry in -------------------------------
 
 def _entry_plain(command: str, args: list[str]) -> dict:
@@ -280,6 +329,9 @@ class Client:
     #: Whether the client is installed, when the config file's directory is
     #: not the proof (it may not exist until the first server is added).
     installed: Callable[[], bool] | None = None
+    #: The block to print, from the entry, for a client whose file is not
+    #: JSON (Goose's YAML); JSON under `root` when None.
+    block: Callable[[dict], str] | None = None
 
     def config_path(self) -> Path:
         return self.path()
@@ -411,12 +463,14 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
     # safely: a YAML document whose comments and anchors we would flatten, or
     # an application database, or a settings blob with no stable on-disk
     # shape. Printing the exact block is honest; writing a guess is not.
-    Client("goose", "Goose", lambda: _xdg() / "goose" / "config.yaml",
-           kind="manual", writes=False,
-           note="or run `goose configure` and add it as an extension"),
+    Client("goose", "Goose", _goose_config, kind="manual", writes=False,
+           block=_goose_block,
+           note="add this to config.yaml (merge it into `extensions:` if "
+                "you have one), or run `goose configure` and add it as a "
+                "command-line extension"),
     Client("librechat", "LibreChat", lambda: Path("librechat.yaml"),
-           kind="manual", writes=False,
-           note="paste under `mcpServers:` in your librechat.yaml, then "
+           kind="manual", writes=False, block=_librechat_block,
+           note="merge this into `mcpServers:` in your librechat.yaml, then "
                 "restart LibreChat"),
     Client("jan", "Jan", lambda: _app_support("Jan") / "data"
            / "mcp_config.json", kind="manual", writes=False,
@@ -618,6 +672,8 @@ def snippet(client: Client, vault: str, caller: str | None = None) -> str:
     """What to print when we are not writing the file ourselves."""
     if client.kind == "toml":
         return _toml_block(entry_for(client, vault, caller))
+    if client.block is not None:
+        return client.block(entry_for(client, vault, caller))
     return json.dumps({client.root: {NAME: entry_for(client, vault, caller)}},
                       indent=2)
 

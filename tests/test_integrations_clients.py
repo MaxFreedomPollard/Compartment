@@ -239,3 +239,49 @@ def test_continue_follows_its_global_dir_variable(home, monkeypatch,
     assert clients.CLIENTS["continue"].config_path() == (
         tmp_path / "cont" / "mcpServers" / "compartment.json")
     assert clients.CLIENTS["continue"].present() is False
+
+
+# ------------------------------------------------------------------ Goose
+
+def test_the_goose_block_is_an_extension_goose_reads(home):
+    """Goose was handed `{"mcpServers": ...}` JSON, a shape Goose's
+    config.yaml does not have: its servers are extensions, with `cmd`, not
+    `command`, and a `type`."""
+    goose = clients.CLIENTS["goose"]
+    block = clients.snippet(goose, "/Users/ana/My Vault/mémoire.vault")
+    lines = block.splitlines()
+    assert lines[:3] == ["extensions:", "  compartment:", "    enabled: true"]
+    assert "    type: stdio" in lines and "    name: compartment" in lines
+    cmd = next(x for x in lines if x.startswith("    cmd: "))
+    args = next(x for x in lines if x.startswith("    args: "))
+    # Double-quoted YAML scalars are JSON strings.
+    assert json.loads(cmd.split(": ", 1)[1]) == clients.executable()
+    assert json.loads(args.split(": ", 1)[1])[:2] == [
+        "--vault", "/Users/ana/My Vault/mémoire.vault"]
+    assert "mcpServers" not in block
+
+
+class _WindowsOs:
+    """`os` as clients.py sees it on Windows, without telling pathlib."""
+    name = "nt"
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
+def test_goose_on_windows_is_under_appdata_block(home, monkeypatch):
+    """The XDG path was printed on Windows too, a file Goose never reads:
+    there its config is %APPDATA%\\Block\\goose\\config\\config.yaml."""
+    monkeypatch.setattr(clients, "os", _WindowsOs())
+    p = clients.CLIENTS["goose"].config_path()
+    assert p == (home / "AppData" / "Roaming" / "Block" / "goose" / "config"
+                 / "config.yaml")
+
+
+def test_goose_path_root_moves_its_config(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("GOOSE_PATH_ROOT", str(tmp_path / "g"))
+    assert clients.CLIENTS["goose"].config_path() == (
+        tmp_path / "g" / "config" / "config.yaml")
+    monkeypatch.setenv("GOOSE_PATH_ROOT", "relative")      # ignored by Goose
+    assert clients.CLIENTS["goose"].config_path() == (
+        home / ".config" / "goose" / "config.yaml")
