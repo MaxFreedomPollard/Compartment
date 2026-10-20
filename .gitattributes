@@ -4,3 +4,11 @@ src/compartment/models/** -text
 *.onnx -text
 *.mpack -text
 *.jsonl -text
+
+# Scripts a POSIX shell or a container reads. A Windows checkout with
+# core.autocrlf rewrites them to CRLF, and bash then fails on `$'\r'` - the
+# usual way to meet it is running install-linux.sh from that checkout inside
+# WSL, or `docker build` from Windows copying CRLF files into the image.
+*.sh text eol=lf
+Dockerfile text eol=lf
+.github/workflows/*.yml text eol=lf
