@@ -474,18 +474,23 @@ class Vault:
             raise CryptoError("Empty passphrase refused - the user sets it")
         master = crypto.new_key()
         slot_pw = crypto.make_passphrase_slot(master, passphrase)
-        emb = get_embedder(model_name)
+        # The model's pinned description is all a new vault records. Building
+        # an embedder here loaded the model (or started the machine's shared
+        # embedding process) before anything needed a vector, and ignored the
+        # embed_daemon setting the vault's own embedder property honours; it
+        # is built on first use instead, like an opened vault's.
+        emb = model_info(model_name)
         header = vaultfile.VaultHeader(
             vault_id=uuid.uuid4().hex,
             created=datetime.datetime.now(datetime.UTC).isoformat(),
             keyslots=[slot_pw],
             payload_len=0,
-            model={"name": model_name, "sha256": emb.model_sha256, "dim": emb.dim},
+            model={"name": model_name, "sha256": emb.sha256, "dim": emb.dim},
             extra={"creator": creator, "wire": wire.WIRE_FORMAT},
         )
         db = Store()
         db.set_meta("model_name", model_name)
-        db.set_meta("model_sha256", emb.model_sha256)
+        db.set_meta("model_sha256", emb.sha256)
         audit.append(db.conn, creator, "init", f"vault created (model {model_name})")
         # Anchor at creation, not just on save: the anchor is mandatory, so a
         # vault has to carry one from its very first entry onwards or its own
@@ -495,9 +500,7 @@ class Vault:
         vaultfile.write_vault_file(path, header,
                                    {"sqlite": db.serialize()}, master)
         config.save(path)
-        v = cls(path, header, db, master, config)
-        v._embedder = emb
-        return v
+        return cls(path, header, db, master, config)
 
     # ---------------------------------------------------------------- unlock
 

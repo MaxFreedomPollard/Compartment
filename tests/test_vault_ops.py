@@ -727,3 +727,17 @@ def test_a_nan_similarity_is_never_a_duplicate(vault, monkeypatch):
                         lambda vec, k: [(next(iter(vault._id_by_ikey)), float("nan"))])
     second = vault.store("Deploys go out on Tuesdays", caller="test")
     assert not second["duplicate"] and second["id"] != first["id"]
+
+
+def test_creating_a_vault_does_not_load_the_model(tmp_path, monkeypatch):
+    """Vault.create needs only the model's pinned hash and dimension; it used
+    to build a whole embedder for them, loading the model or starting the
+    shared embedding process before anything needed a vector."""
+    from compartment import vault as vault_mod
+
+    def boom(*a, **k):
+        raise AssertionError("create built an embedder")
+    monkeypatch.setattr(vault_mod, "get_embedder", boom)
+    v = Vault.create(str(tmp_path / "new.vault"), "pw-not-a-secret")
+    assert v.header.model["dim"] == 384 and len(v.header.model["sha256"]) == 64
+    assert v._embedder is None
