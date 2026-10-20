@@ -788,7 +788,18 @@ class Vault:
         from . import session
         if passphrase:
             return passphrase, None
-        key = session.get(path)
+        # A session lookup that fails (no shared memory in a container, a
+        # session directory that cannot be read, a boot that cannot be
+        # identified inside a sandbox) says nothing about the credentials
+        # after it. Raised on the spot, it hid a COMPARTMENT_PASSPHRASE set
+        # precisely because the session store does not work there - which is
+        # what that error's own message tells the user to do. It is kept and
+        # raised only when nothing else opens the vault.
+        session_error: Exception | None = None
+        try:
+            key = session.get(path)
+        except Exception as exc:                        # noqa: BLE001
+            session_error, key = exc, None
         if key is not None:
             return None, key
         key = keychain_get(path)
@@ -797,6 +808,8 @@ class Vault:
         from_env = env("PASSPHRASE")
         if from_env:
             return from_env, None
+        if session_error is not None:
+            raise session_error
         return None
 
     @staticmethod
