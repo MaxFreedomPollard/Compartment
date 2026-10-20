@@ -27,8 +27,59 @@ import os
 import re
 from pathlib import Path
 
-# Claude Code's per-project memory lives under <root>/<project-slug>/memory.
-DEFAULT_ROOT = Path.home() / ".claude" / "projects"
+
+
+def claude_config_dir() -> Path:
+    """Claude Code's own directory: $CLAUDE_CONFIG_DIR when it is set,
+    ~/.claude otherwise.
+
+    Claude Code keeps everything there - settings.json, the per-project
+    memory under projects/, skills/, the user CLAUDE.md - and moves all of
+    it when CLAUDE_CONFIG_DIR is set ("Respect CLAUDE_CONFIG_DIR
+    everywhere", Claude Code 1.0.6), which is how people run a second
+    account or keep it in a dotfiles tree. Compartment only ever looked in
+    ~/.claude, so for them the capture hook went into a settings.json
+    Claude Code never read, the import found no memories, and the skill
+    landed where no session would load it. Like Claude Code's own VS Code
+    extension, only an absolute path counts; an empty or relative value is
+    ignored."""
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if raw:
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            return p
+    return Path.home() / ".claude"
+
+
+# Claude Code's per-project memory lives under <root>/<project-slug>/memory,
+# and <root> is DEFAULT_ROOT. It is worked out when it is asked for, not at
+# import: in a container run as an arbitrary uid, with HOME unset and no
+# passwd entry, Path.home() raises, and computing it here killed every
+# `compartment` command at import, including the ones that never touch
+# Claude Code. A caller may still pin DEFAULT_ROOT by assigning it.
+
+
+def _projects() -> Path:
+    try:
+        return claude_config_dir() / "projects"
+    except RuntimeError:
+        # No home directory to be found, so no Claude Code memory either:
+        # a path that names nothing, for discovery to find nothing in and
+        # `import-claude --help` to show, rather than an error.
+        return Path("~") / ".claude" / "projects"
+
+
+def default_root() -> Path:
+    """Where Claude Code keeps per-project memory: DEFAULT_ROOT when it has
+    been assigned, otherwise <Claude Code's directory>/projects, now."""
+    pinned = globals().get("DEFAULT_ROOT")
+    return Path(pinned) if pinned is not None else _projects()
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_ROOT":
+        return _projects()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 INDEX_NAME = "MEMORY.md"          # a table of contents, not a fact
 
 # Frontmatter `type` -> Compartment importance. Mirrors the vault's own tiers:
@@ -44,9 +95,42 @@ DEFAULT_IMPORTANCE = 0.70
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
+def auto_memory_dir() -> Path | None:
+    """The directory Claude Code's `autoMemoryDirectory` setting moves
+    auto memory to, from the user settings.json beside DEFAULT_ROOT, or
+    None when it is not set.
+
+    Since Claude Code 2.1.74 that one setting replaces
+    projects/<project>/memory/ with any directory the user names (~/
+    expanded; it is ignored in a project's checked-in settings, so only
+    the user's own file is read). Memory written there was invisible to
+    both the import and the capture hook, which looked only under
+    projects/. A relative value is ignored: there is no project here to
+    resolve it against."""
+    try:
+        from .clients import _read_json
+        value = _read_json(default_root().parent / "settings.json").get(
+            "autoMemoryDirectory")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    d = Path(value.strip()).expanduser()
+    return d if d.is_absolute() else None
+
+
 def discover(root: Path | str | None = None) -> list[Path]:
-    """Every Claude Code memory file, sorted, index files excluded."""
-    root = Path(root) if root else DEFAULT_ROOT
+    """Every Claude Code memory file, sorted, index files excluded: under
+    `root`, or by default under DEFAULT_ROOT and in the directory
+    autoMemoryDirectory names."""
+    if root is None:
+        out = discover(default_root())
+        extra = auto_memory_dir()
+        if extra is not None and extra.is_dir():
+            out += [p for p in sorted(extra.glob("*.md"))
+                    if p.name != INDEX_NAME and p.is_file() and p not in out]
+        return out
+    root = Path(root)
     if not root.exists():
         return []
     if root.name == "memory" and root.is_dir():      # a memory dir directly
@@ -88,7 +172,10 @@ def _parse_frontmatter(raw: str) -> tuple[dict, str]:
 
 def parse(path: Path) -> dict:
     """One memory file -> the record Compartment should store."""
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    # utf-8-sig: a note saved by a Windows editor with a byte order mark
+    # still opens with its frontmatter, instead of the mark hiding it and
+    # the whole block being stored as the fact.
+    raw = path.read_text(encoding="utf-8-sig", errors="replace")
     fields, body = _parse_frontmatter(raw)
     name = fields.get("name") or path.stem
     description = fields.get("description", "")
@@ -195,8 +282,9 @@ def pending(vault, root: Path | str | None = None) -> int:
 
 
 def default_root_exists() -> bool:
-    return DEFAULT_ROOT.exists() and bool(discover())
+    return default_root().exists() and bool(discover())
 
 
-__all__ = ["DEFAULT_ROOT", "discover", "parse", "import_files", "pending",
-           "default_root_exists", "IMPORTANCE", "file_tag"]
+__all__ = ["DEFAULT_ROOT", "default_root", "discover", "parse", "import_files", "pending",
+           "default_root_exists", "IMPORTANCE", "file_tag",
+           "claude_config_dir", "auto_memory_dir"]

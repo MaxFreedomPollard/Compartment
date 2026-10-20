@@ -16,8 +16,9 @@ Compartment needs **Python 3.11 or newer**.
 python3 --version
 ```
 
-If that reports anything below 3.11, stop and tell the user to install a newer
-Python first. Do not try to work around it.
+On Windows the command is `py --version` (or `python --version`). If it
+reports anything below 3.11, stop and tell the user to install a newer Python
+first. Do not try to work around it.
 
 ## 2. Install the package
 
@@ -25,16 +26,30 @@ Python first. Do not try to work around it.
 pip install compartment
 ```
 
-`pipx install compartment` and `uv tool install compartment` both work too, and
-are better if the user keeps their global Python clean. All three put a
-`compartment` executable on the PATH. Confirm it landed:
+On Windows: `py -m pip install compartment`.
+
+If pip refuses with `error: externally-managed-environment` (Debian 12 and
+newer, Ubuntu 23.04 and newer, Homebrew's Python, Arch and others mark the
+system Python as managed by the OS), do not pass `--break-system-packages`.
+Use one of these instead, which install Compartment into its own environment:
+
+```bash
+pipx install compartment
+uv tool install compartment
+```
+
+They are also the better choice when the user keeps their global Python
+clean. All three routes put a `compartment` executable on the PATH. Confirm it
+landed:
 
 ```bash
 compartment --version
 ```
 
 If the shell cannot find `compartment`, the install directory is not on PATH.
-On most systems that directory is `~/.local/bin`.
+On most systems that directory is `~/.local/bin` (`pipx ensurepath` or
+`uv tool update-shell` adds it); on Windows it is the `Scripts` folder of the
+Python installation, which `py -m pip show compartment` reveals.
 
 ## 3. Create the vault (the user must do this step, not you)
 
@@ -100,7 +115,8 @@ Then confirm the MCP server itself starts:
 compartment serve --help
 ```
 
-Cline launches it as `compartment serve` over stdio. You do not need to run
+Cline launches the server itself over stdio, using the full path to the
+`compartment` executable that `integrate` wrote. You do not need to run
 `compartment serve` yourself, and you should not leave a copy running.
 
 ## Manual configuration (any MCP client)
@@ -121,14 +137,23 @@ If a client is not in `--list`, add this block to its MCP config by hand:
 VS Code uses the key `servers` and wants `"type": "stdio"`. Zed uses
 `context_servers`. Codex uses TOML under `[mcp_servers.compartment]`.
 
+A client started from the Dock, the Start menu or a desktop launcher does not
+see the PATH the user's shell sets up, so a bare `compartment` that works in
+the terminal can fail inside it. When writing the block by hand, prefer the
+absolute path: `which compartment` prints it on macOS and Linux,
+`where compartment` on Windows. `compartment integrate` always writes the
+absolute path.
+
 ## Troubleshooting
 
 **Tools return a locked error.** The vault is locked. `compartment unlock`, or
 `compartment unlock --keychain` on macOS so it survives the next reboot.
 
-**`compartment: command not found` inside the client but not in the shell.**
-The client is not inheriting the user's PATH. Put the absolute path to the
-executable in the `command` field instead. `which compartment` prints it.
+**`compartment: command not found` (or `spawn compartment ENOENT`) inside the
+client but not in the shell.** The client is not inheriting the user's PATH.
+Put the absolute path to the executable in the `command` field instead, or run
+`compartment integrate <client>`, which does. `which compartment` prints the
+path on macOS and Linux, `where compartment` on Windows.
 
 **The client shows the server but lists no tools.** Reload the client window.
 Most MCP clients only read their server list at startup.

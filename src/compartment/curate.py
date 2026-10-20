@@ -87,7 +87,9 @@ def parse_plan(text: str) -> list[dict]:
     ensure_ascii=False leaves U+2028 and U+2029 unescaped inside strings,
     and splitlines() would cut a valid plan line in half at them."""
     plan = []
-    for n, line in enumerate(text.split("\n"), 1):
+    # A plan saved by a Windows editor may start with a byte order mark,
+    # which json.loads refuses as line 1 not being JSON.
+    for n, line in enumerate(text.lstrip("\ufeff").split("\n"), 1):
         if not line.strip():
             continue
         try:

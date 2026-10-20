@@ -1,0 +1,67 @@
+# Compartment's entry for the Docker MCP Catalog (Docker Desktop's MCP
+# Toolkit, hub.docker.com/mcp). It belongs in github.com/docker/mcp-registry
+# as servers/compartment/server.yaml; it is kept here so it is reviewed and
+# tested with the code it describes. docs/PLUGINS.md has the submission
+# steps. This repository does not read the file itself.
+#
+# Docker builds the image from the Dockerfile at `source.commit` and signs it
+# under mcp/compartment. That Dockerfile runs the server as an unprivileged
+# user over stdio, with the vault at /data/memory.vault and no port. The
+# catalog adds the one thing a container cannot do for itself: mount the
+# user's vault folder. disableNetwork runs the container with no network at
+# all, which is the offline guarantee enforced by Docker rather than
+# promised by us.
+#
+# The vault has to exist before the first run (`compartment init` on the
+# host), because creating it asks for the passphrase and a catalog server
+# has no terminal. Inside the container there is no Keychain and no boot
+# session to inherit, so the passphrase arrives the way the Dockerfile
+# documents, as COMPARTMENT_PASSPHRASE, kept in Docker Desktop's secret store.
+#
+# source.commit is the current main; Docker's pin-update workflow moves it
+# with each release once the entry is merged.
+name: compartment
+image: mcp/compartment
+type: server
+meta:
+  category: productivity
+  tags:
+    - memory
+    - agent-memory
+    - encryption
+    - offline
+    - local-first
+    - privacy
+about:
+  title: Compartment
+  description: |
+    Encrypted, fully offline long-term memory for AI agents. One vault on
+    your own machine, AEAD-encrypted at rest including the vector index,
+    shared by every MCP client: what one agent stores, the others recall.
+    Embedding runs locally inside the container, which runs with no
+    network. Create the vault once on the host with
+    `pip install compartment && compartment init`, then mount its folder.
+  icon: https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/logo-400.png
+source:
+  project: https://github.com/MaxFreedomPollard/Compartment
+  commit: be47c40ce1e7fc62ff213a926fe5405e571d34a8
+run:
+  volumes:
+    - "{{compartment.vault_dir}}:/data"
+  disableNetwork: true
+config:
+  description: Mount the folder that holds your vault and give its passphrase
+  secrets:
+    - name: compartment.passphrase
+      env: COMPARTMENT_PASSPHRASE
+      example: <COMPARTMENT_PASSPHRASE>
+      description: The passphrase you chose at `compartment init`
+  parameters:
+    type: object
+    properties:
+      vault_dir:
+        type: string
+        description: Folder on this machine that holds memory.vault (created by `compartment init`, usually ~/.compartment)
+        default: /Users/local-test/.compartment
+    required:
+      - vault_dir

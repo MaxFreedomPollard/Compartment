@@ -189,10 +189,13 @@ def test_codex_gets_a_table_appended_and_keeps_the_rest(tmp_path):
 def test_codex_is_not_registered_twice(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[mcp_servers.compartment]\ncommand = "compartment"\n')
+    clients.register(clients.CLIENTS["codex"], VAULT, path=p)
     res = clients.register(clients.CLIENTS["codex"], VAULT, path=p)
 
     assert res["written"] is False
     assert p.read_text().count("[mcp_servers.compartment]") == 1
+    entry = tomllib.loads(p.read_text())["mcp_servers"]["compartment"]
+    assert entry["args"][:2] == ["--vault", VAULT]     # refreshed once
 
 
 def test_codex_unregister_takes_only_our_table(tmp_path):
@@ -435,7 +438,7 @@ def test_a_client_known_by_a_bare_filename_is_not_found_everywhere(
     assert clients.CLIENTS["librechat"].present() is True
     assert clients.CLIENTS["open-webui"].present() is False
     cli.main(["--vault", VAULT, "integrate", "librechat"])
-    assert '"mcpServers"' in capsys.readouterr().out
+    assert "mcpServers:" in capsys.readouterr().out
 
 
 def test_one_client_that_fails_does_not_stop_integrate_all(tmp_path,

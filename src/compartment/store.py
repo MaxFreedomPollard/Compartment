@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import sys
 import time
 import uuid
 
@@ -112,6 +113,27 @@ class StoreError(CryptoError):
     pass
 
 
+def _no_fts5_error() -> StoreError:
+    """The refusal for a Python whose SQLite was built without FTS5.
+
+    Rare, but real: Python compiled against the SQLite of an older
+    enterprise distribution (CentOS/RHEL 7, Amazon Linux 2) and some
+    minimal or embedded builds. Keyword search is half of every recall and
+    the full-text table is part of the vault's image, so there is no
+    degraded mode to fall back to; what the user needs is to know which
+    interpreter is the problem and where a working one comes from."""
+    return StoreError(
+        f"This Python's SQLite ({sqlite3.sqlite_version}, used by "
+        f"{sys.executable or 'this interpreter'}) was built without FTS5, "
+        "the full-text index Compartment's keyword search and vault format "
+        "require. Run Compartment under a Python whose SQLite has it: the "
+        "python.org installers, Homebrew, conda, `uv python install 3.12`, "
+        "and the python3 of any current Linux distribution all do. "
+        "Reinstall Compartment with that interpreter (<python> -m pip "
+        "install compartment, or uv tool install --python 3.12 "
+        "compartment); your vault is untouched.")
+
+
 class Store:
     def __init__(self, image: bytes | None = None):
         # Autocommit: the DB lives only in RAM - durability comes from the
@@ -154,21 +176,23 @@ class Store:
         # GROUP BY over every record. Dropped by whatever adds a record,
         # removes one or moves one to another namespace.
         self._ns_cache: list[dict] | None = None
-        if image is not None:
-            self.conn.deserialize(image)
-            # idempotent schema upgrade: vaults sealed by older versions gain
-            # any new tables (e.g. relations) the moment they are opened
-            self.conn.executescript(SCHEMA)
-        else:
-            self.conn.executescript(SCHEMA)
-        self._migrate_columns()
         try:
+            if image is not None:
+                self.conn.deserialize(image)
+            # Idempotent schema upgrade: vaults sealed by older versions gain
+            # any new tables (e.g. relations) the moment they are opened.
+            # Creating the full-text table is also where a SQLite without
+            # FTS5 first fails, for a new vault: the friendly refusal below
+            # used to come after it and was reached only when an existing
+            # vault was opened, so `compartment init` died on a bare
+            # "no such module: fts5".
+            self.conn.executescript(SCHEMA)
+            self._migrate_columns()
             self.conn.execute("SELECT count(*) FROM fts")
         except sqlite3.OperationalError as exc:
-            raise StoreError(
-                "This Python's SQLite lacks FTS5, which Compartment requires "
-                "for hybrid search. Install a Python built with full SQLite."
-            ) from exc
+            if "fts5" in str(exc).lower():
+                raise _no_fts5_error() from exc
+            raise
 
     # New COLUMNS on an existing table, unlike new tables, do not arrive for
     # free: `CREATE TABLE IF NOT EXISTS` is a no-op the moment the table

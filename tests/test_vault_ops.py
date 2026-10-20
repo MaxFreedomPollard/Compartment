@@ -574,19 +574,21 @@ def test_a_save_still_syncs_its_copy_before_the_rename(vault, vault_path,
     synced before it is renamed over the vault, and the vault stays 0600."""
     vault.store("A memory saved the ordinary way.", caller="test")
     order = []
+    real_sync = vaultfile._sync
 
-    def fsync(fd):
-        order.append("fsync")
-        return os.fsync(fd)
+    def sync(fd):
+        order.append("sync")
+        return real_sync(fd)
 
     def replace(src, dst):
         order.append("replace")
         return os.replace(src, dst)
 
     with monkeypatch.context() as m:
-        m.setattr(vaultfile, "os", _With(os, fsync=fsync, replace=replace))
+        m.setattr(vaultfile, "_sync", sync)
+        m.setattr(vaultfile, "os", _With(os, replace=replace))
         vault.save()
-    assert order == ["fsync", "replace"]
+    assert order[:2] == ["sync", "replace"]
     assert not os.path.exists(vault_path + ".tmp")
     if os.name != "nt":
         assert os.stat(vault_path).st_mode & 0o777 == 0o600
@@ -711,3 +713,14 @@ def test_a_keychain_that_does_not_answer_is_no_credential(monkeypatch):
     assert vault_module.keychain_clear("/x/a.vault") is False
     with pytest.raises(vault_module.CryptoError, match="did not answer"):
         vault_module.keychain_store("/x/a.vault", b"\x00" * 32)
+
+
+def test_a_nan_similarity_is_never_a_duplicate(vault, monkeypatch):
+    """A vector from a broken model run scores NaN against everything, and
+    NaN compares false both ways: `score < thr` read it as a match, so every
+    later store came back as a "duplicate" of whatever was nearest."""
+    first = vault.store("The staging database is Postgres 16", caller="test")
+    monkeypatch.setattr(vault.index, "search",
+                        lambda vec, k: [(next(iter(vault._id_by_ikey)), float("nan"))])
+    second = vault.store("Deploys go out on Tuesdays", caller="test")
+    assert not second["duplicate"] and second["id"] != first["id"]

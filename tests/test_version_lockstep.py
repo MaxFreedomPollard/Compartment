@@ -75,6 +75,144 @@ def test_plugin_json_matches_the_package():
     assert d["version"] == _semver(_version())
 
 
+def test_claude_code_plugin_json_matches_the_package():
+    """Claude Code decides whether an installed plugin is out of date by this
+    field, and a plugin that declares none is pinned to whatever commit it
+    was installed from, so it has to exist and has to move with every
+    release. Codex and OpenClaw read the same file when they install from
+    this marketplace."""
+    d = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(
+        encoding="utf-8"))
+    assert d["version"] == _semver(_version())
+
+
+def test_marketplace_entries_that_carry_a_version_match_the_package():
+    """The entry may repeat the plugin's version; Claude Code shows the
+    entry's metadata before plugin.json's, so a stale copy there would be
+    the number users see. None is set today; this stops one from rotting."""
+    d = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(
+        encoding="utf-8"))
+    for entry in d["plugins"]:
+        if "version" in entry:
+            assert entry["version"] == _semver(_version()), entry["name"]
+
+
+def test_the_claude_desktop_bundle_installs_this_release():
+    """The .mcpb attached to a release must install that release: its
+    manifest is the version Claude Desktop shows and compares on update, and
+    the pin is what uv installs."""
+    d = json.loads((ROOT / "packaging" / "mcpb" / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert d["version"] == _semver(_version())
+    text = (ROOT / "packaging" / "mcpb" / "pyproject.toml").read_text(
+        encoding="utf-8")
+    assert re.search(r'^version\s*=\s*"([^"]+)"', text, re.M).group(1) == _version()
+    assert re.search(r'"compartment==([^"]+)"', text).group(1) == _version()
+
+
+def test_the_continue_block_carries_this_release():
+    """Continue's hub shows a block's version; it is published from here."""
+    assert _yaml_version(ROOT / "packaging" / "continue" / "compartment.yaml") \
+        == _version()
+
+
+# ----------------------------------------------------------- coverage ------
+#: Every file above, and nothing else, may carry the package's version.
+GATED = {
+    "pyproject.toml",
+    "server.json",
+    "plugin.json",
+    "gemini-extension.json",
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "integrations/hermes/compartment/plugin.yaml",
+    "src/compartment/data/hermes-plugin/plugin.yaml",
+    "packaging/mcpb/manifest.json",
+    "packaging/mcpb/pyproject.toml",
+    "packaging/continue/compartment.yaml",
+}
+
+#: Files whose version field is their own, not the package's.
+OWN_VERSION = {
+    # The tombstone for the pre-rename PyPI name. It only depends on
+    # compartment; republishing it under every Compartment version would
+    # upload an identical empty package each release.
+    "packaging/engram-memory-vault/pyproject.toml",
+    # The skill's own revision, which Hermes shows; it changes when the
+    # skill's text does, not when the package does.
+    "skills/compartmentalize/SKILL.md",
+    "src/compartment/data/agent-skill/SKILL.md",
+}
+
+#: Known drift in a file this test does not own the fix for. Strict, so the
+#: day it is fixed the marker has to go and the file joins GATED.
+KNOWN_STALE = {
+    # The plugin.yaml prepared for a PR to hermes-agent still says 1.7.0 and
+    # compartment>=2.3. It is not shipped by anything in this repository,
+    # which is why nothing caught it.
+    "integrations/hermes/upstream/plugin.yaml",
+}
+
+_SKIP_DIRS = {".git", "tests", "models", "build", "dist", ".venv", "venv",
+              "node_modules", "__pycache__"}
+
+
+def _carries_a_version(p: pathlib.Path) -> bool:
+    """A top-level version field, in whatever syntax the file is written in,
+    or a pin on the compartment package itself."""
+    text = p.read_text(encoding="utf-8", errors="replace")
+    if p.suffix == ".json":
+        try:
+            d = json.loads(text)
+        except ValueError:
+            return False
+        if not isinstance(d, dict):
+            return False
+        return "version" in d or any(
+            isinstance(e, dict) and "version" in e
+            for e in d.get("plugins", []) or [])
+    if p.name == "SKILL.md":
+        head = text.split("---", 2)[1] if text.startswith("---") else ""
+        return bool(re.search(r"^\s*version:", head, re.M))
+    if p.suffix in (".yaml", ".yml", ".toml"):
+        return bool(re.search(r"^version\s*[:=]", text, re.M)
+                    or re.search(r"\bcompartment\s*==\s*[0-9]", text))
+    return False
+
+
+def _manifests_with_a_version() -> set[str]:
+    found = set()
+    for p in ROOT.rglob("*"):
+        rel = p.relative_to(ROOT)
+        if any(part in _SKIP_DIRS or part.endswith(".egg-info")
+               for part in rel.parts[:-1]):
+            continue
+        if not p.is_file():
+            continue
+        if p.suffix in (".json", ".yaml", ".yml", ".toml") or p.name == "SKILL.md":
+            if _carries_a_version(p):
+                found.add(rel.as_posix())
+    return found
+
+
+def test_every_file_that_carries_a_version_is_gated():
+    """A new manifest nobody added to this file is exactly how plugin.yaml
+    drifted. Anything in the tree with a version field must be checked
+    above, or say here why its version is its own."""
+    unaccounted = _manifests_with_a_version() - GATED - OWN_VERSION - KNOWN_STALE
+    assert not unaccounted, (
+        f"{sorted(unaccounted)} carry a version this test does not check: "
+        "gate it against the package version above, or add it to "
+        "OWN_VERSION with the reason it differs")
+
+
+@pytest.mark.parametrize("rel", sorted(KNOWN_STALE))
+@pytest.mark.xfail(strict=True, reason="stale copy in a file this test does "
+                   "not own; see KNOWN_STALE")
+def test_known_stale_copies_match_the_package(rel):
+    assert _yaml_version(ROOT / rel) == _version()
+
+
 @pytest.mark.parametrize("path", PLUGIN_YAMLS, ids=lambda p: p.parent.name)
 def test_hermes_plugin_yaml_matches_the_package(path):
     """`hermes plugins list` prints this in its Version column, so a stale

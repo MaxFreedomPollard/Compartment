@@ -8,7 +8,7 @@
       "command": "compartment",
       "args": [
         "--caller",
-        "gemini-cli",
+        "gemini",
         "serve"
       ]
     }
