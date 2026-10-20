@@ -101,12 +101,10 @@ jobs:
         include:
           - runner: macos-latest
             arch: apple-silicon
-            suffix: ""
           # onnxruntime's last macOS x86_64 wheels are 1.23.2 for Python up
-          # to 3.13; pip resolves to it here on its own.
+          # to 3.13; the build selects it on its own.
           - runner: macos-15-intel
             arch: intel
-            suffix: "-intel"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -122,20 +120,21 @@ jobs:
           uv python install 3.12
           echo "EMBED_PY=$(uv python find --managed-python 3.12)" >> "$GITHUB_ENV"
       - name: Build Compartment.app, the .pkg and the .dmg
+        # On an Intel runner the script names them Compartment-<v>-intel.*
+        # itself, and the installer refuses to run on the other architecture.
         shell: bash
         run: |
           "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg
           ls -l build
-      - name: Name them for their architecture
+      - name: Exactly one .pkg and one .dmg of this version
         shell: bash
         env:
           V: ${{ needs.check.outputs.version }}
-          SUFFIX: ${{ matrix.suffix }}
         run: |
           mkdir -p out
-          cp "build/Compartment-$V.pkg" "out/Compartment-$V$SUFFIX.pkg"
-          cp "build/Compartment-$V.dmg" "out/Compartment-$V$SUFFIX.dmg"
+          cp build/Compartment-"$V"*.pkg build/Compartment-"$V"*.dmg out/
           ls -l out
+          test "$(ls out | wc -l)" -eq 2
       - uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.arch }}

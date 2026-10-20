@@ -116,6 +116,44 @@ jobs:
         shell: bash
         run: python tools/mcp_smoke.py --command compartment
 
+  macos-app:
+    # The same build the Release workflow runs at tag time, so a broken
+    # installer shows up on the pull request that broke it rather than on
+    # release day. The .pkg and .dmg are kept for a week for anyone who
+    # wants to try a change before it ships.
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: apple-silicon
+          - runner: macos-15-intel
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: A standalone, non-framework Python to embed
+        shell: bash
+        run: |
+          uv python install 3.12
+          echo "EMBED_PY=$(uv python find --managed-python 3.12)" >> "$GITHUB_ENV"
+      - name: Build Compartment.app, the .pkg and the .dmg
+        shell: bash
+        run: |
+          "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg
+          ls -l build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compartment-macos-${{ matrix.arch }}
+          path: |
+            build/Compartment-*.pkg
+            build/Compartment-*.dmg
+          retention-days: 7
+          if-no-files-found: error
+
   wheel-coverage:
     # pip installs the newest release of every dependency and compiles it when
     # that release has no wheel for the machine. That is how a plain
