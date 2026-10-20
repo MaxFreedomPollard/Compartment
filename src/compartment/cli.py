@@ -671,7 +671,7 @@ def cmd_uninstall(args) -> None:
             print(f"  compartment block removed from {md}")
     except Exception as exc:                             # noqa: BLE001
         print(f"  CLAUDE.md: {exc}")
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    hermes_home = _hermes_home()
     plugin = hermes_home / "plugins" / "compartment"
     try:
         files = ("__init__.py", "plugin.yaml")
@@ -1856,7 +1856,7 @@ def _refresh_installed() -> list[str]:
             line += f" (the previous copy is kept at {r['backup']})"
         done.append(line)
 
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    hermes_home = _hermes_home()
     plug_src = _data_dir() / "hermes-plugin"
     plug_dst = hermes_home / "plugins" / "compartment"
     if (plug_dst / "plugin.yaml").is_file():
@@ -2007,6 +2007,27 @@ def _integrate_client(client, args, brief: bool = False) -> None:
 #: small step for that program; one busy updating itself is no reason to
 #: hold an install for as long as that takes.
 AGENT_TOOL_TIMEOUT = 120
+def _hermes_home() -> Path:
+    """Hermes Agent's home, found the way Hermes finds it
+    (hermes_constants.get_hermes_home): HERMES_HOME, with ~ and variables
+    expanded, else the platform default.
+
+    On Windows that default is %LOCALAPPDATA%\\hermes, not ~/.hermes, and the
+    Windows installer does not export HERMES_HOME. Looking only in ~/.hermes,
+    `integrate hermes` on native Windows put the provider plugin where
+    Hermes never reads it and reported it installed, never found the
+    Hermes venv to put compartment into, and uninstall and the refresh
+    after an update looked in the same wrong place."""
+    explicit = os.environ.get("HERMES_HOME", "").strip()
+    if explicit:
+        return Path(os.path.expanduser(os.path.expandvars(explicit)))
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(local) if local
+                else Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
+
+
 #: The `import compartment` check in Hermes's own interpreter.
 HERMES_IMPORT_TIMEOUT = 30
 #: pip installing compartment into Hermes's own environment.
@@ -2020,7 +2041,7 @@ def _integrate_target(args) -> None:
     vault = args.vault
 
     if target == "hermes":
-        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        hermes_home = _hermes_home()
         plug_src = _data_dir() / "hermes-plugin"
         plug_dst = hermes_home / "plugins" / "compartment"
         plug_dst.mkdir(parents=True, exist_ok=True)
@@ -2028,7 +2049,8 @@ def _integrate_target(args) -> None:
             shutil.copy2(plug_src / f, plug_dst / f)
         print(f"✓ provider plugin installed → {plug_dst}")
         # compartment must be importable from Hermes's own venv
-        hermes_py = hermes_home / "hermes-agent" / "venv" / "bin" / "python"
+        hermes_py = hermes_home / "hermes-agent" / "venv" / (
+            "Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         if hermes_py.exists():
             # No stdin for any program run here: a question one of them asks
             # must fail, not wait on the user's keyboard, and a failure or a
