@@ -321,3 +321,76 @@ def test_the_continue_block_is_a_block_continue_loads():
     assert server["type"] == "stdio" and server["command"] == "compartment"
     assert server["args"][-1] == "serve"
     assert _caller(server["args"]) == clients.CLIENTS["continue"].key
+
+
+# ------------------------------------------------- across every listing -----
+def _listings() -> dict[str, tuple[str, list[str]]]:
+    """host -> (command, compartment arguments) for every place this
+    repository tells a host how to start the server."""
+    import base64
+    from urllib.parse import parse_qs, urlsplit
+    out = {}
+    out["claude-code"] = tuple(_json(".claude-plugin/plugin.json")["mcpServers"]
+                               ["compartment"][k] for k in ("command", "args"))
+    out["agent-plugins"] = tuple(_json("mcp.json")["mcpServers"]["compartment"][k]
+                                 for k in ("command", "args"))
+    out["gemini"] = tuple(_json("gemini-extension.json")["mcpServers"]
+                          ["compartment"][k] for k in ("command", "args"))
+    q = parse_qs(urlsplit(_deeplinks("add/lmstudio.html")[0]).query)
+    lm = json.loads(base64.b64decode(q["config"][0]))
+    out["lmstudio"] = (lm["command"], lm["args"])
+    q = parse_qs(urlsplit(_deeplinks("add/goose.html")[0]).query)
+    out["goose"] = (q["arg"][0], q["arg"][1:])          # uvx <package> <args>
+    entry = _dockerfile_entrypoint()
+    out["docker"] = (entry[0], entry[1:])
+    main_py = (ROOT / "packaging/mcpb/server/main.py").read_text(encoding="utf-8")
+    out["claude-desktop"] = ("compartment", json.loads(
+        re.search(r"main\((\[.*?\])\)", main_py).group(1)))
+    try:
+        cont = _yaml("packaging/continue/compartment.yaml")["mcpServers"][0]
+        out["continue"] = (cont["command"], cont["args"])
+    except Exception:                                   # noqa: BLE001
+        pass                                            # no PyYAML here
+    return out
+
+
+def test_every_listing_starts_the_same_server():
+    """One executable, global options only before the subcommand, and the
+    subcommand last: `compartment [--vault V] [--caller C] serve`."""
+    for host, (command, args) in _listings().items():
+        assert command == "compartment", host
+        assert args[-1] == "serve", host
+        opts = args[:-1]
+        assert len(opts) % 2 == 0, (host, args)
+        assert set(opts[::2]) <= {"--vault", "--caller"}, (host, args)
+
+
+def test_every_listing_names_its_host_as_integrate_does():
+    """The caller is the audit log's name for a client and the key ACL
+    entries are written against. Where `compartment integrate` wires the
+    same host, a listing must use the caller integrate writes, or one app
+    shows up as two clients; and no two hosts may share a caller."""
+    from compartment import clients
+    listings = _listings()
+    callers = {host: _caller(args) for host, (_, args) in listings.items()}
+    assert len(set(callers.values())) == len(callers), callers
+    for host, caller in callers.items():
+        if host in clients.CLIENTS:
+            assert caller == clients.CLIENTS[host].key, (host, caller)
+    assert callers["claude-code"] == "claude-code"      # integrate claude
+    assert callers["claude-desktop"] == "claude-desktop"
+
+
+def test_no_listing_claims_a_tool_count_the_server_does_not_have():
+    count = len(_registered_tools())
+    for rel in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
+                "plugin.json", "gemini-extension.json", "server.json",
+                "packaging/mcpb/manifest.json", "packaging/docker-mcp/server.yaml",
+                "packaging/continue/compartment.yaml", "llms-install.md",
+                "docs/PLUGINS.md", "registry.html"):
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        for n in re.findall(r"\b(\d+) (?:memory |MCP )?tools\b",
+                            p.read_text(encoding="utf-8")):
+            assert int(n) == count, (rel, n, count)
