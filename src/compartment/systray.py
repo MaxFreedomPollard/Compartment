@@ -376,6 +376,22 @@ def systemd_available() -> bool:
                 or "no medium" in low or not out)
 
 
+def graphical_session_active() -> bool:
+    """Does this login's desktop start graphical-session.target?
+
+    The unit is WantedBy that target, so it starts at login only on a
+    desktop whose session manager activates it: GNOME, KDE Plasma, and
+    compositors set up for it. Xfce, MATE, Cinnamon (Linux Mint's default),
+    LXQt and a bare window manager never do, and there an enabled unit is a
+    unit that never starts - while the autostart entry it replaced, which
+    every XDG desktop reads, was deleted as the redundant second starter.
+    Asked while the desktop is up (install time, from its terminal); asked
+    from SSH or a text console it is inactive too, and the autostart entry,
+    which works everywhere, is the right answer there as well.
+    """
+    return _systemctl("is-active", "graphical-session.target")[0] == 0
+
+
 def systemd_unit_text(vault: str | None = None) -> str:
     return (
         "[Unit]\n"
@@ -742,7 +758,8 @@ def set_login(enabled: bool, vault: str | None = None) -> str:
         # Supervised where the machine can be. A unit that enables but never
         # starts is not proof of anything, so it has to be active too, and
         # anything short of that is undone rather than left half installed.
-        if systemd_available():
+        # Only on a desktop that starts the unit's target at login at all.
+        if systemd_available() and graphical_session_active():
             if install_systemd_unit(vault) == "on" and systemd_active():
                 remove_autostart_entry()          # exactly one starter
                 return "on"
@@ -1621,6 +1638,7 @@ __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
            "autostart_entry_path", "install_autostart_entry",
            "autostart_is_enabled", "remove_autostart_entry",
            "systemd_unit_path", "systemd_unit_text", "systemd_available",
+           "graphical_session_active",
            "systemd_enabled", "install_systemd_unit", "remove_systemd_unit",
            "scheduled_task_xml", "install_scheduled_task",
            "remove_scheduled_task", "scheduled_task_registered",

@@ -874,6 +874,29 @@ def test_a_machine_with_no_user_manager_still_starts_at_login(as_linux,
     assert not systray.systemd_unit_path().exists()
 
 
+def test_a_desktop_that_never_starts_the_target_keeps_its_autostart_entry(
+        as_linux, monkeypatch):
+    """Xfce, MATE, Cinnamon and LXQt never activate graphical-session.target,
+    which the unit is WantedBy, so an enabled unit there never starts at
+    login - and the autostart entry, which they all read, was removed as
+    the redundant second starter. The panel came up at install time and
+    never again."""
+    monkeypatch.setattr(systray, "systemd_available", lambda: True)
+    base = _fake_systemctl()
+
+    def xfce(*argv):
+        if argv[:2] == ("is-active", "graphical-session.target"):
+            return 3, "inactive"
+        return base(*argv)
+
+    monkeypatch.setattr(systray, "_systemctl", xfce)
+    assert systray.set_login(True) == "on"
+    assert systray.autostart_entry_path().is_file()
+    assert not systray.systemd_unit_path().exists()
+    assert not any(c[0] == "enable" for c in base.calls), \
+        "nothing enabled that will never start"
+
+
 def test_a_unit_that_will_not_run_is_undone_rather_than_left_half_done(
         as_linux, monkeypatch):
     """Enabled but not active proves nothing. Rather than leave a unit that
