@@ -23,7 +23,7 @@ from pathlib import Path
 from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
                claude_memory, clients, gate, offline_guard, packs, selftest,
                session)
-from .acl import VaultConfig
+from .acl import ConfigError, VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, get_embedder, user_model_dir
 from .vault import Vault, keychain_clear, keychain_get, keychain_store
@@ -2909,7 +2909,10 @@ def main(argv: list[str] | None = None) -> None:
         # closes the buffer under sys.stdout when `serve` ends.
         if not sys.stdout.closed:
             sys.stdout.flush()
-    except CryptoError as exc:
+    except (CryptoError, ConfigError) as exc:
+        # ConfigError: a <vault>.config.json that cannot be used, which
+        # names the file and what to do; a ValueError, so it was a
+        # traceback.
         _die(str(exc))
     except BrokenPipeError:
         # `compartment recent --all | head`: the reader took what it wanted

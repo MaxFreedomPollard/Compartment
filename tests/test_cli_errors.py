@@ -237,3 +237,12 @@ def test_a_claude_settings_file_that_is_not_json_is_named(tmp_path,
     err = _ends(command, capsys)
     assert str(settings) in err and "Traceback" not in err
 
+
+def test_a_vault_config_that_cannot_be_used_is_named(open_vault, capsys):
+    """A <vault>.config.json that is not JSON raises acl.ConfigError, which
+    names the file and what to do, and is a ValueError: the CLI, which
+    caught CryptoError alone, printed it as a traceback."""
+    with open(open_vault + ".config.json", "w", encoding="utf-8") as f:
+        f.write('{"settings": {')
+    err = _ends(["--vault", open_vault, "search", "anything"], capsys)
+    assert ".config.json" in err and "Traceback" not in err
