@@ -187,3 +187,55 @@ def test_a_mistyped_precision_setting_still_builds_an_index(capsys):
     for spelled, kind in (("INT8", "i8"), (" i8", "i8"), ("float16", "f16")):
         assert build_index(16, list(range(1, 51)), mat, precision=spelled,
                            force="hnsw").kind == f"hnsw/usearch ({kind})"
+
+
+def test_a_large_vault_is_not_given_an_hnsw_index_usearch_would_build_serially(
+        monkeypatch):
+    """Without SIMD - which is what usearch reports inside macOS Seatbelt,
+    where it cannot ask the kernel what the CPU supports - the graph is
+    built at a few hundred vectors a second, on every open: minutes for a
+    vault past the limit, against milliseconds per exact search."""
+    import pytest
+    pytest.importorskip("usearch")
+    from usearch import index as usearch_index
+
+    from compartment import vindex
+
+    built = []
+
+    class _Serial(usearch_index.Index):
+        hardware_acceleration = "serial"
+
+        def add(self, *args, **kwargs):
+            built.append(args)
+            return super().add(*args, **kwargs)
+
+    monkeypatch.setattr(usearch_index, "Index", _Serial)
+    monkeypatch.setattr(vindex, "BRUTE_FORCE_LIMIT", 10)
+    rng = np.random.default_rng(5)
+    mat = rng.standard_normal((40, 16)).astype(np.float32)
+    idx = vindex.build_index(16, list(range(1, 41)), mat)
+    assert isinstance(idx, BruteForceIndex)
+    assert not built, "no graph was built only to be thrown away"
+    assert idx.search(mat[3], 1)[0][0] == 4
+
+    forced = vindex.build_index(16, list(range(1, 41)), mat, force="hnsw")
+    assert forced.kind.startswith("hnsw"), "an explicit force is honoured"
+
+
+def test_with_simd_a_large_vault_still_gets_hnsw(monkeypatch):
+    import pytest
+    pytest.importorskip("usearch")
+    from usearch import index as usearch_index
+
+    from compartment import vindex
+
+    class _Simd(usearch_index.Index):
+        hardware_acceleration = "neon"
+
+    monkeypatch.setattr(usearch_index, "Index", _Simd)
+    monkeypatch.setattr(vindex, "BRUTE_FORCE_LIMIT", 10)
+    mat = np.random.default_rng(6).standard_normal((40, 16)).astype(np.float32)
+    idx = vindex.build_index(16, list(range(1, 41)), mat)
+    assert idx.kind.startswith("hnsw")
+    assert idx.search(mat[3], 1)[0][0] == 4

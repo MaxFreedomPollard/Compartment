@@ -97,10 +97,20 @@ class UsearchIndex(VectorIndex):
     def build(cls, dim: int, ikeys: list[int], mat: np.ndarray,
               precision: str = "f32") -> "UsearchIndex":
         idx = cls(dim, precision)
-        if len(ikeys):
-            idx._index.add(np.array(ikeys, dtype=np.uint64),
-                           np.ascontiguousarray(mat, dtype=np.float32))
+        idx.add_all(ikeys, mat)
         return idx
+
+    def add_all(self, ikeys: list[int], mat: np.ndarray) -> None:
+        if len(ikeys):
+            self._index.add(np.array(ikeys, dtype=np.uint64),
+                            np.ascontiguousarray(mat, dtype=np.float32))
+
+    @property
+    def serial(self) -> bool:
+        """True when usearch found no SIMD kernels it can use on this CPU
+        and computes every distance one element at a time. An older usearch
+        that does not say is taken to have them, as it always was."""
+        return getattr(self._index, "hardware_acceleration", None) == "serial"
 
     def add(self, ikey: int, vec: np.ndarray) -> None:
         self._index.add(np.uint64(ikey), vec.astype(np.float32))
@@ -159,8 +169,23 @@ def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
     if force == "brute" or (force is None and len(ikeys) < BRUTE_FORCE_LIMIT):
         return BruteForceIndex.build(dim, ikeys, mat)
     try:
-        return UsearchIndex.build(dim, ikeys, mat,
-                                  precision=_precision(precision))
+        idx = UsearchIndex(dim, _precision(precision))
+        # The HNSW graph is built from scratch on every open, and without
+        # SIMD usearch builds it at a few hundred vectors a second: measured
+        # 50 s for 25,000 vectors and over five minutes for 100,000, per
+        # open, where the exact index answers a search over 100,000 in about
+        # 9 ms and costs nothing to build. That is not a rare machine: SIMD
+        # dispatch asks the kernel what the CPU supports, and inside macOS
+        # Seatbelt - where Claude Code and Codex run an agent's commands -
+        # that query is refused, so usearch reports "serial" on every Apple
+        # Silicon Mac; likewise on CPUs it has no kernels for. A vault past
+        # the limit there took minutes to open in every CLI call and every
+        # MCP server reopen, long past the clients' tool-call timeouts.
+        # Chosen automatically only; an explicit force is honoured.
+        if force is None and idx.serial:
+            return BruteForceIndex.build(dim, ikeys, mat)
+        idx.add_all(ikeys, mat)
+        return idx
     except ImportError:
         global _HNSW_WARNED
         if not _HNSW_WARNED:
