@@ -472,3 +472,71 @@ def test_the_installer_runs_only_on_the_macs_the_app_can_start_on(
     assert dmg.name == f"Compartment-{version}{suffix}.dmg"
     readme = (tmp_path / "build" / "dmg" / "READ ME FIRST.txt").read_text()
     assert f"Compartment-{version}{suffix}.pkg" in readme
+
+
+# ----------------------------------------------------- a build CI can run
+
+def test_the_icon_needs_no_pillow_in_the_python_running_the_build(
+        tmp_path, monkeypatch):
+    """A runner given only uv's standalone Python has no Pillow, and the
+    build died at the icon after every other step had passed."""
+    monkeypatch.setitem(sys.modules, "PIL", None)        # import PIL fails
+    b = _builder()
+    out = b.build_icon(tmp_path / "Resources" / "Compartment.icns")
+    shipped = ROOT / "src" / "compartment" / "data" / "app.icns"
+    assert out.read_bytes() == shipped.read_bytes()
+
+
+def _main(b, monkeypatch, tmp_path, argv):
+    monkeypatch.setattr(b.sys, "platform", "darwin")
+    monkeypatch.setattr(b.sys, "argv", ["build_macos_app.py", *argv])
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    return b.main()
+
+
+def test_a_failed_step_exits_non_zero_naming_the_step(tmp_path, monkeypatch,
+                                                      capsys):
+    import subprocess
+    b = _builder()
+
+    def fail(*a, **k):
+        raise subprocess.CalledProcessError(2, ["pkgbuild", "--root", "x"])
+
+    monkeypatch.setattr(b, "build_app", fail)
+    assert _main(b, monkeypatch, tmp_path, ["--pkg"]) == 1
+    err = capsys.readouterr().err
+    assert "error: `pkgbuild --root x` exited 2" in err
+    assert "Traceback" not in err
+
+
+def test_the_build_lists_what_it_made(tmp_path, monkeypatch, capsys):
+    b = _builder()
+    app = tmp_path / "build" / "Compartment.app"
+    monkeypatch.setattr(b, "build_app", lambda *a, **k: app)
+    monkeypatch.setattr(b, "build_pkg", lambda a: a.with_name("C-1.pkg"))
+    monkeypatch.setattr(b, "build_dmg", lambda a: a.with_name("C-1.dmg"))
+    assert _main(b, monkeypatch, tmp_path, ["--pkg", "--dmg"]) == 0
+    listed = [ln.split(": ", 1)[1] for ln in capsys.readouterr().out
+              .splitlines() if ln.startswith("artifact: ")]
+    assert listed == [str(app), str(app.with_name("C-1.dmg")),
+                      str(app.with_name("C-1.pkg"))]
+
+
+def test_a_busy_disk_image_is_tried_again(tmp_path, monkeypatch):
+    import subprocess
+    b = _builder()
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (13, 0))})
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(b.time, "sleep", lambda s: None)
+    tries = []
+
+    def run(*args, **kw):
+        if args[0] == "hdiutil":
+            tries.append(args)
+            if len(tries) < 3:
+                raise subprocess.CalledProcessError(1, list(args))
+
+    monkeypatch.setattr(b, "_run", run)
+    b.build_dmg(app)
+    assert len(tries) == 3

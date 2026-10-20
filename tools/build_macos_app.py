@@ -5,6 +5,17 @@
     python tools/build_macos_app.py --pkg      # …and a .pkg with an optional
                                                #   "start at login" component
 
+From CI, on a GitHub macOS runner (arm64, or macos-15-intel for x86_64),
+with uv's standalone Python and nothing else installed:
+
+    uv python install 3.12
+    PY="$(uv python find --managed-python 3.12)"
+    "$PY" tools/build_macos_app.py --python "$PY" --pkg --dmg
+
+It exits non-zero on any failure, with one line saying which step, and
+writes build/Compartment-<version>.pkg and .dmg (-intel before the
+extension for an x86_64 build), listing them as `artifact: <path>`.
+
 Why the app has to embed its own Python
 ---------------------------------------
 A status bar item belongs to whatever process created it, and macOS decides
@@ -55,6 +66,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 _EMBEDDED_VER = [""]              # X.Y of the interpreter actually embedded
@@ -85,8 +97,25 @@ def _run(*args, **kw) -> subprocess.CompletedProcess:
 
 
 def build_icon(dest: pathlib.Path) -> pathlib.Path:
+    """The app's icon: the .icns the package already ships, which
+    tools/make_icon.py draws and the pip install's login bundle uses too.
+
+    Drawing it again here needed Pillow in whatever Python ran this script
+    and iconutil, and a CI runner given only uv's standalone Python has no
+    Pillow: the build died at the icon after every other step had passed.
+    The copy is the same picture, and only a checkout missing it is drawn.
+    """
+    shipped = ROOT / "src" / "compartment" / "data" / "app.icns"
+    if shipped.is_file():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(shipped, dest)
+        return dest
     sys.path.insert(0, str(ROOT / "tools"))
-    from make_icon import build as build_icns
+    try:
+        from make_icon import build as build_icns
+    except ImportError as exc:
+        raise SystemExit(f"error: {shipped} is missing, and drawing it needs "
+                         f"Pillow ({exc}): pip install pillow") from exc
     return build_icns(dest)
 
 
@@ -127,7 +156,11 @@ def find_standalone_python() -> str:
 
     if ok(sys.executable):
         return sys.executable
-    uv_root = pathlib.Path.home() / ".local" / "share" / "uv" / "python"
+    # Where uv keeps its Pythons, which UV_PYTHON_INSTALL_DIR moves (CI
+    # caches often do).
+    uv_root = pathlib.Path(os.environ.get("UV_PYTHON_INSTALL_DIR")
+                           or pathlib.Path.home() / ".local" / "share" / "uv"
+                           / "python")
     for d in sorted(uv_root.glob("cpython-3.*-macos-*"), reverse=True):
         for exe in sorted(d.glob("bin/python3.*"), reverse=True):
             if exe.is_file() and ok(str(exe)):
@@ -930,8 +963,20 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
         "https://github.com/MaxFreedomPollard/Compartment\n", encoding="utf-8")
     out = BUILD / artifact_name(version, arch, "dmg")
     out.unlink(missing_ok=True)
-    _run("hdiutil", "create", "-volname", f"{APP_NAME} {version}",
-         "-srcfolder", stage, "-ov", "-format", "UDZO", out)
+    # hdiutil on a CI runner now and then fails with "Resource busy" while
+    # something (Spotlight, the previous image) still has the volume; the
+    # same command a few seconds later succeeds. Three tries, then the
+    # error stands.
+    for attempt in range(3):
+        try:
+            _run("hdiutil", "create", "-volname", f"{APP_NAME} {version}",
+                 "-srcfolder", stage, "-ov", "-format", "UDZO", out)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            print("hdiutil failed; trying again in 5 s")
+            time.sleep(5)
     print(f"built {out}")
     return out
 
@@ -950,11 +995,22 @@ def main() -> int:
     ap.add_argument("--pkg", action="store_true")
     args = ap.parse_args()
     BUILD.mkdir(exist_ok=True)
-    app = build_app(args.spec, python=args.python, min_macos=args.min_macos)
-    if args.dmg:
-        build_dmg(app)
-    if args.pkg:
-        build_pkg(app)
+    try:
+        artifacts = [build_app(args.spec, python=args.python,
+                               min_macos=args.min_macos)]
+        if args.dmg:
+            artifacts.append(build_dmg(artifacts[0]))
+        if args.pkg:
+            artifacts.append(build_pkg(artifacts[0]))
+    except subprocess.CalledProcessError as exc:
+        # A step that failed says which, in one line, instead of a
+        # traceback through _run that a CI log buries the command in.
+        cmd = " ".join(str(a) for a in exc.cmd)
+        print(f"error: `{cmd[:300]}` exited {exc.returncode}",
+              file=sys.stderr)
+        return 1
+    for path in artifacts:
+        print(f"artifact: {path}")
     return 0
 
 
