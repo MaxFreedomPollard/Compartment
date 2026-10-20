@@ -145,7 +145,10 @@ def _parse_frontmatter(raw: str) -> tuple[dict, str]:
 
 def parse(path: Path) -> dict:
     """One memory file -> the record Compartment should store."""
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    # utf-8-sig: a note saved by a Windows editor with a byte order mark
+    # still opens with its frontmatter, instead of the mark hiding it and
+    # the whole block being stored as the fact.
+    raw = path.read_text(encoding="utf-8-sig", errors="replace")
     fields, body = _parse_frontmatter(raw)
     name = fields.get("name") or path.stem
     description = fields.get("description", "")

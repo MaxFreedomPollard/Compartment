@@ -62,3 +62,16 @@ def test_no_or_unusable_auto_memory_directory_changes_nothing(claude_home,
     _settings(claude_home, **({} if value is None
                               else {"autoMemoryDirectory": value}))
     assert claude_memory.auto_memory_dir() is None
+
+
+def test_a_note_saved_with_a_byte_order_mark_keeps_its_frontmatter(
+        tmp_path):
+    """The mark hid the opening ---, so the frontmatter was not recognised
+    and the whole block was stored as the fact, tagged with nothing."""
+    p = tmp_path / "memory" / "tea.md"
+    p.parent.mkdir()
+    p.write_bytes(b"\xef\xbb\xbf---\nname: tea\ndescription: Ana likes tea"
+                  b"\nmetadata:\n  type: user\n---\nGreen, no sugar.\n")
+    rec = claude_memory.parse(p)
+    assert rec["name"] == "tea" and "user" in rec["tags"]
+    assert "---" not in rec["text"] and "﻿" not in rec["text"]
