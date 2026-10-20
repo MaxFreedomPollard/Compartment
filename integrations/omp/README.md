@@ -62,5 +62,9 @@ The extension works with or without the MCP entry; both share the same vault.
   state or user instructions.
 - User-turn collection deduplicates by text; flushes are capped (20 turns,
   4000 chars) per store call.
+- The two tools declare their omp approval tier, `memory_search` a read and
+  `memory_store` a write, so an approval mode that passes reads does not
+  stop every recall as if it ran code, and both load as `essential`, in the
+  model's top-level tool list rather than behind tool search.
 - Vault locked? The CLI exits non-zero: recall adds nothing, a flush logs
   one line saying the turns were not stored, and nothing blocks the session.

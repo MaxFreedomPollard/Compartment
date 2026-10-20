@@ -3,6 +3,16 @@
   "name": "io.github.MaxFreedomPollard/compartment",
   "title": "Compartment",
   "description": "Durable agentic memory, encrypted at rest. Fully offline: no network, no API key, no cloud.",
+  "websiteUrl": "https://maxfreedompollard.github.io/Compartment/",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/logo-400.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "400x400"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/MaxFreedomPollard/Compartment",
     "source": "github",

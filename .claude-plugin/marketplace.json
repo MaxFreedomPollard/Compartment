@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "compartment",
-      "description": "Encrypted, fully offline memory for Claude Code. One vault on your machine, shared with Claude Desktop, Cursor, Hermes and any other MCP client; 14 memory tools plus the /compartmentalize skill. Requires `pip install compartment && compartment init` first.",
+      "description": "Encrypted, fully offline memory for Claude Code. One vault on your machine, shared with Claude Desktop, Cursor, Hermes and any other MCP client; 14 memory tools plus the compartmentalize skill. Requires `pip install compartment && compartment init` first.",
       "author": { "name": "Max Freedom Pollard" },
       "category": "productivity",
       "source": "./",

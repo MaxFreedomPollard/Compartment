@@ -1,0 +1,70 @@
+{
+  "manifest_version": "0.4",
+  "name": "compartment",
+  "display_name": "Compartment",
+  "version": "4.12.0",
+  "description": "Encrypted, fully offline memory for Claude: one vault on your machine, shared with every MCP client. No network, no API key.",
+  "long_description": "Compartment is persistent memory for AI agents, stored on your own computer and encrypted at rest. What Claude learns in one conversation is available in every later one, and to Claude Code, Cursor, Codex, Gemini CLI, Hermes Agent, OpenClaw and any other MCP client on the same machine. Nothing leaves it: the embedding model runs locally, the server speaks stdio only and opens no ports, and there is no account.\n\n**Before the first run**, create the vault once in a terminal: `pip install compartment && compartment init` (or `pipx install compartment`, or `uv tool install compartment`). It asks for a passphrase you choose; that passphrase is the only key and Compartment cannot recover it. If the vault is locked after a restart, run `compartment unlock`.\n\nIf you already connected Claude Desktop with `compartment integrate claude` or the app's Connect button, you do not need this extension as well: both would start the same server and Claude would see every tool twice.",
+  "author": {
+    "name": "Max Freedom Pollard",
+    "url": "https://github.com/MaxFreedomPollard"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MaxFreedomPollard/Compartment"
+  },
+  "homepage": "https://maxfreedompollard.github.io/Compartment/",
+  "documentation": "https://github.com/MaxFreedomPollard/Compartment#readme",
+  "support": "https://github.com/MaxFreedomPollard/Compartment/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "server/main.py"
+      ]
+    }
+  },
+  "tools": [
+    {"name": "memory_store", "description": "Save one claim to the encrypted memory, with its source and date."},
+    {"name": "memory_store_many", "description": "Save several separate facts in one call, one memory each."},
+    {"name": "memory_search", "description": "Recall from memory before answering: hybrid vector and keyword search."},
+    {"name": "memory_link", "description": "Record a relationship between two entities in the memory graph."},
+    {"name": "memory_relations", "description": "Query the memory graph, optionally as of a date."},
+    {"name": "memory_unlink", "description": "Remove one relation from the memory graph."},
+    {"name": "memory_get", "description": "Fetch one memory by id."},
+    {"name": "memory_forget", "description": "Delete a memory, optionally crypto-shredding it."},
+    {"name": "memory_list_namespaces", "description": "List namespaces and their record counts."},
+    {"name": "memory_recent", "description": "The most recently stored memories."},
+    {"name": "memory_status", "description": "Vault status: lock state, counts, model, index."},
+    {"name": "memory_selftest", "description": "Health check against the built-in reference facts."},
+    {"name": "memory_lock", "description": "Panic lock: seal the vault and drop the key now."},
+    {"name": "memory_unlock", "description": "Unlock from the agent; disabled unless the vault config enables it."}
+  ],
+  "tools_generated": false,
+  "keywords": [
+    "memory",
+    "agent-memory",
+    "encryption",
+    "offline",
+    "local-first",
+    "privacy",
+    "vector-search"
+  ],
+  "license": "Apache-2.0",
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

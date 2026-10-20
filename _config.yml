@@ -42,3 +42,12 @@ exclude:
   - server.json
   - glama.json
   - RELEASING.md
+  # The repository root is also a plugin for Claude Code, Codex, Gemini CLI,
+  # OpenClaw and Hermes. Their manifests are not pages, and skills/ holds a
+  # SKILL.md whose YAML front matter Jekyll would otherwise render as one.
+  - skills
+  - plugin.json
+  - mcp.json
+  - gemini-extension.json
+  - GEMINI.md
+  - Dockerfile
