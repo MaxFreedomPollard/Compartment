@@ -324,7 +324,8 @@ def _run(args: list[str], timeout: int = 60) -> tuple[int, str]:
     try:
         p = subprocess.run(args, capture_output=True, text=True,
                            timeout=timeout, encoding="utf-8", errors="replace",
-                           env={**os.environ, "PATH": user_path()})
+                           env={**os.environ, "PATH": user_path()},
+                           **_no_console())
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
@@ -350,13 +351,11 @@ def _json_cmd(vault: str, *sub: str) -> dict | None:
 def _json_run(argv: list[str], timeout: float = 60) -> dict | None:
     """Run a command and parse the JSON it prints: _json_cmd's runner, for any
     command line. None if it failed, timed out, or printed no JSON."""
-    kwargs = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
                            timeout=timeout, encoding="utf-8", errors="replace",
-                           env={**os.environ, "PATH": user_path()}, **kwargs)
+                           env={**os.environ, "PATH": user_path()},
+                           **_no_console())
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode != 0:
@@ -441,6 +440,17 @@ VIEW_TIMEOUT = 60
 #: programs, and started from the tray (which has none) each would open one -
 #: and the vault view would keep its open for as long as it runs.
 _CREATE_NO_WINDOW = 0x08000000
+
+
+def _no_console() -> dict:
+    """subprocess keyword arguments for a child the panel starts: on Windows,
+    no console window. Every child, not only the two that had it. Unlock,
+    Lock, Create, Change password and Connect each ran the CLI as a console
+    program, so from the tray - pythonw.exe, which has no console of its own
+    - each click flashed a console window, and Dashboard kept one open for
+    as long as the dashboard ran, where closing it stopped the dashboard."""
+    return ({"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32"
+            else {})
 
 NO_VAULT_NOTE = "no vault yet - choose a passphrase below to create one"
 CREDENTIAL_REFUSED_NOTE = ("The saved unlock no longer opens this vault. "
@@ -534,15 +544,12 @@ class ViewProcess:
         self._next = 0
 
     def _start(self):
-        kwargs = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = _CREATE_NO_WINDOW
         proc = subprocess.Popen(
             _view_argv(self.vault), stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None if env("MENUBAR_DEBUG") else subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            env={**os.environ, "PATH": user_path()}, **kwargs)
+            env={**os.environ, "PATH": user_path()}, **_no_console())
         lines: queue.Queue = queue.Queue()
 
         def pump():
@@ -948,7 +955,7 @@ def open_dashboard(vault: str) -> str | None:
             [*_cli_argv(), "--vault", vault, "dash"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             encoding="utf-8", errors="replace",
-            env={**os.environ, "PATH": user_path()})
+            env={**os.environ, "PATH": user_path()}, **_no_console())
     except (OSError, subprocess.SubprocessError):
         return None
     _DASH["proc"], _DASH["url"] = proc, None
@@ -1011,7 +1018,7 @@ def unlock_vault(vault: str, passphrase: str) -> tuple[bool, str]:
         p = subprocess.run(
             [*_cli_argv(), "--vault", vault, "unlock", "--passphrase-stdin"],
             input=passphrase + "\n", capture_output=True, text=True,
-            timeout=180, encoding="utf-8", errors="replace")
+            timeout=180, encoding="utf-8", errors="replace", **_no_console())
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
@@ -1064,7 +1071,7 @@ def create_vault(vault: str, passphrase: str, repeat: str) -> tuple[bool, str]:
              "--no-app"],
             input=passphrase + "\n", capture_output=True, text=True,
             timeout=900, encoding="utf-8", errors="replace",
-            env={**os.environ, "PATH": user_path()})
+            env={**os.environ, "PATH": user_path()}, **_no_console())
     except subprocess.TimeoutExpired as exc:
         if os.path.exists(vault):
             # init writes the vault in its first seconds. What ran out of
@@ -1106,7 +1113,7 @@ def change_passphrase(vault: str, new: str, repeat: str) -> tuple[bool, str]:
         p = subprocess.run(
             [*_cli_argv(), "--vault", vault, "rekey", "--new-passphrase-stdin"],
             input=new + "\n", capture_output=True, text=True,
-            timeout=180, encoding="utf-8", errors="replace")
+            timeout=180, encoding="utf-8", errors="replace", **_no_console())
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
