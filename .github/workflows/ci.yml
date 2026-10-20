@@ -338,16 +338,25 @@ jobs:
         # `compartment init` above already started the tray app, which is the
         # whole point of it. So a launch now must hand off and exit 0, and
         # the copy that was already there must still be running afterwards.
+        # Counted by command line, not by process name: init starts the tray
+        # with pythonw.exe (no console window), so there is no process called
+        # "compartment" to count.
         shell: pwsh
         run: |
-          $before = @(Get-Process compartment -ErrorAction SilentlyContinue).Count
+          function Get-Tray {
+            @(Get-CimInstance Win32_Process | Where-Object {
+                $_.CommandLine -and $_.CommandLine -match 'compartment' -and
+                $_.CommandLine -match '\btray\b' })
+          }
+          $before = (Get-Tray).Count
+          Get-Tray | ForEach-Object { Write-Host "  running: $($_.Name): $($_.CommandLine)" }
           if ($before -lt 1) { Write-Error "init did not start the tray app"; exit 1 }
           compartment tray --show
           if ($LASTEXITCODE -ne 0) { Write-Error "the second copy failed instead of standing down"; exit 1 }
-          $after = @(Get-Process compartment -ErrorAction SilentlyContinue).Count
+          $after = (Get-Tray).Count
           if ($after -ne $before) { Write-Error "second copy changed the count: $before -> $after"; exit 1 }
-          Write-Host "one copy before, one copy after"
-          Get-Process compartment -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "the same $before process(es) before and after"
+          Get-Tray | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 2
 
       - name: Start the tray app and prove it is still alive

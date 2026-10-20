@@ -89,6 +89,8 @@ def test_a_vault_found_but_unreadable_names_the_file(vault, vault_path,
                                                      capsys, monkeypatch):
     if getattr(os, "geteuid", lambda: 1)() == 0:
         pytest.skip("root reads any file")
+    if os.name == "nt":
+        pytest.skip("chmod cannot take read access away on Windows")
     vault.lock()
     os.chmod(vault_path, 0)
     try:

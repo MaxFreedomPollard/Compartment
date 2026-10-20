@@ -1,5 +1,6 @@
 """Where the CLI finds the vault: `~` expanded wherever a path comes from,
 and no home directory needed when the vault is named."""
+import json
 import os
 import subprocess
 import sys
@@ -43,8 +44,12 @@ def test_a_vault_path_starting_with_a_tilde_is_the_home_one(
     else:
         monkeypatch.setenv(how, "~/v.vault")
     cli.main(argv)
-    out = capsys.readouterr().out
-    assert str(home_dir / "v.vault") in out and '"locked": false' in out
+    status = json.loads(capsys.readouterr().out)
+    # Compared as paths: JSON escapes a Windows path's backslashes, and
+    # expanduser there joins with "/" after the profile folder.
+    assert os.path.normcase(os.path.normpath(status["vault"])) == \
+        os.path.normcase(os.path.normpath(str(home_dir / "v.vault")))
+    assert status["locked"] is False
 
 
 def _cli_with_no_home(*argv):
