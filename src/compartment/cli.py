@@ -332,6 +332,24 @@ def _start_status_bar_app(vault: str) -> None:
         print("  The CLI and the MCP server are ready, and `compartment "
               "dash` opens the vault in a browser.")
         return
+    if linux and not _linux_gui_available():
+        # Before start at login is registered, not after: an autostart
+        # entry or a systemd user unit for a panel that cannot import
+        # tkinter fails at every login from then on, with nothing on screen
+        # to say why.
+        hint = getattr(app, "tk_install_hint", None)
+        print("  the panel needs tkinter, which this Python does not have.")
+        print("  Quickest fix, a Python that includes it:")
+        print("    uv tool install compartment")
+        print("  or give this Python tkinter:")
+        print(f"    {hint()}" if hint else
+              "    install your distribution's Tk package for Python "
+              "(often python3-tk or python3-tkinter)")
+        print("  then turn start at login on with `compartment panel "
+              "--login on`.")
+        print("  Everything else works now: the CLI, the MCP server, and "
+              "`compartment dash`.")
+        return
     state = ""
     try:
         state = app.set_login(True, vault)
@@ -346,15 +364,6 @@ def _start_status_bar_app(vault: str) -> None:
             print("  applications menu entry: on")
     except Exception as exc:                     # noqa: BLE001
         print(f"  could not register the app ({exc})")
-    if linux and not _linux_gui_available():
-        print("  the panel needs tkinter, which this Python does not have.")
-        print("  Quickest fix, a Python that includes it:")
-        print("    uv tool install compartment")
-        print("  or install your distribution's package (Debian/Ubuntu: "
-              "python3-tk, Fedora: python3-tkinter).")
-        print("  Everything else works now: the CLI, the MCP server, and "
-              "`compartment dash`.")
-        return
     # Let the supervisor start it where there is one, so the copy that comes
     # up is the copy that gets restarted if it dies. On macOS bootstrapping
     # the agent a moment ago already did it (RunAtLoad); on Linux and Windows
