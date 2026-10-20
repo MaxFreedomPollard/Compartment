@@ -99,7 +99,8 @@ u32 section_count, then per section:
 Each entry: `AEAD_seal(master_key, canonical_json(entry),
 aad="compartment-journal:"+vault_id+":"+u64_be(seq))` where `seq` starts at 0
 after each compaction and increments per entry. Entries are fsync'd on
-append (acknowledged). An append the disk refuses part way (ENOSPC, EDQUOT,
+append (acknowledged; F_FULLFSYNC on Apple platforms, where fsync stops at
+the drive's volatile cache). An append the disk refuses part way (ENOSPC, EDQUOT,
 a failed sync) is truncated back to where it began, so an unacknowledged
 write leaves no bytes behind. Ops:
 

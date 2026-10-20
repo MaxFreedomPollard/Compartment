@@ -8,7 +8,8 @@ Layout:
 Invariant I2: plaintext never touches disk. The payload and every journal
 entry are sealed before any byte is written. lock/save rewrites the file
 atomically (temp file → fsync → rename). Journal appends are fsync'd, so an
-acknowledged write survives kill -9; a truncated *final* entry is an
+acknowledged write survives kill -9 and power loss (see _sync for what that
+takes on macOS); a truncated *final* entry is an
 unacknowledged write and is discarded on open with a notice - any other
 malformed byte is a tamper error.
 """
@@ -26,6 +27,15 @@ from nacl.signing import SigningKey, VerifyKey
 
 from . import crypto, wire
 from .crypto import CryptoError, TamperError
+
+try:
+    import fcntl
+except ImportError:                     # Windows
+    fcntl = None
+
+#: The fcntl that makes a write durable on Apple's platforms, or None where
+#: Python does not define it (everywhere else). See _sync.
+_FULLFSYNC = getattr(fcntl, "F_FULLFSYNC", None)
 
 MAGIC = b"NUCV"
 FORMAT_VERSION = 1
@@ -139,6 +149,36 @@ def _atomic_replace(tmp: str, path: str) -> None:
             last = exc
             time.sleep(0.05)
     raise last if last is not None else OSError(f"could not replace {path}")
+
+
+def _sync(fd: int) -> None:
+    """Make what was written to `fd` durable: on the disk itself, not in a
+    cache that a power cut empties.
+
+    On macOS (and iOS) fsync only hands the data to the drive, which is free
+    to hold it in its own volatile cache and to write it out in any order;
+    Apple documents F_FULLFSYNC as the call that actually flushes it, and
+    SSDs in current Macs are measured to lose fsync'd data on power loss
+    without it. Two promises rest on this. An acknowledged store is meant to
+    survive power loss, not only kill -9. And a journal entry whose length
+    reached the disk before its body did reads back as a complete entry that
+    fails authentication, which an open has to treat as tampering: the vault
+    refused to open after a power cut, for no fault of the user's. The
+    compaction's copy is synced the same way, or the rename could land
+    before the bytes it points at.
+
+    F_FULLFSYNC costs a few milliseconds per call (about 4 ms measured on an
+    Apple SSD, against roughly 40 ms for the embedding a store already
+    pays), and stores are not a hot loop, so it is paid on every append. A
+    filesystem that does not support it (SMB, some FUSE and USB media)
+    refuses it, and plain fsync is the best that disk offers."""
+    if _FULLFSYNC is not None:
+        try:
+            fcntl.fcntl(fd, _FULLFSYNC)
+            return
+        except OSError:
+            pass
+    os.fsync(fd)
 
 
 def _payload_aad(vault_id: str) -> bytes:
@@ -361,7 +401,7 @@ def write_vault_file(
             f.write(hjson)
             f.write(payload_ct)
             f.flush()
-            os.fsync(f.fileno())
+            _sync(f.fileno())
         # O_CREAT only sets the mode when it actually creates the file, so a temp
         # left behind by an earlier run keeps its old mode. Set it either way.
         os.chmod(tmp, VAULT_MODE)
@@ -412,7 +452,7 @@ def append_journal_entries(path: str, header: VaultHeader, seq: int,
             view = memoryview(frames)
             while view:
                 view = view[os.write(fd, view):]
-            os.fsync(fd)
+            _sync(fd)
         except BaseException:
             # A write the disk refused part way (ENOSPC, EDQUOT, an I/O
             # error, a sync that failed) is a write nobody acknowledged, and
@@ -426,7 +466,7 @@ def append_journal_entries(path: str, header: VaultHeader, seq: int,
             # a torn tail and the next open discards them, as before.
             try:
                 os.ftruncate(fd, start)
-                os.fsync(fd)
+                _sync(fd)
             except OSError:
                 pass
             raise

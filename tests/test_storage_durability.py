@@ -130,15 +130,16 @@ def test_an_append_whose_sync_fails_is_not_left_to_replay(vault_path,
     v.store("A memory that was acknowledged.", caller="t")
     size = os.path.getsize(vault_path)
     calls = []
+    real_sync = vaultfile._sync
 
-    def fsync(fd):
+    def sync(fd):
         calls.append(fd)
         if len(calls) == 1:
             raise OSError(errno.EIO, "Input/output error")
-        return os.fsync(fd)
+        return real_sync(fd)
 
     with monkeypatch.context() as m:
-        m.setattr(vaultfile, "os", _With(os, fsync=fsync))
+        m.setattr(vaultfile, "_sync", sync)
         with pytest.raises(OSError, match="Input/output"):
             v.store("A memory whose sync failed.", caller="t")
     assert os.path.getsize(vault_path) == size
@@ -156,3 +157,67 @@ def test_an_append_never_creates_a_vault_that_is_not_there(vault_path):
         vaultfile.append_journal_entry(vault_path, v.header, 0,
                                        {"op": "noop"}, v._master)
     assert not os.path.exists(vault_path)
+
+
+class _Fcntl:
+    """fcntl as the vault file sees it: records every call, and refuses
+    them all when `refuse` is set, as SMB and some USB media do."""
+
+    def __init__(self, refuse: bool = False):
+        self.calls, self.refuse = [], refuse
+
+    def fcntl(self, fd, op, *args):
+        self.calls.append(op)
+        if self.refuse:
+            raise OSError(errno.ENOTSUP, "Operation not supported")
+        return 0
+
+
+def _record_fsyncs(monkeypatch) -> list:
+    fsyncs = []
+
+    def fsync(fd):
+        fsyncs.append(fd)
+        return os.fsync(fd)
+    monkeypatch.setattr(vaultfile, "os", _With(os, fsync=fsync))
+    return fsyncs
+
+
+def test_appends_and_compactions_reach_the_disk_on_macos(vault_path,
+                                                          monkeypatch):
+    """fsync on macOS hands data to the drive's own cache and no further.
+    An acknowledged store could be lost to a power cut, and a journal entry
+    whose length landed before its body read back as tampering, so the
+    vault refused to open. F_FULLFSYNC is the call Apple documents for it."""
+    v = Vault.create(vault_path, PASS, creator="t")
+    fake = _Fcntl()
+    monkeypatch.setattr(vaultfile, "fcntl", fake)
+    monkeypatch.setattr(vaultfile, "_FULLFSYNC", 51)    # macOS's value
+    fsyncs = _record_fsyncs(monkeypatch)
+    v.store("A memory that has to survive a power cut.", caller="t")
+    assert fake.calls == [51], "the append is flushed past the drive cache"
+    v.save()
+    assert fake.calls[1] == 51, "and so is the compaction's copy"
+    assert not fsyncs, "F_FULLFSYNC does fsync's work and more"
+
+
+def test_a_disk_that_refuses_a_full_sync_still_gets_fsync(vault_path,
+                                                          monkeypatch):
+    """A vault on an SMB share or a USB stick, where the filesystem does not
+    implement F_FULLFSYNC: a store must not fail for want of it."""
+    v = Vault.create(vault_path, PASS, creator="t")
+    monkeypatch.setattr(vaultfile, "fcntl", _Fcntl(refuse=True))
+    monkeypatch.setattr(vaultfile, "_FULLFSYNC", 51)
+    fsyncs = _record_fsyncs(monkeypatch)
+    v.store("A memory on a share without F_FULLFSYNC.", caller="t")
+    assert len(fsyncs) == 1
+    assert Vault.unlock(vault_path, passphrase=PASS).status()[
+        "organic_records"] == 1
+
+
+def test_elsewhere_an_append_is_an_ordinary_fsync(vault_path, monkeypatch):
+    v = Vault.create(vault_path, PASS, creator="t")
+    monkeypatch.setattr(vaultfile, "_FULLFSYNC", None)
+    fsyncs = _record_fsyncs(monkeypatch)
+    v.store("A memory on Linux or Windows.", caller="t")
+    assert len(fsyncs) == 1
