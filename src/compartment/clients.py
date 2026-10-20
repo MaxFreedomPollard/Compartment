@@ -108,6 +108,25 @@ def _editor_users() -> list[Path]:
     return users
 
 
+def _vscode_mcp(app: str, flatpak_id: str) -> Callable[[], Path]:
+    """VS Code's user-level mcp.json, in the Flathub build's sandboxed
+    config (~/.var/app/<id>/config/<app>/User) when that is the only one
+    on this Linux machine. The native path alone used to be written, which
+    the Flathub VS Code never reads."""
+    def path() -> Path:
+        native = _vscode_user(app)
+        if sys.platform != "darwin" and os.name != "nt":
+            flat = (Path.home() / ".var" / "app" / flatpak_id / "config"
+                    / app / "User")
+            try:
+                if not native.is_dir() and flat.is_dir():
+                    return flat / "mcp.json"
+            except OSError:
+                pass
+        return native / "mcp.json"
+    return path
+
+
 def _ext_storage(ext: str) -> Path | None:
     """The globalStorage directory of extension `ext` in the first editor
     that has one, or None when no editor has run it."""
@@ -423,10 +442,11 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
            note="run `/mcp reload` in omp to pick it up without restarting"),
 
     # -- coding agents that spell the key differently ----------------------
-    Client("vscode", "VS Code", lambda: _vscode_user() / "mcp.json",
+    Client("vscode", "VS Code",
+           _vscode_mcp("Code", "com.visualstudio.code"),
            root="servers", entry=_entry_vscode, jsonc=True),
     Client("vscode-insiders", "VS Code Insiders",
-           lambda: _vscode_user("Code - Insiders") / "mcp.json",
+           _vscode_mcp("Code - Insiders", "com.visualstudio.code.insiders"),
            root="servers", entry=_entry_vscode, jsonc=True),
     # Zed writes its settings.json with a block of // comments on first
     # run, so it is edited as JSON with comments: comments kept.

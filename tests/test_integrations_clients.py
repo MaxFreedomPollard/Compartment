@@ -326,3 +326,22 @@ def test_junie_is_present_before_its_first_server(home):
     assert clients.CLIENTS["junie"].present() is True
     assert clients.resolve("droid").key == "factory"
     assert clients.resolve("amazonq").key == "amazon-q"
+
+
+def test_flathub_vs_code_on_linux_is_found_and_written(home, monkeypatch):
+    """The Flathub VS Code keeps its User directory in its sandbox,
+    ~/.var/app/com.visualstudio.code/config/Code/User; only the native
+    path was looked at, so it was not found and never written."""
+    monkeypatch.setattr(clients.sys, "platform", "linux")
+    if os.name == "nt":
+        pytest.skip("POSIX layout")
+    user = (home / ".var" / "app" / "com.visualstudio.code" / "config"
+            / "Code" / "User")
+    user.mkdir(parents=True)
+    vscode = clients.CLIENTS["vscode"]
+    assert vscode.config_path() == user / "mcp.json"
+    assert vscode.present() is True
+    # A native install, where there is one, is still the one written.
+    (home / ".config" / "Code" / "User").mkdir(parents=True)
+    assert vscode.config_path() == (home / ".config" / "Code" / "User"
+                                    / "mcp.json")
