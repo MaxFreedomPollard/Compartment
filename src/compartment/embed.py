@@ -222,6 +222,85 @@ def _runtime_not_installed(exc: ModuleNotFoundError) -> ModelError | None:
         "glibc-based Python (a Debian or Ubuntu image rather than Alpine).")
 
 
+def _cgroup_cpu_limit(root: str = "/sys/fs/cgroup",
+                      own: str = "/proc/self/cgroup") -> float | None:
+    """The CPUs a cgroup quota grants this process (2.0 for `docker run
+    --cpus 2`), or None where no quota applies.
+
+    cgroup v2 keeps "<quota> <period>" in cpu.max, at every level of the
+    hierarchy, and the tightest one on the way up from this process's own
+    group is the one that binds; inside a container the namespace makes
+    that group the root. cgroup v1 keeps the two numbers in separate files
+    of the cpu controller's mount."""
+    limits: list[float] = []
+    rel = None
+    try:
+        with open(own, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("0::"):
+                    rel = line[3:].strip()
+    except OSError:
+        pass
+    if rel is not None:
+        top = Path(root)
+        here = top / rel.lstrip("/")
+        while here == top or top in here.parents:
+            try:
+                quota, period = (here / "cpu.max").read_text(
+                    encoding="ascii").split()[:2]
+                if quota != "max" and int(period) > 0:
+                    limits.append(int(quota) / int(period))
+            except (OSError, ValueError):
+                pass
+            if here == top:
+                break
+            here = here.parent
+    for d in ("cpu", "cpu,cpuacct", "cpuacct,cpu"):
+        try:
+            quota = int((Path(root) / d / "cpu.cfs_quota_us").read_text(
+                encoding="ascii"))
+            period = int((Path(root) / d / "cpu.cfs_period_us").read_text(
+                encoding="ascii"))
+        except (OSError, ValueError):
+            continue
+        if quota > 0 and period > 0:
+            limits.append(quota / period)
+        break
+    return min(limits) if limits else None
+
+
+def intra_op_threads() -> int:
+    """Threads for one inference, or 0 for onnxruntime's own choice.
+
+    onnxruntime sizes its pool from the machine's cores. It does not see a
+    container's CPU quota, so under `docker run --cpus 2` on a 64-core host
+    it ran 32 threads that the kernel let use two CPUs between them: the
+    quota was spent in the first few milliseconds of each period and every
+    search then waited, throttled, for the next one. Nor, before Python
+    3.13 made it easy to ask, a CPU set narrowed with taskset or cpuset.
+    So when either leaves this process at most half of the machine, the
+    pool is sized to what it may use. Half, because onnxruntime's own
+    choice is the PHYSICAL cores, half the logical ones where each core
+    runs two threads: above half, its default already fits on such a
+    machine, and setting more threads than that would only add contention.
+    """
+    total = os.cpu_count() or 1
+    usable = total
+    count = getattr(os, "process_cpu_count", None)
+    try:
+        if count is not None:
+            usable = count() or total
+        elif hasattr(os, "sched_getaffinity"):
+            usable = len(os.sched_getaffinity(0)) or total
+    except OSError:
+        pass
+    if sys.platform.startswith("linux"):
+        limit = _cgroup_cpu_limit()
+        if limit is not None:
+            usable = min(usable, max(1, int(limit)))
+    return usable if usable <= total // 2 else 0
+
+
 class Embedder:
     """CLS-pooled, L2-normalized sentence embeddings from a local ONNX model."""
 
@@ -286,6 +365,9 @@ class Embedder:
         # the arena the same work returns to under 90 MB when it is done, at
         # the same speed for the batch sizes BATCH_TOKENS allows.
         so.enable_cpu_mem_arena = False
+        threads = intra_op_threads()
+        if threads:
+            so.intra_op_num_threads = threads
         self.sess = ort.InferenceSession(str(info.onnx), so,
                                          providers=["CPUExecutionProvider"])
         self._needs_token_type = any(
