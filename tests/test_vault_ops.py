@@ -520,7 +520,10 @@ def test_a_save_that_cannot_replace_the_vault_leaves_no_copy_beside_it(
         m.setattr(vaultfile, "time", _With(time, sleep=nap))
         with pytest.raises(PermissionError):
             vault.save()
-    assert len(tries) == 20, "the Windows retries all ran"
+    # The retries ran for the whole patience budget, one try per nap plus
+    # the last, before giving up.
+    assert sum(naps) >= vaultfile._REPLACE_PATIENCE_S, "the Windows retries all ran"
+    assert len(tries) == len(naps) + 1
     assert not os.path.exists(vault_path + ".tmp")
     assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 1
 
