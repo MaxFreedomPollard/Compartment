@@ -221,10 +221,15 @@ def is_memory_file(path: str | Path) -> bool:
 
     A memory directory under the CLAUDE_CONFIG_DIR Claude Code was started
     with counts as well: that directory need not be called .claude, and
-    when it was not, every memory write was passed over."""
+    when it was not, every memory write was passed over. So does the
+    directory the autoMemoryDirectory setting names."""
     p = Path(path)
     if p.suffix.lower() != ".md" or p.name == claude_memory.INDEX_NAME:
         return False
+    custom = claude_memory.auto_memory_dir()
+    if custom is not None and os.path.abspath(p.parent) == os.path.abspath(
+            custom):
+        return True                         # autoMemoryDirectory's notes
     parts = [x.lower() for x in p.parts]
     if "memory" not in parts:
         return False

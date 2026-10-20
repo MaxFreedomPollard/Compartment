@@ -68,9 +68,42 @@ DEFAULT_IMPORTANCE = 0.70
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
+def auto_memory_dir() -> Path | None:
+    """The directory Claude Code's `autoMemoryDirectory` setting moves
+    auto memory to, from the user settings.json beside DEFAULT_ROOT, or
+    None when it is not set.
+
+    Since Claude Code 2.1.74 that one setting replaces
+    projects/<project>/memory/ with any directory the user names (~/
+    expanded; it is ignored in a project's checked-in settings, so only
+    the user's own file is read). Memory written there was invisible to
+    both the import and the capture hook, which looked only under
+    projects/. A relative value is ignored: there is no project here to
+    resolve it against."""
+    try:
+        from .clients import _read_json
+        value = _read_json(DEFAULT_ROOT.parent / "settings.json").get(
+            "autoMemoryDirectory")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    d = Path(value.strip()).expanduser()
+    return d if d.is_absolute() else None
+
+
 def discover(root: Path | str | None = None) -> list[Path]:
-    """Every Claude Code memory file, sorted, index files excluded."""
-    root = Path(root) if root else DEFAULT_ROOT
+    """Every Claude Code memory file, sorted, index files excluded: under
+    `root`, or by default under DEFAULT_ROOT and in the directory
+    autoMemoryDirectory names."""
+    if root is None:
+        out = discover(DEFAULT_ROOT)
+        extra = auto_memory_dir()
+        if extra is not None and extra.is_dir():
+            out += [p for p in sorted(extra.glob("*.md"))
+                    if p.name != INDEX_NAME and p.is_file() and p not in out]
+        return out
+    root = Path(root)
     if not root.exists():
         return []
     if root.name == "memory" and root.is_dir():      # a memory dir directly
@@ -224,4 +257,4 @@ def default_root_exists() -> bool:
 
 __all__ = ["DEFAULT_ROOT", "discover", "parse", "import_files", "pending",
            "default_root_exists", "IMPORTANCE", "file_tag",
-           "claude_config_dir"]
+           "claude_config_dir", "auto_memory_dir"]
