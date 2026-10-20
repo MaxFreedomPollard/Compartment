@@ -926,6 +926,66 @@ def dashboard_url(line: str) -> str | None:
     return None
 
 
+def _is_wsl() -> bool:
+    """Linux under Windows (WSL 1 or 2), where the user's browser is a
+    Windows program."""
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        with open("/proc/sys/kernel/osrelease", encoding="utf-8",
+                  errors="replace") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def open_in_browser(url: str) -> bool:
+    """Open `url` in the user's own browser. False when there is none to
+    open here, so the caller can say to open the address by hand.
+
+    webbrowser.open on its own got three places wrong:
+
+    * A Linux machine with no desktop (SSH, a container, WSL without WSLg)
+      has no graphical browser, and with TERM set webbrowser falls back to
+      a text browser - w3m, lynx, www-browser - run in the same terminal and
+      waited for. `compartment dash` called it before serving, so the text
+      browser sat waiting on a server that would not answer until the
+      browser exited. Without a display nothing is opened.
+    * WSL: the browser is on the Windows side, and xdg-open there opens
+      nothing or a stray Linux one. wslview (wslu) or explorer.exe opens
+      the Windows default browser, which reaches 127.0.0.1 in WSL 2 through
+      its localhost forwarding.
+    * BROWSER, when set, is the user's own choice and is honoured as
+      webbrowser honours it, display or not.
+
+    Never raises. Can block if the browser it starts is one that runs in
+    the foreground, so a caller with other work runs it on a thread.
+    """
+    try:
+        if os.environ.get("BROWSER"):
+            return bool(webbrowser.open(url))
+        if sys.platform not in ("win32", "darwin"):
+            if _is_wsl():
+                for opener in ("wslview", "explorer.exe"):
+                    exe = shutil.which(opener)
+                    if exe:
+                        # explorer.exe exits 1 even when it opened the page,
+                        # so having started it is the answer.
+                        subprocess.Popen([exe, url],
+                                         stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+                        return True
+                return False
+            if not (os.environ.get("DISPLAY")
+                    or os.environ.get("WAYLAND_DISPLAY")):
+                return False
+        return bool(webbrowser.open(url))
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def _drain(proc) -> None:
     # `dash` says a few more lines over its life; read them so it can never
     # block on a full pipe.
@@ -948,7 +1008,10 @@ def open_dashboard(vault: str) -> str | None:
     """
     proc, url = _DASH["proc"], _DASH["url"]
     if proc is not None and proc.poll() is None and url:
-        webbrowser.open(url)
+        # On a thread: this is the UI thread, and a browser that runs in the
+        # foreground would hold it for as long as it is open.
+        threading.Thread(target=open_in_browser, args=(url,), daemon=True,
+                         name="compartment-open-browser").start()
         return url
     try:
         proc = subprocess.Popen(
