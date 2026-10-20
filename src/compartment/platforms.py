@@ -8,6 +8,7 @@ these functions and never imports fcntl / msvcrt / sysctl directly.
 from __future__ import annotations
 
 from .home import env, home
+import errno
 import json
 import os
 import platform
@@ -27,15 +28,26 @@ _SUBPROCESS_TIMEOUT = 5.0
 # Advisory exclusive file lock (context manager over an open file handle)
 # ---------------------------------------------------------------------------
 
+# Only these errors mean "someone else holds it". Anything else means the
+# filesystem cannot lock at all - NFS whose lock service is not running or
+# that is mounted `nolock`/`nolocks` (ENOLCK, ENOTSUP), some FUSE and SMB
+# mounts (EOPNOTSUPP, EINVAL) - and no amount of waiting changes that.
+# Treating those as busy made every write on such a vault wait out the
+# timeout and then blame "another process", which sent people hunting for a
+# process that did not exist.
 if IS_WINDOWS:
     import msvcrt
+
+    _BUSY = frozenset({errno.EACCES, getattr(errno, "EDEADLOCK", 36)})
 
     def _lock_nb(fh) -> bool:
         try:
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             return True
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno in _BUSY:
+                return False
+            raise
 
     def _unlock(fh) -> None:
         try:
@@ -45,12 +57,16 @@ if IS_WINDOWS:
 else:
     import fcntl
 
+    _BUSY = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+
     def _lock_nb(fh) -> bool:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno in _BUSY:
+                return False
+            raise
 
     def _unlock(fh) -> None:
         try:
@@ -70,15 +86,30 @@ class FileLock:
     def __enter__(self):
         self._fh = open(self.path, "a+")
         deadline = time.time() + self.timeout
-        while not _lock_nb(self._fh):
+        while True:
+            try:
+                if _lock_nb(self._fh):
+                    return self
+            except OSError as exc:
+                self._fh.close()
+                self._fh = None
+                from .crypto import CryptoError
+                raise CryptoError(
+                    f"Cannot lock {self.path}: the filesystem it is on does "
+                    f"not support file locks ({exc.strerror or exc}). That is "
+                    f"usually a network share - NFS without its lock service "
+                    f"or mounted nolock, or an SMB mount without byte-range "
+                    f"locks. Keep the vault on a local disk (--vault or "
+                    f"COMPARTMENT_VAULT), or enable locking on the "
+                    f"mount.") from exc
             if time.time() > deadline:
                 self._fh.close()
+                self._fh = None
                 from .crypto import CryptoError
                 raise CryptoError(
                     f"Vault is busy: another process holds the write lock "
                     f"(waited {self.timeout:.0f}s)")
             time.sleep(0.05)
-        return self
 
     def __exit__(self, *exc):
         if self._fh is not None:
