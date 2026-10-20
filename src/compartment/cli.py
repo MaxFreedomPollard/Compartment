@@ -1581,8 +1581,15 @@ def cmd_2fa(args) -> None:
             from . import crypto as _crypto
             kf = _secrets.token_bytes(_crypto.KEYFILE_LEN)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(kf)
-            os.chmod(p, 0o600)
+            # Created 0600 and exclusively: written first and chmod'ed after,
+            # the second factor sat at the umask's mode (0644 on most systems)
+            # for that moment, readable by every local account, and a file
+            # that appeared at the path in between would have been written
+            # through. O_BINARY keeps Windows from translating its bytes.
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_BINARY", 0), 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(kf)
             print(f"keyfile written → {p}")
             print("BACK THIS FILE UP (it is random bytes, not derived from "
                   "anything).\nLose it and the passphrase alone will NOT "
@@ -2402,7 +2409,9 @@ def cmd_setup(args) -> None:
         hashes = {}
         for fname, url in spec["files"].items():
             print(f"  downloading {fname} …")
-            with urllib.request.urlopen(url) as r:
+            # Bounded: a stalled connection otherwise holds the command for
+            # ever, with nothing on screen after "downloading".
+            with urllib.request.urlopen(url, timeout=120) as r:
                 data = r.read()
             (d / fname).write_bytes(data)
             hashes[fname] = hashlib.sha256(data).hexdigest()

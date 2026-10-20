@@ -135,6 +135,15 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
             raise SystemExit("the server did not exit after its stdin closed")
+    # A client that hangs up is the normal end of a session, so it has to be
+    # a clean one: exit 0 and no traceback on stderr. A regression that
+    # crashed on shutdown would otherwise pass every request above.
+    stderr = "".join(err_tail)
+    if proc.returncode != 0:
+        raise SystemExit(f"the server exited {proc.returncode} after its stdin "
+                         f"closed\nstderr:\n{stderr}")
+    if "Traceback" in stderr:
+        raise SystemExit(f"the server printed a traceback\nstderr:\n{stderr}")
     print("MCP smoke test passed")
     return 0
 

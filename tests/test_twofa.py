@@ -102,3 +102,32 @@ def test_legacy_recovery_slot_still_opens(vault_path):
     v.lock()
     v2 = Vault.unlock(vault_path, passphrase=" ".join(words))
     assert v2.status()["records"] == 0
+
+
+def test_a_new_keyfile_is_created_private_and_exclusive(vault, vault_path,
+                                                        tmp_path, monkeypatch):
+    """`2fa enable` wrote the keyfile and chmod'ed it afterwards, so the
+    second factor sat at the umask's mode (0644 on most systems) for that
+    moment, and a file planted at the path in between was written through.
+    It is now created 0600 with O_EXCL in one call."""
+    import os
+    from compartment import cli
+    vault.lock()
+    keyfile = tmp_path / "factor.key"
+    seen = []
+    real_open = os.open
+
+    def spy(path, flags, mode=0o777, *a, **k):
+        if str(path) == str(keyfile):
+            seen.append((flags, mode))
+        return real_open(path, flags, mode, *a, **k)
+    monkeypatch.setattr(os, "open", spy)
+    monkeypatch.delenv("COMPARTMENT_PASSPHRASE", raising=False)
+    cli.main(["--vault", vault_path, "2fa", "enable", "--passphrase", PASS,
+              "--keyfile", str(keyfile)])
+    assert seen, "the keyfile was not created through os.open"
+    flags, mode = seen[0]
+    assert flags & os.O_EXCL and flags & os.O_CREAT and mode == 0o600
+    assert len(keyfile.read_bytes()) == crypto.KEYFILE_LEN
+    if os.name != "nt":
+        assert (keyfile.stat().st_mode & 0o777) == 0o600
