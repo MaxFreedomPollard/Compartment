@@ -240,8 +240,12 @@ def test_openclaw_counts_as_connected_once_it_is_in_the_config(fake_home,
     d = fake_home / ".openclaw"
     d.mkdir()
     (d / "openclaw.json").write_text(
-        json.dumps({"mcpServers": {"compartment": {}}}))
+        json.dumps({"mcp": {"servers": {"compartment": {}}}}))
     assert menubar.integration_status("/v")["openclaw"] is True
+    # Where earlier releases wrote it: a key current OpenClaw never loads.
+    (d / "openclaw.json").write_text(
+        json.dumps({"mcpServers": {"compartment": {}}}))
+    assert menubar.integration_status("/v")["openclaw"] is False
 
 
 def test_a_broken_config_file_is_not_a_crash(fake_home, monkeypatch):

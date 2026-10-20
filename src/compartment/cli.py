@@ -699,19 +699,18 @@ def cmd_uninstall(args) -> None:
                       f"compartment from {client.config_path()} by hand")
         except Exception as exc:                         # noqa: BLE001
             print(f"  {client.display}: {exc}")
-    openclaw = Path(os.environ.get("OPENCLAW_HOME",
-                                   Path.home() / ".openclaw")) / "openclaw.json"
+    openclaw = None
     try:
+        from . import menubar
+        openclaw = menubar._openclaw_config()
         cfg = (json.loads(openclaw.read_text(encoding="utf-8"))
                if openclaw.is_file() else {})
-        servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
-        if isinstance(servers, dict) and "compartment" in servers:
-            del servers["compartment"]
+        if isinstance(cfg, dict) and _openclaw_unregister(cfg):
             # As integrate wrote it: backed up, then replaced whole.
             clients.write_config(openclaw, json.dumps(cfg, indent=2))
             print(f"  OpenClaw registration removed from {openclaw}")
     except Exception as exc:                             # noqa: BLE001
-        print(f"  OpenClaw: {openclaw} left as it is ({exc})")
+        print(f"  OpenClaw: {openclaw or 'its config'} left as it is ({exc})")
     try:
         md = _remove_managed_claude_md()
         if md:
@@ -2065,14 +2064,49 @@ def _hermes_home() -> Path:
     Hermes never reads it and reported it installed, never found the
     Hermes venv to put compartment into, and uninstall and the refresh
     after an update looked in the same wrong place."""
-    explicit = os.environ.get("HERMES_HOME", "").strip()
-    if explicit:
-        return Path(os.path.expanduser(os.path.expandvars(explicit)))
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA", "").strip()
-        return (Path(local) if local
-                else Path.home() / "AppData" / "Local") / "hermes"
-    return Path.home() / ".hermes"
+    from . import menubar           # one rule for the CLI and the panel
+    return menubar.hermes_home()
+
+
+def _openclaw_register(cfg: dict, entry: dict) -> None:
+    """Put compartment's entry where current OpenClaw reads MCP servers,
+    `mcp.servers`, and take back one an earlier release wrote at the top
+    level as `mcpServers`.
+
+    OpenClaw's root schema rejects keys it does not know
+    (src/config/zod-schema.ts), so that top-level entry was never loaded as
+    a server, and could keep the whole config from loading."""
+    mcp = cfg.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise ValueError('its "mcp" is not a JSON object')
+    servers = mcp.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError('its "mcp.servers" is not a JSON object')
+    servers["compartment"] = entry
+    _drop_legacy_openclaw_entry(cfg)
+
+
+def _drop_legacy_openclaw_entry(cfg: dict) -> bool:
+    legacy = cfg.get("mcpServers")
+    if not isinstance(legacy, dict) or "compartment" not in legacy:
+        return False
+    del legacy["compartment"]
+    if not legacy:
+        del cfg["mcpServers"]         # a key OpenClaw would refuse
+    return True
+
+
+def _openclaw_unregister(cfg: dict) -> bool:
+    """Take compartment out of an OpenClaw config, from `mcp.servers` and
+    from the top-level `mcpServers` earlier releases wrote. True if
+    anything was removed."""
+    removed = _drop_legacy_openclaw_entry(cfg)
+    mcp = cfg.get("mcp")
+    servers = mcp.get("servers") if isinstance(mcp, dict) else None
+    if isinstance(servers, dict) and "compartment" in servers:
+        del servers["compartment"]
+        removed = True
+    return removed
 
 
 #: The `import compartment` check in Hermes's own interpreter.
@@ -2151,8 +2185,8 @@ def _integrate_target(args) -> None:
         compartment_bin = clients.executable()
         entry = {"command": compartment_bin,
                  "args": ["--vault", vault, "--caller", "openclaw", "serve"]}
-        cfg_path = Path(os.environ.get("OPENCLAW_HOME",
-                                       Path.home() / ".openclaw")) / "openclaw.json"
+        from . import menubar
+        cfg_path = menubar._openclaw_config()
         wrote = False
         # An OpenClaw that has not written its config yet is a normal first
         # install, not a reason to hand the JSON back for pasting: it reads
@@ -2164,7 +2198,7 @@ def _integrate_target(args) -> None:
                        if existed else {})
                 if not isinstance(cfg, dict):      # null, a list: not a config
                     raise ValueError("not a JSON object")
-                cfg.setdefault("mcpServers", {})["compartment"] = entry
+                _openclaw_register(cfg, entry)
                 # A byte-exact backup first, then the file replaced whole.
                 backup = clients.write_config(cfg_path,
                                               json.dumps(cfg, indent=2))
@@ -2176,9 +2210,10 @@ def _integrate_target(args) -> None:
             except (ValueError, OSError) as exc:
                 print(f"  could not edit {cfg_path} automatically ({exc});")
         if not wrote:
-            print("  add this under \"mcpServers\" in ~/.openclaw/openclaw.json, "
+            print(f"  add this to {cfg_path}, merged into what is there, "
                   "then run `openclaw gateway restart`:")
-            print(json.dumps({"compartment": entry}, indent=2))
+            print(json.dumps({"mcp": {"servers": {"compartment": entry}}},
+                             indent=2))
         if not os.path.exists(vault):
             print(f"\n! no vault at {vault} - run `compartment init` to create one")
 

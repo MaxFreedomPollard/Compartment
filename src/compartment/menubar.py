@@ -1235,7 +1235,7 @@ def integration_status(vault: str) -> dict:
         p = _openclaw_config()
         if p.is_file():
             cfg = json.loads(p.read_text(encoding="utf-8"))
-            out["openclaw"] = "compartment" in (cfg.get("mcpServers") or {})
+            out["openclaw"] = "compartment" in openclaw_servers(cfg)
     except (OSError, ValueError):
         pass
     return out
@@ -1245,14 +1245,58 @@ def _claude_code_config() -> Path:
     return Path.home() / ".claude.json"
 
 
+def hermes_home() -> Path:
+    """Hermes Agent's home, found the way Hermes finds it
+    (hermes_constants.get_hermes_home): HERMES_HOME, with ~ and variables
+    expanded, else the platform default.
+
+    On Windows that default is %LOCALAPPDATA%\\hermes, not ~/.hermes, and
+    Hermes's Windows installer does not export HERMES_HOME. Looking only in
+    ~/.hermes, `integrate hermes` put the provider plugin where Hermes on
+    Windows never reads it, and the panel could neither see Hermes nor tell
+    that it was connected."""
+    explicit = os.environ.get("HERMES_HOME", "").strip()
+    if explicit:
+        return Path(os.path.expanduser(os.path.expandvars(explicit)))
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(local) if local
+                else Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
+
+
 def _hermes_plugin_manifest() -> Path:
-    return (Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-            / "plugins" / "compartment" / "plugin.yaml")
+    return hermes_home() / "plugins" / "compartment" / "plugin.yaml"
+
+
+def openclaw_dir() -> Path:
+    """OpenClaw's config directory, by OpenClaw's own rule
+    (src/infra/config-dir.ts, as agent_skill._openclaw_dir reads it):
+    OPENCLAW_STATE_DIR, else the folder of OPENCLAW_CONFIG_PATH, else
+    .openclaw under OPENCLAW_HOME or the home directory. OPENCLAW_HOME was
+    taken for the .openclaw folder itself, one level too high."""
+    from .agent_skill import _openclaw_dir
+    return _openclaw_dir() or Path.home() / ".openclaw"
 
 
 def _openclaw_config() -> Path:
-    return (Path(os.environ.get("OPENCLAW_HOME", Path.home() / ".openclaw"))
-            / "openclaw.json")
+    explicit = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return openclaw_dir() / "openclaw.json"
+
+
+def openclaw_servers(cfg) -> dict:
+    """The MCP servers an OpenClaw config declares: `mcp.servers`.
+
+    Current OpenClaw reads its servers there, and its root schema rejects
+    keys it does not know (src/config/zod-schema.ts), so the top-level
+    `mcpServers` that `integrate openclaw` used to write was never loaded
+    and could stop the whole config from loading. An entry left there is
+    therefore not a connection, and is not counted as one."""
+    mcp = cfg.get("mcp") if isinstance(cfg, dict) else None
+    servers = mcp.get("servers") if isinstance(mcp, dict) else None
+    return servers if isinstance(servers, dict) else {}
 
 
 def integration_paths() -> list[Path]:
@@ -1302,12 +1346,10 @@ def agent_present(target: str, path: str | None = None) -> bool:
                     or claude_desktop.present())
         if target == "hermes":
             return (bool(shutil.which("hermes", path=path))
-                    or Path(os.environ.get("HERMES_HOME",
-                                           Path.home() / ".hermes")).is_dir())
+                    or hermes_home().is_dir())
         if target == "openclaw":
             return (bool(shutil.which("openclaw", path=path))
-                    or Path(os.environ.get("OPENCLAW_HOME",
-                                           Path.home() / ".openclaw")).is_dir())
+                    or openclaw_dir().is_dir())
     except Exception:                                   # noqa: BLE001
         return False
     return False

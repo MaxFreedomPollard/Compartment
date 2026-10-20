@@ -33,7 +33,9 @@ def machine(tmp_path, monkeypatch):
         "openclaw": ("OPENCLAW_HOME", home / ".openclaw"),
     })
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
-    monkeypatch.setenv("OPENCLAW_HOME", str(home / ".openclaw"))
+    # OPENCLAW_HOME stands in for the home directory, as OpenClaw reads it:
+    # its config is .openclaw/openclaw.json under it.
+    monkeypatch.setenv("OPENCLAW_HOME", str(home))
     monkeypatch.setattr(cli, "_tray_app",
                         lambda: (_ for _ in ()).throw(RuntimeError("no app")))
     monkeypatch.setattr(menubar, "_is_generated", lambda path: False)
@@ -118,7 +120,7 @@ def test_uninstall_takes_back_every_registration_integrate_wrote(machine,
     assert json.loads(w.cursor.config_path().read_text(encoding="utf-8")) == {
         "mcpServers": {"theirs": {"command": "x"}}}
     assert json.loads(w.openclaw.read_text(encoding="utf-8")) == {
-        "gateway": {"port": 18789}, "mcpServers": {}}
+        "gateway": {"port": 18789}, "mcp": {"servers": {}}}
     assert w.md.read_text(encoding="utf-8") == "# My notes\nkeep me\n"
     assert not w.plugin.exists()
     for said in ("Claude Desktop registration removed",
