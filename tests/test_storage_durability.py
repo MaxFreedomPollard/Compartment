@@ -297,3 +297,60 @@ def test_a_folder_that_cannot_be_synced_does_not_fail_the_save(
     v.save()
     assert Vault.unlock(vault_path, passphrase=PASS).status()[
         "organic_records"] == 1
+
+
+def test_a_store_whose_journal_did_not_land_cannot_be_saved_later(
+        vault_path, monkeypatch):
+    """The store changes RAM before it journals. When the journal never
+    landed - here the write lock stayed busy past its timeout, as behind a
+    long import in another process - the record stayed in RAM: a retry of
+    the same store was answered "duplicate" from it and journalled nothing,
+    and the memory the caller believed stored was gone at the next reopen,
+    or a later save wrote the one the caller was told had failed."""
+    from compartment import vault as vault_mod
+    from compartment.crypto import CryptoError
+    from compartment.vault import VaultStaleError
+
+    v = Vault.create(vault_path, PASS, creator="t")
+    real_lock = vault_mod.FileLock
+    calls = []
+
+    def busy_once(path, timeout=10.0):
+        calls.append(path)
+        if len(calls) == 1:
+            raise CryptoError("Vault is busy: another process holds the "
+                              "write lock (waited 10s)")
+        return real_lock(path, timeout=timeout)
+
+    monkeypatch.setattr(vault_mod, "FileLock", busy_once)
+    text = "The parking spot is level 3, bay 41."
+    with pytest.raises(CryptoError, match="busy"):
+        v.store(text, caller="t")
+    assert v.is_stale(), "the handle no longer matches the file"
+    with pytest.raises(VaultStaleError, match="did not reach"):
+        v.store(text, caller="t")
+    with pytest.raises(VaultStaleError):
+        v.save()
+
+    again = Vault.unlock(vault_path, passphrase=PASS)   # what the server does
+    assert again.db.count() == 0
+    out = again.store(text, caller="t")
+    assert not out["duplicate"]
+    assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 1
+
+
+def test_a_refused_append_that_wrote_nothing_is_not_saved_later(
+        vault_path, monkeypatch):
+    """A disk already full refuses the first byte: the file is untouched,
+    so nothing about it says this handle is behind - but its RAM holds the
+    record, and the next save wrote it."""
+    from compartment.vault import VaultStaleError
+
+    v = Vault.create(vault_path, PASS, creator="t")
+    with monkeypatch.context() as m:
+        _disk_fills_during_appends(m, _Budget(room=0))
+        with pytest.raises(OSError, match="No space"):
+            v.store("A memory refused at the first byte.", caller="t")
+    with pytest.raises(VaultStaleError):
+        v.save()
+    assert Vault.unlock(vault_path, passphrase=PASS).db.count() == 0

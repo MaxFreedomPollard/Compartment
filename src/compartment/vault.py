@@ -354,6 +354,11 @@ class VaultStaleError(CryptoError):
     """Another process wrote the vault; the caller should reopen and retry."""
 
 
+#: The disk state of a handle whose RAM holds a change its journal append
+#: failed to write. Matches no file, so is_stale() is True from then on.
+_DIVERGED = (-1, -1, -1, "")
+
+
 def _synchronized(fn):
     """Serialize vault operations: the in-RAM SQLite connection and index are
     shared with background threads (Hermes provider writer, auto-lock)."""
@@ -423,11 +428,23 @@ class Vault:
             return True
         return self._stat_disk() != self._disk_state
 
+    def _refuse_if_diverged(self) -> None:
+        """Refuse to write from a handle whose journal append failed (see
+        _journal). Checked at the door of the writes that can answer from RAM
+        without journalling - a store matched as a duplicate, a link that
+        already exists - as well as under the write lock."""
+        if self._disk_state == _DIVERGED:
+            raise VaultStaleError(
+                "An earlier write from this handle did not reach the vault "
+                "file, so what it holds in memory no longer matches it. "
+                "Reopen the vault and retry.")
+
     def _with_file_lock(self, fn, timeout: float = 10.0):
         """Advisory single-writer lock: serializes journal appends and saves
         across processes sharing one vault (Hermes + Claude + CLI).
         Cross-platform via platforms.FileLock (POSIX flock / Windows msvcrt)."""
         with FileLock(self.path + ".flock", timeout=timeout):
+            self._refuse_if_diverged()
             if self.is_stale():
                 if not os.path.exists(self.path):
                     raise VaultStaleError(
@@ -947,7 +964,21 @@ class Vault:
             vaultfile.append_journal_entries(self.path, self.header,
                                              self._journal_seq, list(entries),
                                              self._master)
-        self._with_file_lock(_append)
+        try:
+            self._with_file_lock(_append)
+        except BaseException:
+            # Every caller changes the rows and the index in RAM before it
+            # journals, so a journal that did not land (the write lock busy
+            # past its timeout, a full disk, a failed sync) leaves this
+            # handle holding a change the file does not have. Kept, it went
+            # to disk with the next save, a memory the caller had been told
+            # was not stored; and a retry of the same store found it in RAM,
+            # returned it as a duplicate, and journalled nothing, so it was
+            # gone at the next reopen. The handle is marked as no longer
+            # matching the file, so every later write refuses and the server
+            # reopens from disk, which is the only state worth trusting.
+            self._disk_state = _DIVERGED
+            raise
         self._journal_seq += len(entries)
 
     def _replay(self, e: dict) -> None:
@@ -1045,6 +1076,7 @@ class Vault:
               _expiry_strict: bool = True, _gate: bool = True,
               _split_hint: str | None = None) -> dict:
         self._require_open()
+        self._refuse_if_diverged()
         text, source, discovered, namespace = (
             clean_text(text), clean_text(source), clean_text(discovered),
             clean_text(namespace))
@@ -1875,6 +1907,7 @@ class Vault:
         host model (or the user), exactly like memory curation. Idempotent:
         re-linking the same triple returns the existing relation."""
         self._require_open()
+        self._refuse_if_diverged()
         subject, predicate, obj, namespace = (
             clean_text(subject), clean_text(predicate), clean_text(obj),
             clean_text(namespace))
