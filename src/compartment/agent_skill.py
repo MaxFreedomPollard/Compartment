@@ -15,9 +15,9 @@ Claude Code, Hermes and OpenClaw all read the same Agent Skills layout -
 `<agent home>/skills/<name>/SKILL.md`, YAML frontmatter, markdown body - so one
 packaged file serves all three and the only thing that differs is the root:
 
-    claude    ~/.claude/skills/compartmentalize/SKILL.md
+    claude    $CLAUDE_CONFIG_DIR or ~/.claude/skills/compartmentalize/SKILL.md
     hermes    $HERMES_HOME or ~/.hermes/skills/compartmentalize/SKILL.md
-    openclaw  $OPENCLAW_HOME or ~/.openclaw/skills/compartmentalize/SKILL.md
+    openclaw  <OpenClaw's config dir>/skills/compartmentalize/SKILL.md
 
 Writing into somebody's skills directory is a larger claim on their machine
 than registering an MCP server, so this module never does it silently and never
@@ -35,12 +35,46 @@ SKILL_NAME = "compartmentalize"
 #: Written next to a skill we are about to replace, when it is not ours.
 BACKUP_SUFFIX = ".compartment-backup"
 
-#: Every agent known to read the Agent Skills layout, and the environment
-#: variable that relocates its home. Claude Code has no such variable.
+def _openclaw_dir() -> Path | None:
+    """OpenClaw's config directory when the environment moves it, resolved
+    as OpenClaw resolves it (src/infra/config-dir.ts): OPENCLAW_STATE_DIR is
+    the directory; else the one holding OPENCLAW_CONFIG_PATH; else
+    OPENCLAW_HOME, which stands in for the home directory, with .openclaw
+    under it. OPENCLAW_HOME used to be taken for the directory itself, so
+    with it set the skill went one level above the skills/ OpenClaw loads
+    managed skills from."""
+    state = os.environ.get("OPENCLAW_STATE_DIR", "").strip()
+    if state:
+        return Path(state).expanduser()
+    config = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+    if config:
+        return Path(config).expanduser().parent
+    home = os.environ.get("OPENCLAW_HOME", "").strip()
+    if home:
+        return Path(home).expanduser() / ".openclaw"
+    return None
+
+
+def _claude_dir() -> Path | None:
+    """Claude Code's directory when CLAUDE_CONFIG_DIR moves it, by the same
+    rule the hook and the import use (an absolute path only)."""
+    if not os.environ.get("CLAUDE_CONFIG_DIR", "").strip():
+        return None
+    from .claude_memory import claude_config_dir
+    return claude_config_dir()
+
+
+#: Every agent known to read the Agent Skills layout, and what relocates
+#: its home: the environment variable naming it, or a function working it
+#: out. Claude Code's is CLAUDE_CONFIG_DIR, which moves its skills/ with
+#: everything else. The default home is a function too, called when it is
+#: needed: Path.home() raises where HOME is unset and the uid has no passwd
+#: entry, and evaluated here it killed every `compartment` command at
+#: import in such a container.
 SKILL_TARGETS = {
-    "claude": (None, Path.home() / ".claude"),
-    "hermes": ("HERMES_HOME", Path.home() / ".hermes"),
-    "openclaw": ("OPENCLAW_HOME", Path.home() / ".openclaw"),
+    "claude": (_claude_dir, lambda: Path.home() / ".claude"),
+    "hermes": ("HERMES_HOME", lambda: Path.home() / ".hermes"),
+    "openclaw": (_openclaw_dir, lambda: Path.home() / ".openclaw"),
 }
 
 
@@ -55,9 +89,13 @@ def agent_home(target: str) -> Path | None:
     if entry is None:
         return None
     var, default = entry
-    if var and os.environ.get(var):
+    if callable(var):
+        override = var()
+        if override:
+            return override
+    elif var and os.environ.get(var):
         return Path(os.environ[var]).expanduser()
-    return default
+    return default() if callable(default) else default
 
 
 def skill_path(target: str) -> Path | None:

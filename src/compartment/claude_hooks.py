@@ -25,7 +25,25 @@ from pathlib import Path
 
 from . import claude_memory, clients
 
-SETTINGS = Path.home() / ".claude" / "settings.json"
+# Claude Code's user settings, which move with CLAUDE_CONFIG_DIR, are
+# SETTINGS: worked out when asked for rather than at import, since
+# Path.home() raises where HOME is unset and the uid has no passwd entry
+# (a container run as an arbitrary uid), and an import-time lookup killed
+# every `compartment` command there. Assigning SETTINGS still pins it.
+
+
+def settings_path() -> Path:
+    """Claude Code's user settings.json: SETTINGS when it has been
+    assigned, otherwise <Claude Code's directory>/settings.json, now."""
+    pinned = globals().get("SETTINGS")
+    return Path(pinned) if pinned is not None else (
+        claude_memory.claude_config_dir() / "settings.json")
+
+
+def __getattr__(name: str):
+    if name == "SETTINGS":
+        return claude_memory.claude_config_dir() / "settings.json"
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 # Identifies OUR entries. Both tokens, not one literal string: the command
 # carries `--vault ...` between them when a vault is pinned, so a single
 # substring would stop matching and re-installing would duplicate the hook.
@@ -42,16 +60,50 @@ def _entry(command: str) -> dict:
                        "timeout": TIMEOUT}]}
 
 
+#: Characters a word can hold and still mean itself to a POSIX shell.
+_SHELL_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                        "0123456789_./:@%+=,-")
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _shell_word(s: str, always: bool = False) -> str:
+    """`s` as one word for the shell Claude Code runs hooks in.
+
+    That shell is bash on every platform, Git Bash on Windows (Claude Code
+    2.1.47 and later), and an unquoted backslash is an escape character to
+    it. The hook used to quote the executable only when its path held a
+    space, so the usual Windows path (C:\\Users\\ana\\...\\compartment.exe)
+    reached bash as C:Usersana...compartment.exe: "command not found" after
+    every Write and Edit, and nothing was ever captured. On Windows the path is
+    written with forward slashes, which Git Bash, cmd and PowerShell all
+    take as a path and none of them treats as an escape; it is still the
+    same file to Windows, and the vault it names opens the same session,
+    since the session store normalises the path. Anything still special
+    inside double quotes ($, `, ", \\) is escaped, so a path with one of
+    those in it is not expanded either. A word that needs no quoting is
+    left bare unless `always`: a bare executable path is also one
+    PowerShell runs, where a quoted one is a string expression to it.
+    """
+    if _windows():
+        s = s.replace("\\", "/")
+    if not always and s and all(c in _SHELL_SAFE for c in s):
+        return s
+    for ch in ("\\", '"', "$", "`"):
+        s = s.replace(ch, "\\" + ch)
+    return f'"{s}"'
+
+
 def hook_command(compartment_bin: str | None = None, vault: str | None = None) -> str:
     """The exact shell command the hook runs.
 
     The compartment beside this interpreter, as every MCP registration
     names it: a bare name only works where `compartment` is on the PATH
     Claude Code's shell gets, and the .app install puts it on none."""
-    exe = compartment_bin or clients.executable()
-    if " " in exe:
-        exe = f'"{exe}"'
-    vault_part = f' --vault "{vault}"' if vault else ""
+    exe = _shell_word(compartment_bin or clients.executable())
+    vault_part = f" --vault {_shell_word(vault, always=True)}" if vault else ""
     return f"{exe}{vault_part} hook capture"
 
 
@@ -62,35 +114,66 @@ def is_ours(command: object) -> bool:
 
 
 def is_installed(settings: Path | None = None) -> bool:
-    data = _read(settings or SETTINGS)
-    for group in (data.get("hooks", {}) or {}).get(EVENT, []) or []:
-        for h in group.get("hooks", []) or []:
+    """Whether compartment's capture hook is in settings.json. Raises
+    ValueError when the file cannot be read as settings."""
+    path = Path(settings) if settings else settings_path()
+    for group in _groups(_read(path), path):
+        for h in group.get("hooks") or []:
             if is_ours(h.get("command")):
                 return True
     return False
 
 
 def _read(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        data = json.loads(text) if text else {}
-    except (json.JSONDecodeError, OSError):
-        raise ValueError(f"{path} is not valid JSON; refusing to touch it")
-    if not isinstance(data, dict):          # null, a list: not settings
-        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
-    return data
+    """settings.json as a dict, or ValueError, through the reader every
+    client config goes through (a byte order mark or UTF-16 is decoded)."""
+    return clients._read_json(path)
+
+
+def _groups(data: dict, path: Path) -> list:
+    """The PostToolUse matcher groups, checked for the shape Claude Code
+    reads: `hooks` an object, the event a list of objects, each one's
+    `hooks` a list of objects.
+
+    Anything else is somebody's file in a shape this does not understand,
+    and it is refused as a malformed one is. It used to be walked as if it
+    were right: a list where the object belongs died with AttributeError,
+    which `integrate claude`, `hook status` and the uninstaller do not
+    catch, so the user got a traceback instead of the file's name and what
+    to fix, and an event that was an object was replaced by a list."""
+    hooks = data.get("hooks")
+    if hooks is None:
+        return []
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{path}: \"hooks\" is not an object; refusing to "
+                         "touch it")
+    groups = hooks.get(EVENT)
+    if groups is None:
+        return []
+    if not isinstance(groups, list):
+        raise ValueError(f"{path}: \"hooks.{EVENT}\" is not a list; "
+                         "refusing to touch it")
+    for group in groups:
+        inner = group.get("hooks") if isinstance(group, dict) else None
+        if not isinstance(group, dict) or not (
+                inner is None or (isinstance(inner, list) and all(
+                    isinstance(h, dict) for h in inner))):
+            raise ValueError(f"{path}: an entry in \"hooks.{EVENT}\" is not "
+                             "a matcher with a list of hooks; refusing to "
+                             "touch it")
+    return groups
 
 
 def install(compartment_bin: str | None = None, vault: str | None = None,
             settings: Path | None = None) -> dict:
     """Add (or refresh) compartment's capture hook. Never removes anyone else's."""
-    path = Path(settings) if settings else SETTINGS
+    path = Path(settings) if settings else settings_path()
     data = _read(path)                                  # raises on malformed
+    groups = _groups(data, path)                        # and on a bad shape
 
-    hooks = data.setdefault("hooks", {})
-    groups = hooks.setdefault(EVENT, [])
+    if data.get("hooks") is None:                       # absent, or null
+        data["hooks"] = {}
+    hooks = data["hooks"]
     # drop only our own previous entries, so re-installing updates in place
     kept = []
     for group in groups:
@@ -111,9 +194,9 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
 
 
 def uninstall(settings: Path | None = None) -> bool:
-    path = Path(settings) if settings else SETTINGS
+    path = Path(settings) if settings else settings_path()
     data = _read(path)
-    groups = (data.get("hooks", {}) or {}).get(EVENT)
+    groups = _groups(data, path)
     if not groups:
         return False
     kept, removed = [], False
@@ -153,12 +236,29 @@ def _file_from_payload(payload: dict) -> str | None:
 
 def is_memory_file(path: str | Path) -> bool:
     """True for Claude Code's own memory notes - and nothing else. The index
-    is a table of contents, so it is skipped like the importer skips it."""
+    is a table of contents, so it is skipped like the importer skips it.
+
+    A memory directory under the CLAUDE_CONFIG_DIR Claude Code was started
+    with counts as well: that directory need not be called .claude, and
+    when it was not, every memory write was passed over. So does the
+    directory the autoMemoryDirectory setting names."""
     p = Path(path)
     if p.suffix.lower() != ".md" or p.name == claude_memory.INDEX_NAME:
         return False
+    custom = claude_memory.auto_memory_dir()
+    if custom is not None and os.path.abspath(p.parent) == os.path.abspath(
+            custom):
+        return True                         # autoMemoryDirectory's notes
     parts = [x.lower() for x in p.parts]
-    return "memory" in parts and ".claude" in parts
+    if "memory" not in parts:
+        return False
+    if ".claude" in parts:
+        return True
+    try:
+        return Path(os.path.abspath(p)).is_relative_to(
+            os.path.abspath(claude_memory.claude_config_dir()))
+    except (OSError, ValueError):
+        return False
 
 
 def _earlier_versions(v, tag: str, ns: str, text: str) -> list[str] | None:
@@ -248,4 +348,5 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
 
 
 __all__ = ["install", "uninstall", "is_installed", "is_ours", "capture", "hook_command",
-           "is_memory_file", "SETTINGS", "MARKER", "EVENT", "MATCHER"]
+           "is_memory_file", "SETTINGS", "settings_path", "MARKER", "EVENT",
+           "MATCHER"]

@@ -20,21 +20,87 @@ from . import clients
 NAME = "compartment"
 FILENAME = "claude_desktop_config.json"
 
+#: The MSIX package families Claude Desktop is published under on Windows:
+#: the direct download (whose Claude Setup.exe has been an MSIX bootstrapper
+#: since 2026, removing any older install) and the Microsoft Store build.
+#: Taken from `Get-AppxPackage` output and the app's own main.log quoted in
+#: anthropics/claude-ai-mcp#1150 and shraga100/claude-desktop-rtl-patch#45.
+MSIX_FAMILIES = ("Claude_pzs8sxrjxfjjc", "AnthropicPBC.Claude_fnn82j28hfe8t")
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _local_appdata() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA")
+                or Path.home() / "AppData" / "Local")
+
+
+def _roaming_config() -> Path:
+    """%APPDATA%\\Claude\\claude_desktop_config.json, the real one."""
+    base = os.environ.get("APPDATA") or str(Path.home() / "AppData"
+                                            / "Roaming")
+    return Path(base) / "Claude" / FILENAME
+
+
+def _msix_configs() -> list[Path]:
+    """The private config of each MSIX package of Claude Desktop installed
+    for this user, installed meaning its package directory exists."""
+    packages = _local_appdata() / "Packages"
+    out = []
+    for family in MSIX_FAMILIES:
+        try:
+            if (packages / family).is_dir():
+                out.append(packages / family / "LocalCache" / "Roaming"
+                           / "Claude" / FILENAME)
+        except OSError:
+            pass
+    return out
+
 
 def config_path() -> Path:
     """Claude Desktop's config file on this platform.
 
-    The three locations are the app's own, not ours: macOS keeps it under
-    Application Support, Windows under %APPDATA%, Linux under the XDG config
-    directory.
+    The locations are the app's own, not ours: macOS keeps it under
+    Application Support, Linux (the official beta since June 2026, and the
+    community builds before it) under the XDG config directory, and Windows
+    under %APPDATA% - except that an MSIX app does not write %APPDATA%.
+
+    Claude Desktop on Windows is an MSIX package now, from the Store or
+    from the direct download, and Windows redirects a packaged app's
+    writes under %APPDATA% into the package's own
+    %LOCALAPPDATA%\\Packages\\<family>\\LocalCache\\Roaming. The app reads
+    that private copy first. Compartment is not inside the package, so it
+    wrote the real %APPDATA%\\Claude file, which the app had stopped
+    reading the first time it saved its settings: `integrate claude`
+    reported Claude Desktop connected and the app never saw the entry.
+
+    So with a package installed, its private copy is the file, once it
+    exists. Until it does, the app still reads the real file through
+    Windows' merged view, and that is the one written: a new private file
+    holding only our server would hide every server already in the real
+    one. With neither, the private path is created, which the app will
+    read first. Of two packages with a private copy each, the one saved
+    last is the one in use.
     """
     if sys.platform == "darwin":
         return (Path.home() / "Library" / "Application Support" / "Claude"
                 / FILENAME)
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or str(Path.home() / "AppData"
-                                                / "Roaming")
-        return Path(base) / "Claude" / FILENAME
+    if _windows():
+        roaming = _roaming_config()
+        packaged = _msix_configs()
+        if not packaged:
+            return roaming
+        written = []
+        for p in packaged:
+            try:
+                written.append((p.stat().st_mtime, p))
+            except OSError:
+                pass
+        if written:
+            return max(written)[1]
+        return roaming if roaming.exists() else packaged[0]
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "Claude" / FILENAME
 
@@ -46,6 +112,11 @@ def present(path: Path | None = None) -> bool:
     copy that has never been opened is recognised by its application
     directory instead. Writing a config for an app that is not installed
     would leave litter behind and connect nothing.
+
+    On Windows that is an MSIX package directory, or the older installer's
+    %LOCALAPPDATA%\\AnthropicClaude. A package that has never been opened
+    has no %APPDATA%\\Claude to find, so it was reported as not installed
+    and `integrate claude` skipped it.
     """
     p = Path(path) if path else config_path()
     if p.exists() or p.parent.is_dir():
@@ -53,6 +124,12 @@ def present(path: Path | None = None) -> bool:
     if sys.platform == "darwin":
         return (Path("/Applications/Claude.app").exists()
                 or (Path.home() / "Applications" / "Claude.app").exists())
+    if _windows() and path is None:
+        try:
+            return (bool(_msix_configs())
+                    or (_local_appdata() / "AnthropicClaude").is_dir())
+        except OSError:
+            return False
     return False
 
 
@@ -66,16 +143,10 @@ def is_registered(path: Path | None = None) -> bool:
 
 
 def _read(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        data = json.loads(text) if text else {}
-    except (json.JSONDecodeError, OSError):
-        raise ValueError(f"{path} is not valid JSON; refusing to touch it")
-    if not isinstance(data, dict):          # null, a list: not a config
-        raise ValueError(f"{path} is not a JSON object; refusing to touch it")
-    return data
+    """The config as a dict, or ValueError: the same reader every other
+    client's config goes through, so a file Notepad or PowerShell saved
+    with a byte order mark, or as UTF-16, is read rather than refused."""
+    return clients._read_json(path)
 
 
 def register(command: str, args: list[str], path: Path | None = None) -> dict:
