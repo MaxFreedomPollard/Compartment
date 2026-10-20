@@ -20,9 +20,9 @@ or when a file anywhere in the tree carries a version it does not check.
 | PyPI | `pyproject.toml` | `pip install compartment` | automatic (`publish.yml`) | - |
 | Official MCP Registry | `server.json` | their client's registry browser, `uvx compartment serve` | automatic (`publish-registry.yml`) | - |
 | Claude Code plugins | `.claude-plugin/` | `/plugin marketplace add MaxFreedomPollard/Compartment` | version is gated; nothing else | submit to Anthropic's plugin directory |
-| Claude Desktop extension | `packaging/mcpb/` | the `.mcpb` from the release | build and attach the `.mcpb` | submit to Anthropic's extension directory |
+| Claude Desktop extension | `packaging/mcpb/` | the `.mcpb` from the release | automatic (`publish.yml` builds and attaches it once PyPI has the version) | submit to Anthropic's extension directory |
 | Codex plugins | root `plugin.json` + `.claude-plugin/marketplace.json` | `codex plugin marketplace add MaxFreedomPollard/Compartment` | nothing | - |
-| Gemini CLI extensions | `gemini-extension.json`, `GEMINI.md` | `gemini extensions install https://github.com/MaxFreedomPollard/Compartment` | nothing (crawled daily) | add the `gemini-cli-extension` topic |
+| Gemini CLI extensions | `gemini-extension.json`, `GEMINI.md` | `gemini extensions install https://github.com/MaxFreedomPollard/Compartment` | nothing (crawled daily) | - (the `gemini-cli-extension` topic is set) |
 | Hermes Agent | `integrations/hermes/`, root `plugin.json` + `mcp.json` | `compartment integrate hermes` or `hermes plugins install MaxFreedomPollard/Compartment` | nothing | upstream PR (see below) |
 | OpenClaw | `.claude-plugin/` (as a bundle), `skills/` | `compartment integrate openclaw` | nothing | publish the skill on ClawHub |
 | Smithery | the `.mcpb` | Smithery's install command | `smithery mcp publish` | `smithery auth login` |
@@ -149,14 +149,11 @@ A host wired two ways starts two servers, and the model sees every tool twice:
   it, or Claude Desktop > Settings > Extensions > Install Extension. The vault
   still comes from `compartment init` in a terminal (the passphrase has to be
   typed somewhere).
-- **Each release:** after the version is on PyPI,
-
-  ```bash
-  pip install uv
-  python tools/build_mcpb.py          # dist/compartment-<version>.mcpb, with uv.lock
-  ```
-
-  and attach the file to the GitHub release with the other artifacts. The
+- **Each release:** automatic. Publishing the release runs `publish.yml`,
+  whose `claude-desktop-bundle` job waits for the version on PyPI, then
+  runs `python tools/build_mcpb.py` (dist/compartment-<version>.mcpb, with
+  uv.lock) and attaches it to the release. By hand, the same two commands
+  after the version is on PyPI: `pip install uv`, then the build. The
   build refuses a manifest or pin that is not the package version, and is
   reproducible byte for byte. `uv lock` needs the release on PyPI, so this
   runs after `publish.yml`, not before.
@@ -192,9 +189,9 @@ A host wired two ways starts two servers, and the model sees every tool twice:
   Installs from a release use the source archive as long as the release has
   more than one asset. A release with exactly one asset would make Gemini
   download that asset as the extension, so keep the full set attached.
-- **Once:** add the `gemini-cli-extension` topic to the GitHub repository
-  (About > Topics). That is the gallery's only requirement beyond the
-  manifest at the root.
+- **Once:** the `gemini-cli-extension` topic on the GitHub repository
+  (About > Topics) is the gallery's only requirement beyond the manifest at
+  the root; it is set.
 
 ### Hermes Agent
 

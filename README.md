@@ -17,7 +17,7 @@ network, no telemetry.
 [![mcpservers.org](https://img.shields.io/badge/mcpservers.org-listed-8b5cf6)](https://mcpservers.org/servers/maxfreedompollard/compartment)
 [![LobeHub](https://lobehub.com/badge/mcp/maxfreedompollard-compartment)](https://lobehub.com/mcp/maxfreedompollard-compartment)
 
-**One-click install** (after `pip install compartment && compartment init`):
+**One-click install** (after [installing](#install) and running `compartment init`):
 
 <p>
 <a href="https://cursor.com/install-mcp?name=compartment&config=eyJjb21tYW5kIjoiY29tcGFydG1lbnQiLCJhcmdzIjpbIi0tY2FsbGVyIiwiY3Vyc29yIiwic2VydmUiXX0="><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add to Cursor" height="32"></a>
@@ -381,7 +381,10 @@ sized to the requested number of results could be emptied by them while
 matching memories sit just past the cut. The pool starts at 200 per channel
 and widens up to three times when filtering leaves too few. Below 20,000
 records the vector search is exact (SIMD matrix math, recall 1.0); above
-that, HNSW at about 99% recall.
+that, HNSW at about 99% recall, unless usearch can use no SIMD on the
+machine - an agent's sandbox can hide the CPU features it probes - in which
+case the exact index stays, because rebuilding HNSW without SIMD on every
+open cost from 50 seconds at 25,000 records.
 
 ## Security and the lock model
 
@@ -504,7 +507,8 @@ own size.
 
 ## Install
 
-**No command line needed.** On a Mac, download **Compartment.pkg** from the
+**No command line needed.** On a Mac, download **Compartment-&lt;version&gt;.pkg**
+(Apple silicon) or **Compartment-&lt;version&gt;-intel.pkg** (Intel) from the
 [latest release](https://github.com/MaxFreedomPollard/Compartment/releases/latest)
 and open it. Python, the embedding model and every dependency are inside it.
 It asks you to choose a passphrase, creates the vault, and puts Compartment
@@ -514,14 +518,63 @@ From the command line, on any system:
 
 | | |
 |---|---|
-| **pip** (macOS, Linux, Windows) | `pip install compartment && compartment init` |
-| **pipx / uv** | `pipx install compartment` or `uv tool install compartment`, then `compartment init` |
-| **Claude Code plugin** | after `pip install compartment && compartment init`: `/plugin marketplace add MaxFreedomPollard/Compartment`, then `/plugin install compartment@maxfreedompollard`. Codex reads the same marketplace file |
+| **pipx** (recommended) | `pipx install compartment && compartment init` |
+| **uv** | `uv tool install compartment && compartment init` |
+| **pip** | `pip install compartment && compartment init` inside a virtual environment. Debian 12+, Ubuntu 23.04+, Fedora, Arch and Homebrew refuse a system-wide `pip install` with "externally-managed-environment"; pipx and uv avoid that. On Windows, `py -m pip install compartment` |
+| **Install script** | from a checkout: `bash install/install-linux.sh` (Linux, WSL, ChromeOS), `bash install/install-macos.sh`, or `powershell -ExecutionPolicy Bypass -File install\install-windows.ps1`. Each picks a Python that works on the machine, handles the externally-managed case, creates the vault and connects the agents it finds |
 | **Docker** | `docker build -t compartment .` from a checkout; see [Wiring each agent](#wiring-each-agent) |
 
-The pip route needs Python 3.11 or newer. The app runs on macOS 13 or
-newer, on Windows with the Microsoft Visual C++ runtime installed, and on
-any Linux desktop.
+Agents can also install it from their own stores - the Claude Desktop
+extension (`compartment-<version>.mcpb` on each release), the Claude Code and
+Codex plugin marketplaces, Gemini CLI extensions, Hermes Agent plugins and
+more. Each still needs the vault from `compartment init`, because the
+passphrase is typed by you. [docs/PLUGINS.md](docs/PLUGINS.md) lists every
+store and its install command.
+
+### Where it runs
+
+| System | CPU | Python for pip / pipx / uv | The app |
+|---|---|---|---|
+| macOS 14 or newer | Apple silicon | 3.11 - 3.14 | menu bar; `.pkg` / `.dmg` |
+| macOS 13.4 or newer, and every Intel Mac | Apple silicon, Intel | 3.11 - 3.13 | menu bar; `-intel.pkg` / `-intel.dmg` on Intel |
+| Windows 10 / 11 | x64 | 3.11 - 3.14 | tray icon |
+| Windows 11 on ARM | ARM64 | 3.12 - 3.14 | tray icon |
+| Linux with glibc 2.28+ (Ubuntu 20.04+, Debian 11+, Fedora, RHEL 8+, Arch, openSUSE), WSL 2, ChromeOS Linux | x86_64, aarch64 (incl. Raspberry Pi 5) | 3.11 - 3.14 | a window (needs Tk: `python3-tk` or your distro's equivalent) |
+| Docker | amd64, arm64 | in the image | headless |
+
+The limits come from onnxruntime, the one dependency without wheels
+everywhere: its macOS builds need macOS 14 from 1.24 on, and its last Intel
+Mac build (1.23.2) stops at Python 3.13. CI runs the suite on every row and
+checks the whole matrix for a dependency that would have to be compiled
+(`tools/wheel_coverage.py`). On Windows, onnxruntime also needs the
+[Microsoft Visual C++ runtime](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+([ARM64](https://aka.ms/vs/17/release/vc_redist.arm64.exe)); Compartment says
+so if it is missing.
+
+**Elsewhere, with the system's onnxruntime.** Alpine (musl), FreeBSD and
+Android (Termux) package onnxruntime themselves; install it from the system
+and give Compartment a virtual environment that can see it. The install
+script does this for you.
+
+```bash
+# Alpine
+apk add python3 py3-onnxruntime
+# FreeBSD (default Python 3.12; the compiled dependencies come from packages)
+pkg install py312-onnxruntime py312-tokenizers py312-pydantic-core py312-pynacl py312-argon2-cffi py312-numpy py312-cryptography
+# Termux
+pkg install python onnxruntime python-numpy rust
+
+# then, on any of them
+python3 -m venv --system-site-packages ~/.compartment-venv
+~/.compartment-venv/bin/pip install compartment && ~/.compartment-venv/bin/compartment init
+```
+
+On Termux there is no shared memory for the
+unlock-until-restart credential, so set `COMPARTMENT_PASSPHRASE` or use
+`compartment unlock --once`. A glibc older than 2.28, 32-bit systems, armv7
+and riscv64 are not supported. On WSL 2, the VM shutting down after it has
+been idle clears the unlock credential, so the vault relocks between
+sessions.
 
 `init` asks you to choose a passphrase, creates the vault, loads the
 reference facts, connects Claude Code, Hermes Agent or OpenClaw if they are
@@ -534,7 +587,7 @@ To connect an agent later, or any other client:
 compartment integrate claude      # Claude Code + Claude Desktop
 compartment integrate hermes      # Hermes Agent
 compartment integrate openclaw    # OpenClaw
-compartment integrate --list      # the 28 MCP clients it can wire: Cursor, VS Code, Cline, Roo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Oh My Pi, LM Studio, AnythingLLM, BoltAI ...
+compartment integrate --list      # the 33 MCP clients it can wire: Cursor, VS Code, Windsurf, Cline, Roo Code, Kilo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Kiro, Amazon Q, Junie, Goose, LM Studio, Continue ...
 compartment integrate --all       # every one of them that is installed here
 ```
 
@@ -545,6 +598,11 @@ installed in their skills directories. Any other MCP client uses this block
 ```json
 { "mcpServers": { "compartment": { "command": "compartment", "args": ["serve"] } } }
 ```
+
+An app started from the Dock, Finder or the Start menu does not see your
+shell's PATH, so a bare `compartment` can fail there with "spawn compartment
+ENOENT". Use the full path that `which compartment` (`where compartment` on
+Windows) prints; `integrate` always writes that full path.
 
 ## Wiring each agent
 
@@ -607,7 +665,7 @@ backup. Then run `openclaw gateway restart` and check with
 
 **Any MCP client**
 
-`compartment integrate <client>` wires any of the 28 clients in `--list`.
+`compartment integrate <client>` wires any of the 33 clients in `--list`.
 Each config write takes a byte-exact backup first, merges rather than
 replaces, writes atomically, and refuses to touch a file it cannot parse (it
 prints the block to paste instead). To do it by hand, use the block in
@@ -620,10 +678,19 @@ Client-by-client walkthroughs are in
 
 **Docker**
 
-`docker build -t compartment .` from a checkout builds a headless image:
-stdio only, no port, unprivileged user, vault on a bind mount at `/data`.
-Create the vault on the host first with `compartment init`, because that
-step prompts for the passphrase.
+`docker build -t compartment .` from a checkout builds a headless image
+(amd64 and arm64): stdio only, no port, unprivileged user, the offline guard
+on, vault on a bind mount at `/data`. Create the vault on the host first
+with `compartment init`, because that step prompts for the passphrase, then
+give the client this command:
+
+```bash
+docker run -i --rm --network none --user "$(id -u):$(id -g)" \
+  -v "$HOME/.compartment:/data" -e COMPARTMENT_PASSPHRASE compartment
+```
+
+`--user` lets the container read your 0600 vault on a Linux host; Docker
+Desktop on macOS and Windows does not need it.
 
 ## Configuration
 
@@ -748,6 +815,7 @@ is off unless you turn it on above.
 | | |
 |---|---|
 | [docs/MEMORY.md](docs/MEMORY.md) | how memory is stored, what gets remembered, and the ranking design |
+| [docs/PLUGINS.md](docs/PLUGINS.md) | every plugin store and listing: how users install from it, what the maintainer does |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | selecting Compartment in Hermes Agent, OpenClaw, Claude, everything else |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | other memory servers, with sources |
 | [SECURITY.md](SECURITY.md) | the full threat model and its limits |
