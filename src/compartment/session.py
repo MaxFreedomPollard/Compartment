@@ -21,7 +21,9 @@ holder that no filesystem backs:
     uid, mode 0600. It outlives the process that created it, is shared by
     every later process of this user, and dies with the kernel that holds it.
     On Linux that object is a file on the /dev/shm tmpfs; on macOS it has no
-    filesystem presence at all.
+    filesystem presence at all. FreeBSD keeps it in the kernel and NetBSD on
+    the /var/shm tmpfs. OpenBSD is refused: its shm_open is a plain file in
+    /tmp, which is on disk.
   * Windows: a REG_OPTION_VOLATILE key under HKEY_CURRENT_USER. Volatile keys
     are never written to the hive on disk and vanish when the hive unloads,
     which is at logoff and at every restart. Windows therefore also relocks
@@ -69,7 +71,7 @@ alternative: it survives reboots by design. See SECURITY.md.
 """
 from __future__ import annotations
 
-from .home import env, home
+from .home import env, home, session_dir
 import ctypes
 import ctypes.util
 import errno
@@ -106,9 +108,20 @@ _RACE_TIMEOUT = 2.0
 
 
 def _session_dir() -> Path:
-    d = Path(env("SESSION_DIR", home() / "session"))
+    """The session store, created 0700 if it is not there yet.
+
+    The mode is narrowed only when it is wrong, not on every call. A chmod
+    is a write, and the processes that most need to READ a stored credential
+    are often not allowed to write here: an agent's shell under Claude Code
+    or Codex runs in a macOS Seatbelt profile whose write allowlist is the
+    project and the temp directory, and there chmod on the user's own 0700
+    session directory fails with EPERM. Calling it unconditionally made
+    every `compartment search` the agent ran die with PermissionError
+    before it could look at the credential the user had unlocked."""
+    d = session_dir()
     d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
+    if stat.S_IMODE(d.stat().st_mode) != 0o700:
+        os.chmod(d, 0o700)
     return d
 
 
@@ -119,9 +132,35 @@ def _boot_time() -> str:
 
 
 def _uid() -> str:
-    # os.getuid() is POSIX-only; on Windows fall back to the username.
+    """Who this is, for the holder's name and the wrap key's context.
+
+    os.getuid() is POSIX-only; Windows uses the account name. USERNAME is
+    where that has always been read from, and it stays first so every
+    existing credential keeps its holder. But it is only an environment
+    variable, and a process can be started without it: an MCP client that
+    replaces the environment with the `env` block of its config, a service
+    wrapper, a scheduler. Such a process used to call itself "user", derive
+    a different holder name, find no secret under it, and delete the one
+    credential file every other process of the user was opening. The
+    account name the variable normally carries is asked of Windows
+    instead."""
     getuid = getattr(os, "getuid", None)
-    return str(getuid()) if getuid else os.environ.get("USERNAME", "user")
+    if getuid:
+        return str(getuid())
+    return os.environ.get("USERNAME") or _windows_account_name() or "user"
+
+
+def _windows_account_name() -> str | None:
+    """GetUserNameW: the logon name Windows itself puts in USERNAME."""
+    try:
+        from ctypes import wintypes
+        size = wintypes.DWORD(257)                 # UNLEN + 1
+        buf = ctypes.create_unicode_buffer(size.value)
+        if ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(size)):
+            return buf.value or None
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +175,11 @@ def _uid() -> str:
 
 _libc_cache = None
 
+#: What to do instead, for every error that means "no holder here".
+_ALTERNATIVES = (
+    "Use COMPARTMENT_PASSPHRASE, `compartment unlock --once`, `compartment "
+    "unlock --keychain` (macOS), or `compartment init --no-session`.")
+
 
 def _libc():
     """libc/librt with shm_open, argtypes set for the variadic call.
@@ -148,6 +192,18 @@ def _libc():
     global _libc_cache
     if _libc_cache is not None:
         return _libc_cache
+    if sys.platform.startswith("openbsd"):
+        # OpenBSD's libc implements shm_open as an ordinary file,
+        # /tmp/<sha256 of the name>.shm, on whatever /tmp is - a disk
+        # partition on a default install (lib/libc/gen/shm_open.c). The
+        # secret would then be on the same disk as the session file, and
+        # stay there after a power cut until the next boot prunes /tmp: a
+        # copy of that disk opens the credential, which is the one thing
+        # this holder exists to prevent.
+        raise CryptoError(
+            "OpenBSD keeps POSIX shared memory as a file in /tmp, on disk, "
+            "so it cannot hold a per-boot secret that a copy of the disk "
+            "would not carry. " + _ALTERNATIVES)
     for name in (None, "rt", "c"):
         try:
             lib = ctypes.CDLL(ctypes.util.find_library(name) if name else None,
@@ -166,9 +222,18 @@ def _libc():
         "No POSIX shared memory (shm_open) on this system, so there is "
         "nowhere to hold a per-boot secret that a restart destroys. "
         "Compartment will not fall back to a credential that anyone holding "
-        "the session file could recompute. Use `compartment unlock "
-        "--keychain` (macOS), COMPARTMENT_PASSPHRASE, `compartment unlock "
-        "--once`, or `compartment init --no-session`.")
+        "the session file could recompute. " + _ALTERNATIVES)
+
+
+#: Why shm_open fails where it exists at all. glibc keeps its objects in
+#: /dev/shm and fails ENOENT where that is not mounted (chroots, some build
+#: and CI containers, Android); a container's /dev/shm can be read-only or
+#: full; and sandboxes refuse names outside their own prefix (snap, the
+#: macOS App Sandbox) with EACCES or EPERM.
+_NO_SHM_HERE = (
+    "POSIX shared memory is not usable for this process: /dev/shm may be "
+    "missing, read-only or full (some containers and chroots), or a "
+    "sandbox may refuse it.")
 
 
 def _shm_open(name: str, flags: int, mode: int | None = None) -> int:
@@ -195,7 +260,8 @@ def _posix_read(name: str) -> tuple[str, bytes | None]:
         if exc.errno == errno.ENOENT:
             return "absent", None
         raise CryptoError(
-            f"Cannot open this boot's secret ({name}): {exc}") from exc
+            f"Cannot open this boot's secret ({name}): {exc}. "
+            f"{_NO_SHM_HERE} {_ALTERNATIVES}") from exc
     try:
         st = os.fstat(fd)
         if st.st_uid != os.getuid():
@@ -226,7 +292,8 @@ def _posix_create(name: str) -> bytes | None:
         if exc.errno == errno.EEXIST:
             return None
         raise CryptoError(
-            f"Cannot create this boot's secret ({name}): {exc}") from exc
+            f"Cannot create this boot's secret ({name}): {exc}. "
+            f"{_NO_SHM_HERE} {_ALTERNATIVES}") from exc
     try:
         os.ftruncate(fd, SECRET_LEN)
         secret = secrets.token_bytes(SECRET_LEN)
@@ -393,7 +460,9 @@ def _forget_boot_secret() -> bool:
     try:
         name = _holder()
         return _win_forget(name) if IS_WINDOWS else _posix_forget(name)
-    except CryptoError:
+    except (CryptoError, OSError):
+        # OSError: the session directory, which names the holder, cannot be
+        # made here. Then no credential was ever stored in it either.
         return False
 
 
@@ -450,7 +519,7 @@ def credential_path(vault_path: str) -> Path:
     unlocked in a terminal by looking at the file's modification time - the
     one check cheap enough to make on every click. Unlike `_file_for`, it
     never creates the session directory or changes its mode."""
-    return Path(env("SESSION_DIR", home() / "session")) / _name_for(vault_path)
+    return session_dir() / _name_for(vault_path)
 
 
 def watch_signature(vault_path: str) -> tuple:
@@ -540,8 +609,15 @@ def get(vault_path: str) -> bytes | None:
 
     None means locked. A CryptoError means something is wrong that deleting
     the credential would not fix - an unreadable file, no boot clock - and in
-    that case nothing is deleted."""
-    p = _file_for(vault_path)
+    that case nothing is deleted.
+
+    Looking costs nothing on disk: with no credential there, nothing is
+    created. Every vault open starts here, before the Keychain and before
+    COMPARTMENT_PASSPHRASE are consulted, so a lookup that insisted on
+    making the session directory first took down every open where that
+    directory cannot be made - a container run as an arbitrary uid, whose
+    HOME is `/`, or a read-only root - even with the passphrase exported."""
+    p = credential_path(vault_path)
     if not p.is_file():
         return None
     try:
@@ -590,10 +666,10 @@ def clear(vault_path: str) -> bool:
     If that was the last one in this store, destroy the per-boot secret too:
     keeping it would leave key material in memory that nothing on disk can
     use, and a panic-lock should not leave that lying about."""
-    p = _file_for(vault_path)
+    p = credential_path(vault_path)
     existed = p.is_file()
     if existed:
         p.unlink()
-    if not any(_session_dir().glob("*.session")):
+    if not p.parent.is_dir() or not any(p.parent.glob("*.session")):
         _forget_boot_secret()
     return existed

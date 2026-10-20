@@ -50,4 +50,17 @@ def env(suffix: str, default: str | None = None) -> str | None:
             or default)
 
 
-__all__ = ["home", "file", "env", "NAME", "LEGACY_NAME"]
+def session_dir() -> Path:
+    """Where the unlock credential and the per-boot markers live:
+    COMPARTMENT_SESSION_DIR, else home()/session.
+
+    The variable is read first and home() only when it is unset. Writing
+    env("SESSION_DIR", home() / "session") evaluated home() every time, and
+    in a container run as a uid with no passwd entry and no HOME,
+    Path.home() raises: setting COMPARTMENT_SESSION_DIR, the documented way
+    to put the session somewhere writable, could not get past it."""
+    given = env("SESSION_DIR")
+    return Path(given) if given else home() / "session"
+
+
+__all__ = ["home", "file", "env", "session_dir", "NAME", "LEGACY_NAME"]

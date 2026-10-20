@@ -3,6 +3,20 @@ name: CI
 on:
   push:
   pull_request:
+  # Weekly, because a dependency's new release can break an install on some
+  # platform without any commit here (see wheel-coverage).
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+# One run per branch at a time. A push to a pull request's branch fires both
+# `push` and `pull_request`, and every new commit used to leave the previous
+# runs going too, so the macOS jobs - the slowest runners to come free -
+# queued behind runs nobody would read. Keyed on the branch for both events,
+# the newest run cancels the rest; the weekly run has its own group.
+concurrency:
+  group: ci-${{ github.event_name == 'schedule' && 'weekly' || (github.head_ref || github.ref_name) }}
+  cancel-in-progress: true
 
 jobs:
   test-offline:
@@ -14,11 +28,34 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.12"]
+        # Every Python the package declares. 3.13 and 3.14 were classifiers
+        # nothing ran, and 3.14 is what a fresh Homebrew, Fedora or python.org
+        # install hands people now.
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          # ARM64 Linux (Graviton, Ampere, Raspberry Pi 5, Apple silicon VMs)
+          # and Windows on ARM (Snapdragon laptops): onnxruntime ships wheels
+          # for both, and "it installed but the native library will not load"
+          # is the failure only a real machine of that architecture shows.
+          - os: ubuntu-24.04-arm
+            python: "3.12"
+          - os: windows-11-arm
+            python: "3.12"
+          # Intel Macs. onnxruntime's last macOS x86_64 wheels are 1.23.2,
+          # built for Python up to 3.13, so this is the newest pairing that
+          # installs there, and it proves the code still runs on that older
+          # onnxruntime as well as on the newest one above.
+          - os: macos-15-intel
+            python: "3.13"
     runs-on: ${{ matrix.os }}
+    # The suite takes minutes. A test that hangs (a pipe never closed, a
+    # child never reaped) used to hold a runner for six hours - and on macOS,
+    # where runners are scarce, every other macOS job behind it. pytest's
+    # --timeout below fails the one test with its stack; this caps the rest.
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Install (network allowed for dependency download only)
@@ -26,23 +63,174 @@ jobs:
       - name: Test suite with offline guard active
         env:
           COMPARTMENT_ASSERT_OFFLINE: "1"
-        run: pytest tests/ -q --cov=compartment --cov-report=xml --cov-append
+        run: python tools/ci_report.py tests/ -q --timeout=300 -o faulthandler_timeout=120 --cov=compartment --cov-report=xml --cov-append
 
       - name: Dashboard tests (loopback socket; offline guard intentionally off)
         # `compartment dash` binds 127.0.0.1 by design and is never run under the
         # offline guard, so its tests run here with the guard off.
-        run: pytest tests/test_dash.py -q --cov=compartment --cov-report=xml --cov-append
+        run: python tools/ci_report.py tests/test_dash.py -q --timeout=300 -o faulthandler_timeout=120 --cov=compartment --cov-report=xml --cov-append
 
       - name: Coverage to Codecov
         # Never fail the build on a reporting service: the offline guard and the
         # test suite are the gate here, not the upload.
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         continue-on-error: true
         with:
           files: ./coverage.xml
           flags: ${{ matrix.os }}-py${{ matrix.python }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  real-sockets:
+    # The shared embedding daemon and the stdio server need real Unix sockets
+    # and pipes, which agent sandboxes refuse, so these are the tests that
+    # only ever run on a CI runner. They run here on their own, verbose, with
+    # every thread's stack dumped for a test that stalls, so a hang names
+    # itself within minutes instead of holding a runner until its timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[dev]
+      - name: Daemon and stdio tests, verbose
+        env:
+          CI_REPORT_STALL_S: "75"
+        run: python tools/ci_report.py tests/test_embed_daemon.py tests/test_server_stdio.py -v --timeout=120 -o faulthandler_timeout=60
+
+  wheel-smoke:
+    # The suite runs against an editable checkout, which hides packaging
+    # mistakes: a model file or the starter pack missing from the wheel, an
+    # entry point that only resolves from source, a server that starts in a
+    # test but not as a console script. This builds the wheel, installs it
+    # the way the README tells people to (pipx), and uses it like a person
+    # and like an MCP client would, offline guard on.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      COMPARTMENT_ASSERT_OFFLINE: "1"
+      COMPARTMENT_PASSPHRASE: ci-only-not-a-secret
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+          ls -l dist
+      - name: Install it with pipx, as the README says
+        shell: bash
+        env:
+          COMPARTMENT_ASSERT_OFFLINE: ""
+        run: |
+          pipx install --python python dist/*.whl
+          pipx ensurepath
+      - name: Create, write, read, verify
+        shell: bash
+        run: |
+          compartment --version
+          compartment init --passphrase ci-only-not-a-secret --no-app
+          compartment store --source "from chat" "Deploys go out Tuesday and Thursday mornings."
+          compartment search "when do deploys go out" | tee search.txt
+          grep -q "Tuesday and Thursday" search.txt
+          compartment selftest
+          compartment status
+      - name: An MCP client's handshake against the installed server
+        shell: bash
+        run: python tools/mcp_smoke.py --command compartment
+
+  macos-app:
+    # The same build the Release workflow runs at tag time, so a broken
+    # installer shows up on the pull request that broke it rather than on
+    # release day. The .pkg and .dmg are kept for a week for anyone who
+    # wants to try a change before it ships.
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: apple-silicon
+          - runner: macos-15-intel
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0  # exact: no floating major tags are published
+      - name: A standalone, non-framework Python to embed
+        shell: bash
+        run: |
+          uv python install 3.12
+          echo "EMBED_PY=$(uv python find --managed-python 3.12)" >> "$GITHUB_ENV"
+      - name: Build Compartment.app, the .pkg and the .dmg
+        shell: bash
+        run: |
+          "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg
+          ls -l build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compartment-macos-${{ matrix.arch }}
+          path: |
+            build/Compartment-*.pkg
+            build/Compartment-*.dmg
+          retention-days: 7
+          if-no-files-found: error
+
+  wheel-coverage:
+    # pip installs the newest release of every dependency and compiles it when
+    # that release has no wheel for the machine. That is how a plain
+    # `pip install compartment` broke on Windows on ARM and Intel Macs: an
+    # indirect dependency stopped shipping wheels there. This resolves the
+    # dependencies for every supported platform and Python, as pip would and
+    # wheels-only, and fails when they differ. A dependency release can break
+    # this without a commit here, so it also runs weekly.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install uv
+      - run: python tools/wheel_coverage.py
+
+  lowest-dependencies:
+    # pyproject.toml's lower bounds are a promise to everyone whose distro or
+    # lock file holds an older library. It used to promise mcp>=1.0, and no
+    # release before 1.21.2 runs the server beside today's pydantic. This
+    # installs the lowest version of every direct dependency the bounds
+    # allow and runs the suite, so a bound is a tested fact, not a guess.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install at the lowest versions the bounds allow
+        run: |
+          python -m pip install uv
+          uv pip install --system --resolution lowest-direct -e ".[dev]"
+          python -m pip list
+      - name: Test suite with offline guard active
+        env:
+          COMPARTMENT_ASSERT_OFFLINE: "1"
+        run: python tools/ci_report.py tests/ -q --timeout=300 -o faulthandler_timeout=120 --ignore=tests/test_dash.py
 
   linux-panel:
     # Linux has no notification area worth relying on, so it draws the same
@@ -52,8 +240,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: The Tk package, which pip cannot install
@@ -129,8 +317,8 @@ jobs:
     # locked, and the next command sat asking for input.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install with the tray extra
@@ -178,16 +366,25 @@ jobs:
         # `compartment init` above already started the tray app, which is the
         # whole point of it. So a launch now must hand off and exit 0, and
         # the copy that was already there must still be running afterwards.
+        # Counted by command line, not by process name: init starts the tray
+        # with pythonw.exe (no console window), so there is no process called
+        # "compartment" to count.
         shell: pwsh
         run: |
-          $before = @(Get-Process compartment -ErrorAction SilentlyContinue).Count
+          function Get-Tray {
+            @(Get-CimInstance Win32_Process | Where-Object {
+                $_.CommandLine -and $_.CommandLine -match 'compartment' -and
+                $_.CommandLine -match '\btray\b' })
+          }
+          $before = (Get-Tray).Count
+          Get-Tray | ForEach-Object { Write-Host "  running: $($_.Name): $($_.CommandLine)" }
           if ($before -lt 1) { Write-Error "init did not start the tray app"; exit 1 }
           compartment tray --show
           if ($LASTEXITCODE -ne 0) { Write-Error "the second copy failed instead of standing down"; exit 1 }
-          $after = @(Get-Process compartment -ErrorAction SilentlyContinue).Count
+          $after = (Get-Tray).Count
           if ($after -ne $before) { Write-Error "second copy changed the count: $before -> $after"; exit 1 }
-          Write-Host "one copy before, one copy after"
-          Get-Process compartment -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "the same $before process(es) before and after"
+          Get-Tray | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 2
 
       - name: Start the tray app and prove it is still alive
@@ -285,7 +482,7 @@ jobs:
                     [System.Drawing.Imaging.ImageFormat]::Png)
           Write-Host "panel: ${w}x${ht}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-tray-screenshot
           path: |

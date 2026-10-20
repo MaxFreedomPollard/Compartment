@@ -324,7 +324,8 @@ def _run(args: list[str], timeout: int = 60) -> tuple[int, str]:
     try:
         p = subprocess.run(args, capture_output=True, text=True,
                            timeout=timeout, encoding="utf-8", errors="replace",
-                           env={**os.environ, "PATH": user_path()})
+                           env={**os.environ, "PATH": user_path()},
+                           **_no_console())
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
@@ -350,13 +351,11 @@ def _json_cmd(vault: str, *sub: str) -> dict | None:
 def _json_run(argv: list[str], timeout: float = 60) -> dict | None:
     """Run a command and parse the JSON it prints: _json_cmd's runner, for any
     command line. None if it failed, timed out, or printed no JSON."""
-    kwargs = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
                            timeout=timeout, encoding="utf-8", errors="replace",
-                           env={**os.environ, "PATH": user_path()}, **kwargs)
+                           env={**os.environ, "PATH": user_path()},
+                           **_no_console())
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode != 0:
@@ -441,6 +440,17 @@ VIEW_TIMEOUT = 60
 #: programs, and started from the tray (which has none) each would open one -
 #: and the vault view would keep its open for as long as it runs.
 _CREATE_NO_WINDOW = 0x08000000
+
+
+def _no_console() -> dict:
+    """subprocess keyword arguments for a child the panel starts: on Windows,
+    no console window. Every child, not only the two that had it. Unlock,
+    Lock, Create, Change password and Connect each ran the CLI as a console
+    program, so from the tray - pythonw.exe, which has no console of its own
+    - each click flashed a console window, and Dashboard kept one open for
+    as long as the dashboard ran, where closing it stopped the dashboard."""
+    return ({"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32"
+            else {})
 
 NO_VAULT_NOTE = "no vault yet - choose a passphrase below to create one"
 CREDENTIAL_REFUSED_NOTE = ("The saved unlock no longer opens this vault. "
@@ -534,15 +544,12 @@ class ViewProcess:
         self._next = 0
 
     def _start(self):
-        kwargs = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = _CREATE_NO_WINDOW
         proc = subprocess.Popen(
             _view_argv(self.vault), stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None if env("MENUBAR_DEBUG") else subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            env={**os.environ, "PATH": user_path()}, **kwargs)
+            env={**os.environ, "PATH": user_path()}, **_no_console())
         lines: queue.Queue = queue.Queue()
 
         def pump():
@@ -919,6 +926,66 @@ def dashboard_url(line: str) -> str | None:
     return None
 
 
+def _is_wsl() -> bool:
+    """Linux under Windows (WSL 1 or 2), where the user's browser is a
+    Windows program."""
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        with open("/proc/sys/kernel/osrelease", encoding="utf-8",
+                  errors="replace") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def open_in_browser(url: str) -> bool:
+    """Open `url` in the user's own browser. False when there is none to
+    open here, so the caller can say to open the address by hand.
+
+    webbrowser.open on its own got three places wrong:
+
+    * A Linux machine with no desktop (SSH, a container, WSL without WSLg)
+      has no graphical browser, and with TERM set webbrowser falls back to
+      a text browser - w3m, lynx, www-browser - run in the same terminal and
+      waited for. `compartment dash` called it before serving, so the text
+      browser sat waiting on a server that would not answer until the
+      browser exited. Without a display nothing is opened.
+    * WSL: the browser is on the Windows side, and xdg-open there opens
+      nothing or a stray Linux one. wslview (wslu) or explorer.exe opens
+      the Windows default browser, which reaches 127.0.0.1 in WSL 2 through
+      its localhost forwarding.
+    * BROWSER, when set, is the user's own choice and is honoured as
+      webbrowser honours it, display or not.
+
+    Never raises. Can block if the browser it starts is one that runs in
+    the foreground, so a caller with other work runs it on a thread.
+    """
+    try:
+        if os.environ.get("BROWSER"):
+            return bool(webbrowser.open(url))
+        if sys.platform not in ("win32", "darwin"):
+            if _is_wsl():
+                for opener in ("wslview", "explorer.exe"):
+                    exe = shutil.which(opener)
+                    if exe:
+                        # explorer.exe exits 1 even when it opened the page,
+                        # so having started it is the answer.
+                        subprocess.Popen([exe, url],
+                                         stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+                        return True
+                return False
+            if not (os.environ.get("DISPLAY")
+                    or os.environ.get("WAYLAND_DISPLAY")):
+                return False
+        return bool(webbrowser.open(url))
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def _drain(proc) -> None:
     # `dash` says a few more lines over its life; read them so it can never
     # block on a full pipe.
@@ -941,14 +1008,17 @@ def open_dashboard(vault: str) -> str | None:
     """
     proc, url = _DASH["proc"], _DASH["url"]
     if proc is not None and proc.poll() is None and url:
-        webbrowser.open(url)
+        # On a thread: this is the UI thread, and a browser that runs in the
+        # foreground would hold it for as long as it is open.
+        threading.Thread(target=open_in_browser, args=(url,), daemon=True,
+                         name="compartment-open-browser").start()
         return url
     try:
         proc = subprocess.Popen(
             [*_cli_argv(), "--vault", vault, "dash"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             encoding="utf-8", errors="replace",
-            env={**os.environ, "PATH": user_path()})
+            env={**os.environ, "PATH": user_path()}, **_no_console())
     except (OSError, subprocess.SubprocessError):
         return None
     _DASH["proc"], _DASH["url"] = proc, None
@@ -1011,7 +1081,7 @@ def unlock_vault(vault: str, passphrase: str) -> tuple[bool, str]:
         p = subprocess.run(
             [*_cli_argv(), "--vault", vault, "unlock", "--passphrase-stdin"],
             input=passphrase + "\n", capture_output=True, text=True,
-            timeout=180, encoding="utf-8", errors="replace")
+            timeout=180, encoding="utf-8", errors="replace", **_no_console())
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
@@ -1064,7 +1134,7 @@ def create_vault(vault: str, passphrase: str, repeat: str) -> tuple[bool, str]:
              "--no-app"],
             input=passphrase + "\n", capture_output=True, text=True,
             timeout=900, encoding="utf-8", errors="replace",
-            env={**os.environ, "PATH": user_path()})
+            env={**os.environ, "PATH": user_path()}, **_no_console())
     except subprocess.TimeoutExpired as exc:
         if os.path.exists(vault):
             # init writes the vault in its first seconds. What ran out of
@@ -1106,7 +1176,7 @@ def change_passphrase(vault: str, new: str, repeat: str) -> tuple[bool, str]:
         p = subprocess.run(
             [*_cli_argv(), "--vault", vault, "rekey", "--new-passphrase-stdin"],
             input=new + "\n", capture_output=True, text=True,
-            timeout=180, encoding="utf-8", errors="replace")
+            timeout=180, encoding="utf-8", errors="replace", **_no_console())
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
@@ -1165,7 +1235,7 @@ def integration_status(vault: str) -> dict:
         p = _openclaw_config()
         if p.is_file():
             cfg = json.loads(p.read_text(encoding="utf-8"))
-            out["openclaw"] = "compartment" in (cfg.get("mcpServers") or {})
+            out["openclaw"] = "compartment" in openclaw_servers(cfg)
     except (OSError, ValueError):
         pass
     return out
@@ -1175,14 +1245,58 @@ def _claude_code_config() -> Path:
     return Path.home() / ".claude.json"
 
 
+def hermes_home() -> Path:
+    """Hermes Agent's home, found the way Hermes finds it
+    (hermes_constants.get_hermes_home): HERMES_HOME, with ~ and variables
+    expanded, else the platform default.
+
+    On Windows that default is %LOCALAPPDATA%\\hermes, not ~/.hermes, and
+    Hermes's Windows installer does not export HERMES_HOME. Looking only in
+    ~/.hermes, `integrate hermes` put the provider plugin where Hermes on
+    Windows never reads it, and the panel could neither see Hermes nor tell
+    that it was connected."""
+    explicit = os.environ.get("HERMES_HOME", "").strip()
+    if explicit:
+        return Path(os.path.expanduser(os.path.expandvars(explicit)))
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(local) if local
+                else Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
+
+
 def _hermes_plugin_manifest() -> Path:
-    return (Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-            / "plugins" / "compartment" / "plugin.yaml")
+    return hermes_home() / "plugins" / "compartment" / "plugin.yaml"
+
+
+def openclaw_dir() -> Path:
+    """OpenClaw's config directory, by OpenClaw's own rule
+    (src/infra/config-dir.ts, as agent_skill._openclaw_dir reads it):
+    OPENCLAW_STATE_DIR, else the folder of OPENCLAW_CONFIG_PATH, else
+    .openclaw under OPENCLAW_HOME or the home directory. OPENCLAW_HOME was
+    taken for the .openclaw folder itself, one level too high."""
+    from .agent_skill import _openclaw_dir
+    return _openclaw_dir() or Path.home() / ".openclaw"
 
 
 def _openclaw_config() -> Path:
-    return (Path(os.environ.get("OPENCLAW_HOME", Path.home() / ".openclaw"))
-            / "openclaw.json")
+    explicit = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return openclaw_dir() / "openclaw.json"
+
+
+def openclaw_servers(cfg) -> dict:
+    """The MCP servers an OpenClaw config declares: `mcp.servers`.
+
+    Current OpenClaw reads its servers there, and its root schema rejects
+    keys it does not know (src/config/zod-schema.ts), so the top-level
+    `mcpServers` that `integrate openclaw` used to write was never loaded
+    and could stop the whole config from loading. An entry left there is
+    therefore not a connection, and is not counted as one."""
+    mcp = cfg.get("mcp") if isinstance(cfg, dict) else None
+    servers = mcp.get("servers") if isinstance(mcp, dict) else None
+    return servers if isinstance(servers, dict) else {}
 
 
 def integration_paths() -> list[Path]:
@@ -1232,12 +1346,10 @@ def agent_present(target: str, path: str | None = None) -> bool:
                     or claude_desktop.present())
         if target == "hermes":
             return (bool(shutil.which("hermes", path=path))
-                    or Path(os.environ.get("HERMES_HOME",
-                                           Path.home() / ".hermes")).is_dir())
+                    or hermes_home().is_dir())
         if target == "openclaw":
             return (bool(shutil.which("openclaw", path=path))
-                    or Path(os.environ.get("OPENCLAW_HOME",
-                                           Path.home() / ".openclaw")).is_dir())
+                    or openclaw_dir().is_dir())
     except Exception:                                   # noqa: BLE001
         return False
     return False
@@ -1990,8 +2102,13 @@ def run(vault: str | None = None, show: bool = False,
         from Foundation import (NSBundle, NSDistributedNotificationCenter,
                                 NSObject)
     except ImportError:
-        print("error: the menu bar app needs PyObjC.\n"
-              "  pip install 'compartment[menubar]'", file=sys.stderr)
+        # Into this interpreter, by name. The [menubar] extra this used to
+        # name has been empty since PyObjC became a base dependency, so
+        # installing it changed nothing.
+        print("error: the menu bar app needs PyObjC, which this Python does "
+              "not have.\n"
+              f'  "{sys.executable}" -m pip install pyobjc-framework-Cocoa',
+              file=sys.stderr)
         return 1
 
     vault_path = vault or default_vault()

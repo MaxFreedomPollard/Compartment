@@ -97,6 +97,51 @@ def test_local_ipc_still_works(guarded, tmp_path, monkeypatch):
         server.close()
 
 
+#: Families with a far end on another machine, by the name each platform
+#: knows them by. Each one runs where its platform has it.
+_FAR_FAMILIES = ["AF_PACKET", "AF_BLUETOOTH", "AF_VSOCK", "AF_HYPERV",
+                 "AF_CAN", "AF_TIPC", "AF_RDS", "AF_QIPCRTR", "AF_APPLETALK",
+                 "AF_IPX", "AF_DECnet", "AF_SNA", "AF_IRDA", "AF_X25",
+                 "AF_AX25", "AF_UNSPEC"]
+
+
+@pytest.mark.parametrize("name", _FAR_FAMILIES)
+def test_a_socket_that_can_reach_another_machine_is_refused_whatever_its_family(
+        guarded, name):
+    """Only AF_INET and AF_INET6 were refused, and "every other local family"
+    let through - but AF_PACKET writes raw frames, AF_BLUETOOTH reaches a
+    paired device with no privilege at all, and AF_VSOCK/AF_HYPERV reach the
+    host of a VM (WSL2's included). The refusal comes before the operating
+    system is asked, so where it would refuse the family anyway the answer
+    must still be the guard's."""
+    family = getattr(socket, name, None)
+    if family is None:
+        pytest.skip(f"{name} does not exist here")
+    for make in (socket.socket, _socket.socket):
+        with pytest.raises(offline_guard.OfflineViolation):
+            make(family, socket.SOCK_DGRAM).close()
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="no AF_UNIX here")
+def test_a_socketpair_and_the_kernel_interfaces_are_still_local(guarded):
+    """What stays open: the AF_UNIX pair asyncio builds its self-pipe from on
+    POSIX, and the kernel's own sockets, which have no far end."""
+    a, b = socket.socketpair()
+    with a, b:
+        a.sendall(b"x")
+        assert b.recv(1) == b"x"
+    for name in ("AF_NETLINK", "AF_ROUTE", "AF_SYSTEM"):
+        family = getattr(socket, name, None)
+        if family is None:
+            continue
+        try:
+            socket.socket(family, socket.SOCK_RAW).close()
+        except offline_guard.OfflineViolation:
+            raise
+        except OSError:
+            pass          # the platform's own answer, not the guard's
+
+
 def test_literal_and_localhost_lookups_still_resolve(guarded):
     """Resolving something already local asks no one anything, so it stays
     allowed: blocking it would break loopback code paths for no gain."""

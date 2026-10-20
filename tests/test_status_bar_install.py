@@ -187,6 +187,35 @@ def test_windows_autostart_avoids_a_console_window_and_keeps_the_vault():
     assert "python.exe" not in cmd.lower() or "pythonw.exe" in cmd.lower()
 
 
+def test_windows_autostart_prefers_pythonw_over_the_console_script(
+        tmp_path, monkeypatch):
+    """compartment.exe, the console script pip and uv write, is a console
+    program. Run at sign-in it opened a console window that stayed for the
+    whole session - that process is the tray app - and closing the window
+    quit the app. pythonw.exe beside the interpreter opens none."""
+    from compartment import systray
+    scripts = tmp_path / "venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    for name in ("python.exe", "pythonw.exe", "compartment.exe"):
+        (scripts / name).write_bytes(b"MZ")
+    monkeypatch.setattr(systray.sys, "executable", str(scripts / "python.exe"))
+    monkeypatch.setattr(systray.shutil, "which",
+                        lambda name, *a, **k: str(scripts / "compartment.exe"))
+    exe, args = systray._autostart_parts("C:/Users/Zoë Ann/v.vault")
+    assert exe == str(scripts / "pythonw.exe")
+    assert args == '-m compartment.cli --vault "C:/Users/Zoë Ann/v.vault" tray'
+    assert systray._autostart_command("C:/v.vault").startswith(
+        f'"{scripts / "pythonw.exe"}" -m compartment.cli')
+    # The scheduled task runs the same thing.
+    xml = systray.scheduled_task_xml("C:/v.vault")
+    assert f"<Command>{scripts / 'pythonw.exe'}</Command>" in xml
+    # With no pythonw.exe (an embeddable or unusual build) the console
+    # script is still better than nothing.
+    (scripts / "pythonw.exe").unlink()
+    assert systray._autostart_parts("C:/v.vault")[0] == \
+        str(scripts / "compartment.exe")
+
+
 # --- opting out of the GUI at install time ---------------------------------
 
 def test_a_scripted_install_never_waits_for_a_keypress(monkeypatch, capsys):

@@ -23,6 +23,7 @@ body:
         - pip / pipx / uv (PyPI)
         - Compartment.pkg (macOS one-click)
         - Compartment.dmg
+        - A plugin or extension store (Claude Code, Gemini CLI, Hermes, Claude Desktop bundle...)
         - Docker
         - From source
     validations:
@@ -30,8 +31,9 @@ body:
   - type: input
     id: platform
     attributes:
-      label: OS and Python
-      placeholder: "macOS 26.2 / Python 3.12.4"
+      label: OS, CPU and Python
+      description: Include the architecture (Apple silicon / Intel / ARM64 / x86_64), and say so if it runs under WSL, in a container, or from an agent's sandboxed shell.
+      placeholder: "macOS 26.2, Apple silicon / Python 3.12.4"
     validations:
       required: true
   - type: dropdown
@@ -47,6 +49,12 @@ body:
         - Cline / Roo Code
         - Codex CLI
         - Gemini CLI
+        - VS Code / GitHub Copilot
+        - Windsurf
+        - Zed
+        - OpenCode
+        - Goose
+        - LM Studio
         - Other MCP client
         - CLI only
         - The menu bar / tray app

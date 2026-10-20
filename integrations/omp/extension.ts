@@ -126,11 +126,19 @@ export default function compartmentOmp(pi: ExtensionAPI) {
   });
 
   // --- Explicit tools (model-driven, MCP-independent) ---------------------
+  // omp treats a tool without an `approval` tier as "exec" (running code)
+  // and an extension tool without a `loadMode` as "discoverable", hidden
+  // behind tool search. Recall is a read and a store is a write, so approval
+  // modes that pass reads stop asking before every search; and a tool the
+  // model must call BEFORE answering cannot sit where it has to be found
+  // first, so both stay top-level.
   const z = pi.zod;
 
   pi.registerTool({
     name: "memory_search",
     label: "Memory Search",
+    approval: "read",
+    loadMode: "essential",
     description:
       "Recall from the user's persistent encrypted memory vault BEFORE answering "
       + "anything that may depend on past work, decisions, preferences, or project "
@@ -148,6 +156,8 @@ export default function compartmentOmp(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_store",
     label: "Memory Store",
+    approval: "write",
+    loadMode: "essential",
     description:
       "Store one claim into the encrypted memory vault, one per call, dated "
       + "automatically. "

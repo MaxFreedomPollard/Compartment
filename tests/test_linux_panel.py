@@ -242,3 +242,57 @@ def test_it_never_signals_itself(monkeypatch, tmp_path):
                         lambda pid, sig: killed.append(pid))
     systray.quit_running(vault)
     assert killed == [], "an uninstall that kills its own process finishes nothing"
+
+
+# ------------------------------------------------------- app sandboxes
+
+@pytest.mark.parametrize("var,value,word", [
+    ("FLATPAK_ID", "com.visualstudio.code", "Flatpak"),
+    ("SNAP_NAME", "code", "Snap"),
+])
+def test_start_at_login_from_inside_an_app_sandbox_says_it_cannot(
+        as_linux, monkeypatch, var, value, word):
+    """Inside a Flatpak the XDG directories are the app's own, and inside a
+    Snap so is HOME: the entries landed where no desktop reads them, naming
+    a Python the desktop cannot run, and start at login reported "on"."""
+    monkeypatch.setattr(systray, "_is_linux", lambda: True)
+    monkeypatch.setattr(systray, "_FLATPAK_INFO", str(as_linux / "none"))
+    monkeypatch.setenv(var, value)
+    if var == "SNAP_NAME":                    # strict confinement moves HOME
+        monkeypatch.setenv("SNAP_USER_DATA", str(as_linux / "snap" / "1"))
+        monkeypatch.setenv("HOME", str(as_linux / "snap" / "1"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(as_linux / "cfg"))
+    out = systray.set_login(True, "/home/x/memory.vault")
+    assert out.startswith("error") and word in out and value in out
+    assert "outside it" in out
+    assert not systray.autostart_entry_path().exists()
+    assert not systray.desktop_entry_path().exists()
+
+
+def test_outside_a_sandbox_nothing_changes(as_linux, monkeypatch):
+    monkeypatch.setattr(systray, "_is_linux", lambda: True)
+    monkeypatch.setattr(systray, "_app_sandbox", lambda: None)
+    monkeypatch.setattr(systray, "systemd_available", lambda: False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(as_linux / "cfg"))
+    assert systray.set_login(True, "/home/x/memory.vault") == "on"
+
+
+def test_a_flatpak_is_recognised_by_its_info_file(as_linux, monkeypatch):
+    for var in ("FLATPAK_ID", "SNAP_NAME"):
+        monkeypatch.delenv(var, raising=False)
+    info = as_linux / ".flatpak-info"
+    monkeypatch.setattr(systray, "_FLATPAK_INFO", str(info))
+    assert systray._app_sandbox() is None
+    info.write_text("[Application]\nname=org.example.Editor\n")
+    assert "Flatpak" in systray._app_sandbox()
+
+
+def test_a_classic_snap_terminal_is_not_a_sandbox(as_linux, monkeypatch):
+    """VS Code's snap is classic: it sets SNAP_NAME in every terminal it
+    opens and confines nothing, so start at login works from there."""
+    monkeypatch.delenv("FLATPAK_ID", raising=False)
+    monkeypatch.setattr(systray, "_FLATPAK_INFO", str(as_linux / "none"))
+    monkeypatch.setenv("SNAP_NAME", "code")
+    monkeypatch.setenv("SNAP_USER_DATA", str(as_linux / "snap" / "code" / "1"))
+    monkeypatch.setenv("HOME", str(as_linux / "home"))
+    assert systray._app_sandbox() is None

@@ -202,6 +202,9 @@ def test_without_the_path_fix_it_would_have_written_a_bare_name(monkeypatch,
 @pytest.fixture()
 def fake_home(tmp_path, monkeypatch):
     monkeypatch.setattr(menubar.Path, "home", classmethod(lambda cls: tmp_path))
+    # Hermes on native Windows lives under %LOCALAPPDATA%, which must not be
+    # the runner's real one.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
     monkeypatch.setattr(menubar, "integration_status",
@@ -226,7 +229,7 @@ def test_hermes_counts_as_connected_once_the_plugin_is_there(fake_home,
                                                              monkeypatch):
     from compartment import claude_hooks
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
-    plug = fake_home / ".hermes" / "plugins" / "compartment"
+    plug = menubar.hermes_home() / "plugins" / "compartment"   # per platform
     plug.mkdir(parents=True)
     (plug / "plugin.yaml").write_text("name: compartment\n")
     st = menubar.integration_status("/v")
@@ -240,8 +243,12 @@ def test_openclaw_counts_as_connected_once_it_is_in_the_config(fake_home,
     d = fake_home / ".openclaw"
     d.mkdir()
     (d / "openclaw.json").write_text(
-        json.dumps({"mcpServers": {"compartment": {}}}))
+        json.dumps({"mcp": {"servers": {"compartment": {}}}}))
     assert menubar.integration_status("/v")["openclaw"] is True
+    # Where earlier releases wrote it: a key current OpenClaw never loads.
+    (d / "openclaw.json").write_text(
+        json.dumps({"mcpServers": {"compartment": {}}}))
+    assert menubar.integration_status("/v")["openclaw"] is False
 
 
 def test_a_broken_config_file_is_not_a_crash(fake_home, monkeypatch):

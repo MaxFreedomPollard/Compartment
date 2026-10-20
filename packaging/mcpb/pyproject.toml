@@ -1,0 +1,31 @@
+# The environment Claude Desktop builds for the Compartment extension.
+#
+# The bundle is an MCP Bundle of server type "uv" (manifest_version 0.4):
+# it ships no Python packages of its own. Claude Desktop reads this file and
+# has uv install the pinned release from PyPI, with the right interpreter and
+# the right compiled wheels for the machine, once, when the extension is
+# installed. That is the same network use as `pip install compartment`, and
+# the only one: the server it then starts makes no connection at all.
+#
+# Not a package. It has a different name from its one dependency because a
+# project may not depend on itself, and uv is told not to build it.
+#
+# The pin moves with every release (tests/test_version_lockstep.py), so the
+# bundle attached to a release installs exactly that release.
+
+[project]
+name = "compartment-claude-desktop"
+version = "4.13.0"
+description = "Compartment as a Claude Desktop extension (MCP Bundle)"
+# uv runs the newest interpreter it can find or download unless told
+# otherwise, and the compiled dependencies trail new Python releases:
+# onnxruntime 1.31 has wheels for 3.11 to 3.14 and none for 3.15, so an
+# unpinned bundle installed after 3.15 shipped would fail to build its
+# environment. .python-version picks 3.12 (what CI runs); the upper bound
+# here makes a host that overrides it fail with a clear message instead of
+# a missing-wheel error. Raise both when onnxruntime ships wheels for more.
+requires-python = ">=3.11,<3.15"
+dependencies = ["compartment==4.13.0"]
+
+[tool.uv]
+package = false

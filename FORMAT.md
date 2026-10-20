@@ -99,7 +99,10 @@ u32 section_count, then per section:
 Each entry: `AEAD_seal(master_key, canonical_json(entry),
 aad="compartment-journal:"+vault_id+":"+u64_be(seq))` where `seq` starts at 0
 after each compaction and increments per entry. Entries are fsync'd on
-append (acknowledged). Ops:
+append (acknowledged; F_FULLFSYNC on Apple platforms, where fsync stops at
+the drive's volatile cache). An append the disk refuses part way (ENOSPC, EDQUOT,
+a failed sync) is truncated back to where it began, so an unacknowledged
+write leaves no bytes behind. Ops:
 
 ```json
 {"op":"store","audit":AuditRow,"record":{"id","ns","text","vec":base64_f32,
@@ -146,7 +149,8 @@ requires the chain to extend the anchor. The anchor is mandatory: its absence
 is reported as tampering, not as an older vault.
 
 Compaction (`save`/`lock`): serialize → seal → write `path.tmp` → fsync →
-atomic rename; journal restarts empty.
+atomic rename → fsync of the containing folder (POSIX), so the rename itself
+survives power loss; journal restarts empty.
 
 ### Manifest (signed vaults)
 

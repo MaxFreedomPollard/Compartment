@@ -7,7 +7,8 @@ these functions and never imports fcntl / msvcrt / sysctl directly.
 """
 from __future__ import annotations
 
-from .home import env, home
+from .home import env, home, session_dir
+import errno
 import json
 import os
 import platform
@@ -27,30 +28,52 @@ _SUBPROCESS_TIMEOUT = 5.0
 # Advisory exclusive file lock (context manager over an open file handle)
 # ---------------------------------------------------------------------------
 
+# Only these errors mean "someone else holds it". Anything else means the
+# filesystem cannot lock at all - NFS whose lock service is not running or
+# that is mounted `nolock`/`nolocks` (ENOLCK, ENOTSUP), some FUSE and SMB
+# mounts (EOPNOTSUPP, EINVAL) - and no amount of waiting changes that.
+# Treating those as busy made every write on such a vault wait out the
+# timeout and then blame "another process", which sent people hunting for a
+# process that did not exist.
 if IS_WINDOWS:
     import msvcrt
 
+    _BUSY = frozenset({errno.EACCES, getattr(errno, "EDEADLOCK", 36)})
+
+    # msvcrt.locking locks bytes from the handle's CURRENT position, and the
+    # lock file is opened "a+", whose position is end of file. Two processes
+    # agree on which byte that is only while the file stays empty; anything
+    # that ever wrote to it (a tool, an older version, a user) would put
+    # them on different bytes and both would "hold" the lock. Byte 0 always.
     def _lock_nb(fh) -> bool:
         try:
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             return True
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno in _BUSY:
+                return False
+            raise
 
     def _unlock(fh) -> None:
         try:
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
 else:
     import fcntl
 
+    _BUSY = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+
     def _lock_nb(fh) -> bool:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno in _BUSY:
+                return False
+            raise
 
     def _unlock(fh) -> None:
         try:
@@ -70,15 +93,30 @@ class FileLock:
     def __enter__(self):
         self._fh = open(self.path, "a+")
         deadline = time.time() + self.timeout
-        while not _lock_nb(self._fh):
+        while True:
+            try:
+                if _lock_nb(self._fh):
+                    return self
+            except OSError as exc:
+                self._fh.close()
+                self._fh = None
+                from .crypto import CryptoError
+                raise CryptoError(
+                    f"Cannot lock {self.path}: the filesystem it is on does "
+                    f"not support file locks ({exc.strerror or exc}). That is "
+                    f"usually a network share - NFS without its lock service "
+                    f"or mounted nolock, or an SMB mount without byte-range "
+                    f"locks. Keep the vault on a local disk (--vault or "
+                    f"COMPARTMENT_VAULT), or enable locking on the "
+                    f"mount.") from exc
             if time.time() > deadline:
                 self._fh.close()
+                self._fh = None
                 from .crypto import CryptoError
                 raise CryptoError(
                     f"Vault is busy: another process holds the write lock "
                     f"(waited {self.timeout:.0f}s)")
             time.sleep(0.05)
-        return self
 
     def __exit__(self, *exc):
         if self._fh is not None:
@@ -133,18 +171,10 @@ def _posix_boot_estimate() -> tuple[float, float] | None:
     `kern.boottime` reading, so a step moves both ends equally and cancels.
     """
     system = platform.system()
-    if system == "Darwin":
-        try:
-            out = subprocess.run(["sysctl", "-n", "kern.boottime"],
-                                 capture_output=True, text=True, check=True,
-                                 timeout=_SUBPROCESS_TIMEOUT).stdout
-            import re
-            m = re.search(r"sec = (\d+)", out)
-            if m:
-                sec = float(m.group(1))
-                return sec, time.time() - sec
-        except (OSError, subprocess.SubprocessError, ValueError):
-            pass
+    if system == "Darwin" or system.endswith("BSD") or system == "DragonFly":
+        est = _sysctl_boot_estimate()
+        if est is not None:
+            return est
     elif system == "Linux":
         try:
             btime = None
@@ -159,13 +189,96 @@ def _posix_boot_estimate() -> tuple[float, float] | None:
                 return btime, up
         except (OSError, ValueError):
             pass
+    # The kernel's own boot record could not be read. That is the normal
+    # state inside an agent's sandbox - Claude Code and Codex run shell
+    # commands under macOS Seatbelt, which refuses kern.boottime - and on
+    # Android, where SELinux hides /proc/stat from apps such as Termux. A
+    # clock that counts from boot answers the same question in-process.
+    return _clock_boot_estimate()
+
+
+def _sysctl_boot_estimate() -> tuple[float, float] | None:
+    """kern.boottime on macOS and the BSDs: in-process first, so a vault open
+    does not fork, then through the sysctl binary for a libc without
+    sysctlbyname (OpenBSD)."""
+    import struct
+    try:
+        import ctypes
+        # The process's own symbols, which include libc's. Not
+        # ctypes.util.find_library("c"): on FreeBSD, OpenBSD and DragonFly
+        # that runs /sbin/ldconfig -r, and on NetBSD it runs the C compiler,
+        # in a subprocess, on every call - a fork on every vault open, which
+        # is the thing reading this in-process was meant to avoid.
+        libc = ctypes.CDLL(None, use_errno=True)
+        buf = ctypes.create_string_buffer(32)
+        size = ctypes.c_size_t(len(buf))
+        if libc.sysctlbyname(b"kern.boottime", buf, ctypes.byref(size), None, 0) == 0:
+            # struct timeval: a 64-bit time_t on every 64-bit system, and a
+            # 32-bit one where the whole struct is 8 bytes.
+            fmt = "=q" if size.value >= 16 else "=i"
+            sec = float(struct.unpack_from(fmt, buf.raw)[0])
+            if sec > 0:
+                return sec, time.time() - sec
+    except (ImportError, OSError, AttributeError, ValueError, TypeError,
+            struct.error):
+        pass
+    if platform.system() == "Darwin":
+        # macOS always has sysctlbyname, and the binary makes the same call:
+        # where the call above was refused - Seatbelt, under Claude Code and
+        # Codex - the binary is refused too. Forking it anyway cost every
+        # vault open in an agent's shell a process and a sandbox-violation
+        # report, for an answer that could not come.
+        return None
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                             capture_output=True, text=True, check=True,
+                             timeout=_SUBPROCESS_TIMEOUT).stdout
+        import re
+        # FreeBSD: "{ sec = 1700000000, usec = 0 } Tue Nov 14 ...".
+        # OpenBSD, the one that needs this path, prints only the seconds
+        # under -n (sbin/sysctl/sysctl.c), which the first pattern missed.
+        m = (re.search(r"sec = (\d+)", out)
+             or re.fullmatch(r"\s*(\d+)\s*", out))
+        if m:
+            sec = float(m.group(1))
+            return sec, time.time() - sec
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return None
+
+
+def _clock_boot_estimate() -> tuple[float, float] | None:
+    """(boot instant, uptime) from a clock that starts at boot, or None.
+
+    Only clocks that keep counting through sleep qualify, or every resume
+    would read as a reboot: CLOCK_BOOTTIME on Linux, Android and OpenBSD, and
+    CLOCK_MONOTONIC on macOS. There libc computes CLOCK_MONOTONIC as the wall
+    clock minus the kernel's boot time, read from the commpage, which no
+    sandbox gates; so wall clock minus it IS kern.boottime, to the
+    microsecond (checked under Seatbelt: constant across calls, and 8.6 s
+    away from mach_continuous_time, CLOCK_MONOTONIC_RAW, on a machine up
+    for two days). The result feeds _pinned_boot_token like any other
+    estimate, so the first value seen this boot is the one every process
+    agrees on."""
+    names = ("CLOCK_MONOTONIC",) if platform.system() == "Darwin" else (
+        "CLOCK_BOOTTIME",)
+    for name in names:
+        clock = getattr(time, name, None)
+        if clock is None:
+            continue
+        try:
+            up = time.clock_gettime(clock)
+        except OSError:
+            continue
+        if up > 0:
+            return time.time() - up, up
     return None
 
 
 def _posix_marker() -> Path:
     """The POSIX pin. Windows keeps its own `.winboot` - renaming a marker
     that live installs already rely on would re-key their credentials."""
-    base = Path(env("SESSION_DIR", home() / "session"))
+    base = session_dir()
     return base / ".boottime"
 
 
@@ -177,8 +290,8 @@ def _pinned_boot_token(computed: float, uptime_s: float, marker: Path) -> str:
     mid-session in three ways this avoids:
       1. sub-second int() truncation flapping between two processes;
       2. wall-clock steps and NTP slew moving the derived boot instant;
-      3. a jump of the whole sleep duration where the uptime source
-         excludes sleep (Windows GetTickCount64).
+      3. a jump of the whole sleep duration, where an uptime source
+         excludes sleep (none of those used here does).
     A real reboot resets uptime and moves the boot instant far beyond the
     tolerance below, so it is detected and the token changes, as intended."""
     try:
@@ -203,7 +316,7 @@ def _pinned_boot_token(computed: float, uptime_s: float, marker: Path) -> str:
 
 
 def _win_marker() -> Path:
-    base = Path(env("SESSION_DIR", home() / "session"))
+    base = session_dir()
     return base / ".winboot"
 
 
@@ -219,13 +332,27 @@ def _windows_boot_token() -> str:
     credential and relocks the vault mid-session in three ways this avoids:
       1. sub-second int() truncation flapping between two processes;
       2. wall-clock drift after NTP slew accumulating past a second boundary;
-      3. a jump of the whole sleep duration after every sleep/resume
-         (GetTickCount64 excludes sleep; time.time() does not).
+      3. a jump of the whole sleep duration after every sleep/resume, were
+         the uptime source to skip sleep. GetTickCount64 does not (it
+         includes time suspended; PEP 418), and the tolerance relies on
+         that: QueryUnbiasedInterruptTime, which skips sleep, would read
+         every sleep longer than five minutes as a reboot.
     A real reboot resets uptime and moves the boot instant far beyond the
-    tolerance below, so it is detected and the token changes, as intended."""
+    tolerance below, so it is detected and the token changes, as intended.
+
+    GetTickCount64 returns a 64-bit count, and ctypes assumes a C int for
+    any function it is not told about. Called bare, the count was cut to 32
+    signed bits: past 2**31 ms of uptime - 24.9 days, which a Windows
+    machine that only ever sleeps, or shuts down with Fast Startup, reaches
+    easily - it went negative, the derived boot instant jumped 49.7 days,
+    the pin read that as a reboot, and the session credential was deleted;
+    then again every 49.7 days."""
     import ctypes
-    uptime_s = ctypes.windll.kernel32.GetTickCount64() / 1000.0  # excludes sleep
-    computed = time.time() - uptime_s                            # ~boot instant
+    get_tick_count = ctypes.windll.kernel32.GetTickCount64
+    get_tick_count.restype = ctypes.c_uint64
+    get_tick_count.argtypes = []
+    uptime_s = get_tick_count() / 1000.0                  # counts through sleep
+    computed = time.time() - uptime_s                     # ~boot instant
     return _pinned_boot_token(computed, uptime_s, _win_marker())
 
 
@@ -262,7 +389,7 @@ _LINUX_MACHINE_ID_PATHS = ("/etc/machine-id", "/var/lib/dbus/machine-id")
 
 
 def _machine_marker() -> Path:
-    base = Path(env("SESSION_DIR", home() / "session"))
+    base = session_dir()
     return base / ".machineid"
 
 

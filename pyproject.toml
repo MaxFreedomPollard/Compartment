@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compartment"
-version = "4.12.0"
+version = "4.13.0"
 description = "Compartment - high-security, fully offline, encrypted vector memory for AI agents (MCP)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -26,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security :: Cryptography",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Database :: Database Engines/Servers",
@@ -41,8 +42,16 @@ dependencies = [
     # Both majors. mcp 2.0 (2026-07-28) removed mcp.server.fastmcp in favour
     # of mcp.server.mcpserver; server.py imports whichever is present, so the
     # same wheel runs on 1.x and 2.x and single-version distros are not
-    # stranded on either side of the rename.
-    "mcp>=1.0,<3",
+    # stranded on either side of the rename. The floor is 1.21.2, not 1.0:
+    # nothing before 1.10 can register the tools at all (FastMCP arrived in
+    # 1.2, tool titles in 1.10), and 1.10 through 1.21.1 break against the
+    # pydantic 2.12+ that pip installs beside them - an import error inside
+    # mcp, or a TypeError on this module's postponed annotations - so an
+    # older mcp already in the environment meant a server that never
+    # started while pip called the install satisfied. With this floor pip
+    # upgrades it instead. CI's lowest-dependencies job runs the suite at
+    # exactly these floors.
+    "mcp>=1.21.2,<3",
     # The app ships with every install. It is not an add-on: unlocking,
     # locking and changing the passphrase are things people do through a
     # panel, not through a terminal, so an install that only lays down a CLI
@@ -53,6 +62,21 @@ dependencies = [
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "pystray>=0.19; sys_platform == 'win32'",
     "pillow>=10; sys_platform == 'win32'",
+    # Two platforms the newest releases of two indirect dependencies left
+    # without wheels. pip takes the newest version whether or not it has a
+    # wheel for the machine, and then tries to compile it: cryptography (via
+    # mcp -> pyjwt[crypto]) needs a Rust toolchain, so `pip install
+    # compartment` simply failed on a Snapdragon Windows laptop and on an
+    # Intel Mac, and the release build of the Intel app failed with it.
+    # These caps hold each one at its last release with a wheel there, on
+    # that platform only; everywhere else nothing changes. Compartment
+    # itself never imports cryptography - mcp needs it only for its HTTP
+    # transports' auth, which a stdio server does not use. Lift a cap when
+    # the project ships those wheels again; CI's windows-11-arm and
+    # macos-15-intel jobs show it.
+    "cryptography<46.0.4; sys_platform == 'win32' and platform_machine == 'ARM64'",
+    "cryptography<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "argon2-cffi-bindings<26; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 # PyPI is the repo's declared homepage, so it is a real front door - and
@@ -87,7 +111,7 @@ hnsw = ["usearch>=2.9"]
 # failing on an unknown extra. They add nothing.
 menubar = []
 tray = []
-dev = ["pytest>=8", "pytest-cov>=5", "usearch>=2.9"]
+dev = ["pytest>=8", "pytest-cov>=5", "pytest-timeout>=2.3", "usearch>=2.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -874,6 +874,29 @@ def test_a_machine_with_no_user_manager_still_starts_at_login(as_linux,
     assert not systray.systemd_unit_path().exists()
 
 
+def test_a_desktop_that_never_starts_the_target_keeps_its_autostart_entry(
+        as_linux, monkeypatch):
+    """Xfce, MATE, Cinnamon and LXQt never activate graphical-session.target,
+    which the unit is WantedBy, so an enabled unit there never starts at
+    login - and the autostart entry, which they all read, was removed as
+    the redundant second starter. The panel came up at install time and
+    never again."""
+    monkeypatch.setattr(systray, "systemd_available", lambda: True)
+    base = _fake_systemctl()
+
+    def xfce(*argv):
+        if argv[:2] == ("is-active", "graphical-session.target"):
+            return 3, "inactive"
+        return base(*argv)
+
+    monkeypatch.setattr(systray, "_systemctl", xfce)
+    assert systray.set_login(True) == "on"
+    assert systray.autostart_entry_path().is_file()
+    assert not systray.systemd_unit_path().exists()
+    assert not any(c[0] == "enable" for c in base.calls), \
+        "nothing enabled that will never start"
+
+
 def test_a_unit_that_will_not_run_is_undone_rather_than_left_half_done(
         as_linux, monkeypatch):
     """Enabled but not active proves nothing. Rather than leave a unit that
@@ -1028,6 +1051,33 @@ def test_windows_stops_only_the_tray_app(monkeypatch, tmp_path):
     ran.clear()
     assert systray.quit_running(vault) is False
     assert not [c for c in ran if c[0] == "taskkill"]
+
+
+def test_windows_counts_only_the_tray_app_of_this_session(monkeypatch):
+    """Fast user switching: a second person signed in on the same PC runs a
+    tray app of their own, and from an elevated prompt its command line is
+    readable. `init` took it as this user's app coming up and started none;
+    an update counted it as the copy to wait for."""
+    _as_windows(monkeypatch)
+    exe = WINDOWS_EXE
+    mine = f'"{exe}" --vault "C:\\Users\\ana\\.compartment\\memory.vault" tray'
+    theirs = f'"{exe}" --vault "C:\\Users\\bo\\.compartment\\memory.vault" tray'
+    table = ('"ProcessId","ParentProcessId","CommandLine","SessionId"\r\n'
+             + f'"4100","900","{mine.replace(chr(34), chr(34) * 2)}","1"\r\n'
+             + f'"6100","950","{theirs.replace(chr(34), chr(34) * 2)}","2"\r\n')
+    asked = []
+
+    def fake_run(argv, *a, **k):
+        asked.append(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, table, "")
+    monkeypatch.setattr(systray.subprocess, "run", fake_run)
+    monkeypatch.setattr(systray, "_windows_session", lambda: "1",
+                        raising=False)
+    assert systray.running_pids() == [4100]
+    assert "SessionId" in asked[-1], "the session has to be asked for"
+    # Where the session cannot be told, nothing is left out.
+    monkeypatch.setattr(systray, "_windows_session", lambda: None)
+    assert systray.running_pids() == [4100, 6100]
 
 
 def test_the_task_restarts_a_panel_that_failed(monkeypatch):

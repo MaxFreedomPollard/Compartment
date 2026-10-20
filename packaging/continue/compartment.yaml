@@ -1,0 +1,23 @@
+# Compartment as a Continue block: the MCP server entry Continue's hub
+# (hub.continue.dev) publishes, and a file Continue reads as it is.
+#
+# Without the hub, copy this file into a workspace's .continue/mcpServers/
+# folder (or ~/.continue/mcpServers/ for every workspace) and Continue picks
+# it up; `compartment integrate continue` prints the same server for pasting
+# under `mcpServers:` in config.yaml instead. Either way the vault must exist
+# first: `pip install compartment && compartment init`.
+#
+# The caller is `continue`, the name `integrate continue` registers. The
+# version moves with the package (tests/test_version_lockstep.py), so the
+# hub shows the release the block was published from.
+name: Compartment
+version: 4.13.0
+schema: v1
+mcpServers:
+  - name: Compartment
+    type: stdio
+    command: compartment
+    args:
+      - --caller
+      - continue
+      - serve

@@ -3,18 +3,28 @@
   "name": "io.github.MaxFreedomPollard/compartment",
   "title": "Compartment",
   "description": "Durable agentic memory, encrypted at rest. Fully offline: no network, no API key, no cloud.",
+  "websiteUrl": "https://maxfreedompollard.github.io/Compartment/",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/MaxFreedomPollard/Compartment/main/docs/images/logo-400.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "400x400"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/MaxFreedomPollard/Compartment",
     "source": "github",
     "id": "1306651494"
   },
-  "version": "4.12.0",
+  "version": "4.13.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "compartment",
-      "version": "4.12.0",
+      "version": "4.13.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

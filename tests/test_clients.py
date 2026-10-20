@@ -189,10 +189,13 @@ def test_codex_gets_a_table_appended_and_keeps_the_rest(tmp_path):
 def test_codex_is_not_registered_twice(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[mcp_servers.compartment]\ncommand = "compartment"\n')
+    clients.register(clients.CLIENTS["codex"], VAULT, path=p)
     res = clients.register(clients.CLIENTS["codex"], VAULT, path=p)
 
     assert res["written"] is False
     assert p.read_text().count("[mcp_servers.compartment]") == 1
+    entry = tomllib.loads(p.read_text())["mcp_servers"]["compartment"]
+    assert entry["args"][:2] == ["--vault", VAULT]     # refreshed once
 
 
 def test_codex_unregister_takes_only_our_table(tmp_path):
@@ -435,7 +438,7 @@ def test_a_client_known_by_a_bare_filename_is_not_found_everywhere(
     assert clients.CLIENTS["librechat"].present() is True
     assert clients.CLIENTS["open-webui"].present() is False
     cli.main(["--vault", VAULT, "integrate", "librechat"])
-    assert '"mcpServers"' in capsys.readouterr().out
+    assert "mcpServers:" in capsys.readouterr().out
 
 
 def test_one_client_that_fails_does_not_stop_integrate_all(tmp_path,
@@ -610,10 +613,10 @@ def test_an_openclaw_write_cut_short_leaves_its_config_whole_with_a_backup(
     with every other server in it, cut short as well."""
     home = tmp_path / "openclaw-home"
     home.mkdir()
-    monkeypatch.setenv("OPENCLAW_HOME", str(home))
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(home))
     cfg = home / "openclaw.json"
-    cfg.write_text(json.dumps({"mcpServers": {f"server-{i}": OTHER
-                                              for i in range(100)}},
+    cfg.write_text(json.dumps({"mcp": {"servers": {f"server-{i}": OTHER
+                                                   for i in range(100)}}},
                               indent=2), encoding="utf-8")
     before = cfg.read_bytes()
     args = types.SimpleNamespace(target="openclaw", vault=VAULT)
@@ -626,7 +629,7 @@ def test_an_openclaw_write_cut_short_leaves_its_config_whole_with_a_backup(
     assert backup.read_bytes() == before
 
     cli._integrate_target(args)
-    servers = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
+    servers = json.loads(cfg.read_text(encoding="utf-8"))["mcp"]["servers"]
     assert "compartment" in servers and servers["server-99"] == OTHER
     assert backup.read_bytes() == before
 
@@ -639,7 +642,7 @@ def test_an_openclaw_config_that_is_json_but_not_an_object_is_refused(
     readers leave such a file alone and the user gets the block to paste."""
     home = tmp_path / "openclaw-home"
     home.mkdir()
-    monkeypatch.setenv("OPENCLAW_HOME", str(home))
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(home))
     cfg = home / "openclaw.json"
     cfg.write_text(raw, encoding="utf-8")
     cli._integrate_target(types.SimpleNamespace(target="openclaw",
@@ -705,8 +708,8 @@ def test_a_claude_md_or_openclaw_config_kept_in_dotfiles_stays_a_link(
         write = cli._write_managed_claude_md
     else:
         link = tmp_path / "openclaw-home" / name
-        monkeypatch.setenv("OPENCLAW_HOME", str(link.parent))
-        real.write_text(json.dumps({"mcpServers": {"theirs": OTHER}}),
+        monkeypatch.setenv("OPENCLAW_STATE_DIR", str(link.parent))
+        real.write_text(json.dumps({"mcp": {"servers": {"theirs": OTHER}}}),
                         encoding="utf-8")
         write = lambda: cli._integrate_target(  # noqa: E731
             types.SimpleNamespace(target="openclaw", vault=VAULT))
@@ -719,8 +722,8 @@ def test_a_claude_md_or_openclaw_config_kept_in_dotfiles_stays_a_link(
     text = real.read_text(encoding="utf-8")
     assert ("kept in my dotfiles" in text and cli._CLAUDE_MD_BEGIN in text
             if name == "CLAUDE.md"
-            else set(json.loads(text)["mcpServers"]) == {"theirs",
-                                                          "compartment"})
+            else set(json.loads(text)["mcp"]["servers"]) == {
+                "theirs", "compartment"})
     backup = link.with_name(link.name + clients.BACKUP_SUFFIX)
     assert backup.read_bytes() == before
     assert os.listdir(dot) == [name]            # nothing left beside it

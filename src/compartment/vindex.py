@@ -97,10 +97,20 @@ class UsearchIndex(VectorIndex):
     def build(cls, dim: int, ikeys: list[int], mat: np.ndarray,
               precision: str = "f32") -> "UsearchIndex":
         idx = cls(dim, precision)
-        if len(ikeys):
-            idx._index.add(np.array(ikeys, dtype=np.uint64),
-                           np.ascontiguousarray(mat, dtype=np.float32))
+        idx.add_all(ikeys, mat)
         return idx
+
+    def add_all(self, ikeys: list[int], mat: np.ndarray) -> None:
+        if len(ikeys):
+            self._index.add(np.array(ikeys, dtype=np.uint64),
+                            np.ascontiguousarray(mat, dtype=np.float32))
+
+    @property
+    def serial(self) -> bool:
+        """True when usearch found no SIMD kernels it can use on this CPU
+        and computes every distance one element at a time. An older usearch
+        that does not say is taken to have them, as it always was."""
+        return getattr(self._index, "hardware_acceleration", None) == "serial"
 
     def add(self, ikey: int, vec: np.ndarray) -> None:
         self._index.add(np.uint64(ikey), vec.astype(np.float32))
@@ -117,6 +127,35 @@ class UsearchIndex(VectorIndex):
 
 
 _HNSW_WARNED = False
+_PRECISION_WARNED: set[str] = set()
+
+#: What `index_precision` may name: the float widths and int8, each under the
+#: spellings usearch itself accepts. The setting lives in a JSON file people
+#: edit by hand, and usearch raised KeyError for anything else ("int-8", 8,
+#: "INT8 " with a space): above BRUTE_FORCE_LIMIT records the index is built
+#: on every open, so one typo meant the vault could not be opened at all.
+#: Its bit and unsigned kinds ("b1", "u8") are refused too: under the cosine
+#: metric they do not approximate the vectors, they discard them.
+PRECISIONS = {
+    "f32": "f32", "float32": "f32", "f16": "f16", "float16": "f16",
+    "bf16": "bf16", "bfloat16": "bf16", "f64": "f64", "float64": "f64",
+    "i8": "i8", "int8": "i8",
+}
+
+
+def _precision(value) -> str:
+    """The usearch dtype `value` names, or f32 with a notice once."""
+    name = PRECISIONS.get(str(value).strip().lower())
+    if name is not None:
+        return name
+    if repr(value) not in _PRECISION_WARNED:
+        import sys
+        print(f"notice: index_precision {value!r} is not one of "
+              f"{', '.join(sorted(set(PRECISIONS.values())))}; using f32. "
+              "Set it with `compartment reindex --int8` or `--f32`.",
+              file=sys.stderr)
+        _PRECISION_WARNED.add(repr(value))
+    return "f32"
 
 
 def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
@@ -130,7 +169,23 @@ def build_index(dim: int, ikeys: list[int], mat: np.ndarray,
     if force == "brute" or (force is None and len(ikeys) < BRUTE_FORCE_LIMIT):
         return BruteForceIndex.build(dim, ikeys, mat)
     try:
-        return UsearchIndex.build(dim, ikeys, mat, precision=precision)
+        idx = UsearchIndex(dim, _precision(precision))
+        # The HNSW graph is built from scratch on every open, and without
+        # SIMD usearch builds it at a few hundred vectors a second: measured
+        # 50 s for 25,000 vectors and over five minutes for 100,000, per
+        # open, where the exact index answers a search over 100,000 in about
+        # 9 ms and costs nothing to build. That is not a rare machine: SIMD
+        # dispatch asks the kernel what the CPU supports, and inside macOS
+        # Seatbelt - where Claude Code and Codex run an agent's commands -
+        # that query is refused, so usearch reports "serial" on every Apple
+        # Silicon Mac; likewise on CPUs it has no kernels for. A vault past
+        # the limit there took minutes to open in every CLI call and every
+        # MCP server reopen, long past the clients' tool-call timeouts.
+        # Chosen automatically only; an explicit force is honoured.
+        if force is None and idx.serial:
+            return BruteForceIndex.build(dim, ikeys, mat)
+        idx.add_all(ikeys, mat)
+        return idx
     except ImportError:
         global _HNSW_WARNED
         if not _HNSW_WARNED:

@@ -418,9 +418,18 @@ def start(ref: _VaultRef, host: str = "127.0.0.1",
     return httpd, url
 
 
+def _open_browser(url: str) -> None:
+    """Open the page, or say how to reach it when nothing here can."""
+    from .menubar import open_in_browser
+    if not open_in_browser(url):
+        port = urllib.parse.urlsplit(url).port
+        print("  no browser to open here: open the address above in one. "
+              "From another machine, forward the port first: "
+              f"ssh -L {port}:127.0.0.1:{port} <this host>", flush=True)
+
+
 def run(path: str, vault: Vault) -> None:
     """CLI entry: serve until Ctrl-C. Zero flags, zero configuration."""
-    import webbrowser
     ref = _VaultRef(path, vault)
     httpd, url = start(ref)
     # Flushed, and before the browser: the panel learns where the page is
@@ -430,10 +439,11 @@ def run(path: str, vault: Vault) -> None:
     print("  serving from RAM, 127.0.0.1 only, GET only - viewing the vault "
           "changes nothing in it", flush=True)
     print("  Ctrl-C to stop", flush=True)
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    # Beside the server, not before it. A browser that runs in the
+    # foreground - a text browser in this terminal - was waited for here,
+    # while the page it was asking for could not be served until it exited.
+    threading.Thread(target=_open_browser, args=(url,), daemon=True,
+                     name="compartment-dash-browser").start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -580,9 +580,13 @@ def test_the_dashboard_button_starts_dash_once_and_reuses_it(monkeypatch,
               "time.sleep(30)\n")
     monkeypatch.setattr(menubar, "_cli_argv",
                         lambda: [sys.executable, "-c", script])
-    opened = []
-    monkeypatch.setattr(menubar.webbrowser, "open",
-                        lambda u: opened.append(u) or True)
+    # Recorded at open_in_browser, not webbrowser.open: whether a browser
+    # exists is that function's business (none on a headless Linux runner),
+    # and the reuse path calls it on a thread, so wait for the call.
+    import threading
+    opened, called = [], threading.Event()
+    monkeypatch.setattr(menubar, "open_in_browser",
+                        lambda u: (opened.append(u), called.set(), True)[-1])
     menubar._DASH.update(proc=None, url=None)
     vault = str(tmp_path / "x.vault")
     url = menubar.open_dashboard(vault)
@@ -591,6 +595,7 @@ def test_the_dashboard_button_starts_dash_once_and_reuses_it(monkeypatch,
     assert proc is not None and proc.poll() is None
     assert opened == []                      # dash opened the browser itself
     assert menubar.open_dashboard(vault) == url
+    assert called.wait(5)
     assert menubar._DASH["proc"] is proc and opened == [url]
     menubar.stop_dashboard()
     assert proc.poll() is not None and menubar._DASH["proc"] is None
