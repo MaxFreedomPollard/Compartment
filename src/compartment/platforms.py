@@ -7,7 +7,7 @@ these functions and never imports fcntl / msvcrt / sysctl directly.
 """
 from __future__ import annotations
 
-from .home import env, home
+from .home import env, home, session_dir
 import errno
 import json
 import os
@@ -278,7 +278,7 @@ def _clock_boot_estimate() -> tuple[float, float] | None:
 def _posix_marker() -> Path:
     """The POSIX pin. Windows keeps its own `.winboot` - renaming a marker
     that live installs already rely on would re-key their credentials."""
-    base = Path(env("SESSION_DIR", home() / "session"))
+    base = session_dir()
     return base / ".boottime"
 
 
@@ -316,7 +316,7 @@ def _pinned_boot_token(computed: float, uptime_s: float, marker: Path) -> str:
 
 
 def _win_marker() -> Path:
-    base = Path(env("SESSION_DIR", home() / "session"))
+    base = session_dir()
     return base / ".winboot"
 
 
@@ -389,7 +389,7 @@ _LINUX_MACHINE_ID_PATHS = ("/etc/machine-id", "/var/lib/dbus/machine-id")
 
 
 def _machine_marker() -> Path:
-    base = Path(env("SESSION_DIR", home() / "session"))
+    base = session_dir()
     return base / ".machineid"
 
 

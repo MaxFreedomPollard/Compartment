@@ -445,3 +445,19 @@ def test_the_windows_lock_always_takes_byte_zero(monkeypatch, tmp_path):
         monkeypatch.delitem(sys.modules, "msvcrt", raising=False)
         importlib.reload(platforms)
     assert calls and all(pos == 0 for _, pos in calls)
+
+
+def test_a_session_dir_from_the_environment_needs_no_home_folder(
+        monkeypatch, tmp_path):
+    """A container run as a uid with no passwd entry and no HOME: Path.home()
+    raises, and setting COMPARTMENT_SESSION_DIR - the documented way to put
+    the session somewhere writable - still went through it."""
+    from compartment import home as home_mod, session
+
+    def no_home(cls=None):
+        raise RuntimeError("Could not determine home directory.")
+    monkeypatch.setattr(home_mod.Path, "home", classmethod(no_home))
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "s"))
+    assert home_mod.session_dir() == tmp_path / "s"
+    assert platforms._posix_marker().parent == tmp_path / "s"
+    assert session.credential_path(str(tmp_path / "v.vault")).parent == tmp_path / "s"

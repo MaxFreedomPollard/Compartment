@@ -71,7 +71,7 @@ alternative: it survives reboots by design. See SECURITY.md.
 """
 from __future__ import annotations
 
-from .home import env, home
+from .home import env, home, session_dir
 import ctypes
 import ctypes.util
 import errno
@@ -118,7 +118,7 @@ def _session_dir() -> Path:
     session directory fails with EPERM. Calling it unconditionally made
     every `compartment search` the agent ran die with PermissionError
     before it could look at the credential the user had unlocked."""
-    d = Path(env("SESSION_DIR", home() / "session"))
+    d = session_dir()
     d.mkdir(parents=True, exist_ok=True)
     if stat.S_IMODE(d.stat().st_mode) != 0o700:
         os.chmod(d, 0o700)
@@ -519,7 +519,7 @@ def credential_path(vault_path: str) -> Path:
     unlocked in a terminal by looking at the file's modification time - the
     one check cheap enough to make on every click. Unlike `_file_for`, it
     never creates the session directory or changes its mode."""
-    return Path(env("SESSION_DIR", home() / "session")) / _name_for(vault_path)
+    return session_dir() / _name_for(vault_path)
 
 
 def watch_signature(vault_path: str) -> tuple:
