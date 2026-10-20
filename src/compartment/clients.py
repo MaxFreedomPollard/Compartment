@@ -196,6 +196,53 @@ def _home(*parts: str) -> Callable[[], Path]:
     return lambda: Path.home().joinpath(*parts)
 
 
+def _home_from(var: str, *default: str) -> Path:
+    """The directory `var` names, or ~/<default...> when it is unset."""
+    return _env_dir(var) or Path.home().joinpath(*default)
+
+
+def _zed_settings() -> Path:
+    """Zed's settings.json (crates/paths/src/paths.rs): %APPDATA%\\Zed on
+    Windows, the XDG config directory on Linux, and ~/.config/zed on macOS
+    whatever XDG_CONFIG_HOME says, since Zed does not consult it there.
+    Taking XDG_CONFIG_HOME on a Mac that sets it wrote a file Zed never
+    read."""
+    if os.name == "nt":
+        return _appdata() / "Zed" / "settings.json"
+    if sys.platform == "darwin":
+        return Path.home() / ".config" / "zed" / "settings.json"
+    return _xdg() / "zed" / "settings.json"
+
+
+def _opencode_config() -> Path:
+    """OpenCode's global config: OPENCODE_CONFIG_DIR, or opencode under the
+    XDG config directory on every platform, and in it opencode.json or
+    opencode.jsonc, both of which it loads. The one that exists is
+    written; a new opencode.json beside an opencode.jsonc would split the
+    user's config in two."""
+    d = _env_dir("OPENCODE_CONFIG_DIR") or _xdg() / "opencode"
+    if not (d / "opencode.json").exists() and (d / "opencode.jsonc").exists():
+        return d / "opencode.jsonc"
+    return d / "opencode.json"
+
+
+def _lmstudio_home() -> Path:
+    """LM Studio's home, as LM Studio finds it (lmstudio-js,
+    findLMStudioHome.ts): the path in ~/.lmstudio-home-pointer, which LM
+    Studio writes and which is how a home moved in its settings is found;
+    else ~/.cache/lm-studio, where older versions lived; else ~/.lmstudio."""
+    h = Path.home()
+    try:
+        pointer = (h / ".lmstudio-home-pointer").read_text(
+            encoding="utf-8").strip()
+        if pointer:
+            return Path(pointer).expanduser()
+    except (OSError, UnicodeDecodeError):
+        pass
+    legacy = h / ".cache" / "lm-studio"
+    return legacy if legacy.is_dir() else h / ".lmstudio"
+
+
 # --- the shape each client wants an entry in -------------------------------
 
 def _entry_plain(command: str, args: list[str]) -> dict:
@@ -290,12 +337,17 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
                "kilocode.kilo-code") is not None),
            note="reload the editor window, or restart the Kilo CLI, to "
                 "pick it up"),
-    Client("gemini", "Gemini CLI", _home(".gemini", "settings.json"),
-           aliases=("gemini-cli",)),
-    Client("qwen", "Qwen Code CLI", _home(".qwen", "settings.json"),
-           aliases=("qwen-code",)),
+    # GEMINI_CLI_HOME stands in for the home directory, .gemini under it;
+    # QWEN_HOME and COPILOT_HOME are the directory itself. Both CLIs strip
+    # comments before parsing settings.json.
+    Client("gemini", "Gemini CLI",
+           lambda: (_env_dir("GEMINI_CLI_HOME") or Path.home()) / ".gemini"
+           / "settings.json", jsonc=True, aliases=("gemini-cli",)),
+    Client("qwen", "Qwen Code CLI",
+           lambda: _home_from("QWEN_HOME", ".qwen") / "settings.json",
+           jsonc=True, aliases=("qwen-code",)),
     Client("copilot-cli", "GitHub Copilot CLI",
-           _home(".copilot", "mcp-config.json")),
+           lambda: _home_from("COPILOT_HOME", ".copilot") / "mcp-config.json"),
     # Oh My Pi reads a project-level .omp/mcp.json as well, but that one is
     # relative to whatever repository you happen to be in, so the user-level
     # file is the only one an integrate command can honestly write.
@@ -311,20 +363,20 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
            root="servers", entry=_entry_vscode, jsonc=True),
     # Zed writes its settings.json with a block of // comments on first
     # run, so it is edited as JSON with comments: comments kept.
-    Client("zed", "Zed",
-           lambda: (_appdata() / "Zed" / "settings.json" if os.name == "nt"
-                    else _xdg() / "zed" / "settings.json"),
-           root="context_servers", jsonc=True),
-    Client("opencode", "OpenCode",
-           lambda: _xdg() / "opencode" / "opencode.json",
-           root="mcp", entry=_entry_opencode),
+    Client("zed", "Zed", _zed_settings, root="context_servers", jsonc=True),
+    # The legacy "mcp": {name: entry} shape, which every release reads and
+    # which current ones merge with the newer "mcp": {"servers": ...}.
+    Client("opencode", "OpenCode", _opencode_config,
+           root="mcp", entry=_entry_opencode, jsonc=True),
 
     # -- Codex keeps TOML --------------------------------------------------
-    Client("codex", "Codex CLI", _home(".codex", "config.toml"),
+    # CODEX_HOME moves the whole directory (codex-rs/utils/home-dir).
+    Client("codex", "Codex CLI",
+           lambda: _home_from("CODEX_HOME", ".codex") / "config.toml",
            root="mcp_servers", kind="toml", aliases=("codex-cli",)),
 
     # -- desktop and self-hosted chat apps ---------------------------------
-    Client("lmstudio", "LM Studio", _home(".lmstudio", "mcp.json"),
+    Client("lmstudio", "LM Studio", lambda: _lmstudio_home() / "mcp.json",
            aliases=("lm-studio",),
            note="LM Studio reloads mcp.json on save, no restart needed"),
     Client("anythingllm", "AnythingLLM",

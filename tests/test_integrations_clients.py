@@ -132,3 +132,79 @@ def test_kilo_code_writes_the_config_file_it_already_has(home):
 def test_kilo_code_installed_in_an_editor_but_never_run_is_present(home):
     _editor_storage("VSCodium", "kilocode.kilo-code")
     assert clients.CLIENTS["kilo"].present() is True
+
+
+# ------------------------------------------ homes moved by an environment
+
+@pytest.mark.parametrize("key, var, expect", [
+    ("codex", "CODEX_HOME", "{d}/config.toml"),
+    ("gemini", "GEMINI_CLI_HOME", "{d}/.gemini/settings.json"),
+    ("qwen", "QWEN_HOME", "{d}/settings.json"),
+    ("copilot-cli", "COPILOT_HOME", "{d}/mcp-config.json"),
+    ("opencode", "OPENCODE_CONFIG_DIR", "{d}/opencode.json"),
+])
+def test_a_home_moved_by_its_variable_is_followed(key, var, expect, home,
+                                                  monkeypatch, tmp_path):
+    """Each of these moves its whole configuration directory with one
+    variable; the default was written whatever it said, a file the client
+    never read, and `--list` called a client with only the moved directory
+    not installed."""
+    d = tmp_path / "moved"
+    d.mkdir()
+    monkeypatch.setenv(var, str(d))
+    c = clients.CLIENTS[key]
+    assert str(c.config_path()) == expect.format(d=d).replace("/", os.sep)
+    if key == "gemini":
+        (d / ".gemini").mkdir()
+    assert c.present() is True
+    assert clients.register(c, VAULT)["written"] is True
+    assert clients.is_registered(c) is True
+
+
+def test_an_opencode_jsonc_is_written_rather_than_split_in_two(home):
+    d = home / ".config" / "opencode"
+    d.mkdir(parents=True)
+    (d / "opencode.jsonc").write_text('{\n  // theme\n  "theme": "x"\n}\n',
+                                      encoding="utf-8")
+    oc = clients.CLIENTS["opencode"]
+    assert oc.config_path() == d / "opencode.jsonc"
+    assert clients.register(oc, VAULT)["written"] is True
+    assert not (d / "opencode.json").exists()
+    assert "// theme" in (d / "opencode.jsonc").read_text(encoding="utf-8")
+
+
+def test_gemini_settings_with_comments_are_written(home):
+    """Gemini CLI and Qwen Code strip comments before parsing settings."""
+    p = home / ".gemini" / "settings.json"
+    p.parent.mkdir()
+    p.write_text('{\n  // dark mode\n  "theme": "Dracula"\n}\n',
+                 encoding="utf-8")
+    assert clients.register(clients.CLIENTS["gemini"], VAULT)["written"]
+    assert "// dark mode" in p.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS rule")
+def test_zed_on_macos_ignores_xdg_config_home(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert clients.CLIENTS["zed"].config_path() == (
+        home / ".config" / "zed" / "settings.json")
+
+
+def test_lm_studio_is_found_where_its_home_pointer_says(home, tmp_path):
+    """LM Studio records its home in ~/.lmstudio-home-pointer, which is how
+    a home moved in its settings (to another disk, say) is found."""
+    moved = tmp_path / "Volumes" / "Big" / "lmstudio"
+    moved.mkdir(parents=True)
+    (home / ".lmstudio-home-pointer").write_text(f"{moved}\n",
+                                                 encoding="utf-8")
+    lm = clients.CLIENTS["lmstudio"]
+    assert lm.config_path() == moved / "mcp.json"
+    assert lm.present() is True
+
+
+def test_lm_studio_without_a_pointer_uses_its_default_home(home):
+    assert clients.CLIENTS["lmstudio"].config_path() == (
+        home / ".lmstudio" / "mcp.json")
+    (home / ".cache" / "lm-studio").mkdir(parents=True)
+    assert clients.CLIENTS["lmstudio"].config_path() == (
+        home / ".cache" / "lm-studio" / "mcp.json")
