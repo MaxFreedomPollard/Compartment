@@ -28,10 +28,36 @@ Claude Desktop (`claude_desktop_config.json`):
 
 ```json
 { "mcpServers": { "compartment": {
-    "command": "compartment",
+    "command": "/Users/you/Library/Python/3.12/bin/compartment",
     "args": ["--vault", "/Users/you/.compartment/memory.vault",
              "--caller", "claude-desktop", "serve"] } } }
 ```
+
+Use the absolute path of the `compartment` command (`which compartment`,
+or `where compartment` on Windows), not the bare name: an app started from
+the Dock or the Start menu does not get your shell's PATH, and a bare
+`compartment` fails there with "spawn compartment ENOENT". `integrate`
+writes the absolute path for you: the script pip installed (including the
+`pip install --user` directory the install scripts use), or the link a
+package manager keeps for it (Homebrew, pipx, uv), which survives
+upgrades.
+
+Where Claude Desktop keeps that file:
+
+| Platform | File |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows (MSIX: the Store build and the current direct download) | `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json` (Store: `AnthropicPBC.Claude_fnn82j28hfe8t`) |
+| Windows (older installer) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux (official beta, and community builds) | `~/.config/Claude/claude_desktop_config.json` |
+
+An MSIX app reads its private copy under `Packages` once it has saved its
+settings, and ignores `%APPDATA%\Claude` from then on; `integrate claude`
+writes whichever one the installed app is reading. Quit Claude Desktop
+completely before you run it (on Windows, from the tray icon), or quit
+and reopen it straight after: a running Claude Desktop can write the
+config it loaded at startup back over the file, dropping a server added
+while it ran (anthropics/claude-ai-mcp#1150).
 
 ### Claude Code already has a memory - Compartment takes it over
 
@@ -51,9 +77,14 @@ and neither is complete. `compartment integrate claude` resolves it in three way
    in the system prompt, which otherwise outranks anything a tool says.
 
 3. **It stops relying on the model.** `integrate claude` installs a
-   `PostToolUse` hook into `~/.claude/settings.json`. When Claude Code writes
-   a file into its memory directory, the hook stores it in the vault - no
-   tool call required, so capture is deterministic instead of discretionary.
+   `PostToolUse` hook into `~/.claude/settings.json` (`%USERPROFILE%\.claude`
+   on Windows, or `$CLAUDE_CONFIG_DIR/settings.json` when that is set). When
+   Claude Code writes a file into its memory directory (under `projects/`, or
+   wherever its `autoMemoryDirectory` setting points), the hook stores it in
+   the vault - no tool call required, so capture is deterministic instead of
+   discretionary. Claude Code runs hooks through bash, Git Bash on Windows,
+   so the hook names `compartment` by an absolute path written with forward
+   slashes there.
    Your existing hooks are preserved, settings.json is backed up first, and
    re-installing updates in place rather than duplicating. The hook always
    exits 0 (a memory tool must never break an edit) and does nothing when the
@@ -212,11 +243,52 @@ shutdown and before compaction, and recalled memory is injected into the
 compaction context so summaries do not drop prior decisions. `memory_search`
 and `memory_store` are also registered as tools, independent of MCP wiring.
 
+## Every other MCP client - `compartment integrate <name>`
+
+`compartment integrate --list` shows every client below and whether it is
+installed and connected here; `compartment integrate --all` wires every one
+it finds. Each write keeps the client's other servers, takes a byte-exact
+backup first (`<file>.compartment-backup`), follows a symlinked config to
+the file it points at, and refuses - printing the block to paste instead -
+anything it cannot read or edit safely. Files saved with a byte order mark
+or as UTF-16 (Notepad, PowerShell 5) are read and written back as UTF-8.
+
+| `integrate …` | File it writes (macOS / Linux; Windows where it differs) | Notes |
+|---|---|---|
+| `cursor` | `~/.cursor/mcp.json` | |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | |
+| `vscode`, `vscode-insiders` | `<User dir>/mcp.json`, key `servers` | comments kept |
+| `zed` | `~/.config/zed/settings.json` (Linux: `$XDG_CONFIG_HOME/zed`; Windows: `%APPDATA%\Zed`), key `context_servers` | comments kept |
+| `cline` | `~/.cline/data/settings/cline_mcp_settings.json` (`CLINE_DIR`, `CLINE_DATA_DIR`, `CLINE_MCP_SETTINGS_PATH`); older Cline: its editor's globalStorage | found in VS Code, Insiders, VSCodium, Cursor, Windsurf |
+| `roo` | `<editor>/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | |
+| `kilo` | `~/.config/kilo/kilo.jsonc` (or the kilo/opencode file already there), key `mcp` | comments kept |
+| `continue` | `~/.continue/mcpServers/compartment.json` (`CONTINUE_GLOBAL_DIR`) | a file of its own; config.yaml untouched |
+| `codex` | `~/.codex/config.toml` (`CODEX_HOME`), `[mcp_servers.compartment]` | re-running refreshes a stale entry |
+| `gemini` | `~/.gemini/settings.json` (`$GEMINI_CLI_HOME/.gemini`) | comments kept |
+| `qwen` | `~/.qwen/settings.json` (`QWEN_HOME`) | comments kept |
+| `copilot-cli` | `~/.copilot/mcp-config.json` (`COPILOT_HOME`) | |
+| `opencode` | `~/.config/opencode/opencode.json` or `.jsonc` (`OPENCODE_CONFIG_DIR`), key `mcp` | comments kept |
+| `crush` | `~/.config/crush/crush.json` (`CRUSH_GLOBAL_CONFIG`), key `mcp` | |
+| `kiro` | `~/.kiro/settings/mcp.json` (`KIRO_HOME`) | |
+| `amazon-q` | `~/.aws/amazonq/mcp.json` | |
+| `junie` | `~/.junie/mcp/mcp.json` | |
+| `factory` | `~/.factory/mcp.json` | |
+| `omp` | `~/.omp/agent/mcp.json` | |
+| `lmstudio` | `<LM Studio home>/mcp.json`, from `~/.lmstudio-home-pointer` (default `~/.lmstudio`) | |
+| `anythingllm`, `boltai`, `5ire`, `trae` | each app's own `mcp.json` | |
+| `goose` | prints an `extensions:` block for `~/.config/goose/config.yaml` (Windows: `%APPDATA%\Block\goose\config\config.yaml`; `GOOSE_PATH_ROOT`) | paste, not written |
+| `librechat`, `jan`, `cherry-studio`, `chatbox`, `msty`, `witsy`, `open-webui` | prints the block and where it goes | paste, not written |
+
+"Comments kept" means the client reads its file as JSON with comments, so a
+file holding `//` comments or trailing commas is edited as text: the entry
+is spliced in, the result is read back and must hold exactly the old
+settings plus the entry, and every comment stays where it was.
+
 ## Everything else
 
 | Agent kind | Mechanism | What to do |
 |---|---|---|
-| Any MCP-capable host (Cursor, Windsurf, custom SDK agents, …) | MCP stdio | the same one-block config as Claude, with its own `--caller` name |
+| Any other MCP-capable host (custom SDK agents, …) | MCP stdio | the same one-block config as Claude, with its own `--caller` name |
 | Python frameworks (LangChain/LlamaIndex-style) | vector-store adapter | import `compartment.vault.Vault` directly, or use the CLI; a drop-in `VectorStore` adapter class is on the roadmap |
 | Anything that can run a subprocess | CLI/JSON | `compartment search "query" --json`, `compartment store "text" --source "how you know"` |
 
