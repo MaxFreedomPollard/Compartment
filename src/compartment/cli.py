@@ -433,10 +433,26 @@ def _wait_for_status_bar_app(timeout: float = 15.0) -> bool:
 
 
 def _install_kind() -> tuple[str, list[str]]:
-    """How this copy was installed, and the command that upgrades it."""
-    exe = Path(sys.argv[0]).resolve()
-    if "uv/tools" in str(exe) or shutil.which("uv") and "uv/tools" in str(
-            Path(shutil.which("compartment") or "").resolve()):
+    """How this copy was installed, and the command that upgrades it.
+
+    Asked of the environment this interpreter runs in, which each tool marks
+    the same way on every platform: `uv tool install` leaves uv-receipt.toml
+    at its root and `pipx install` leaves pipx_metadata.json. The path of the
+    running script, which is all this looked at before, says "uv/tools" only
+    where the launcher is a symlink into uv's directory and the separators
+    are forward slashes: on Windows, where uv's launcher is an .exe of its
+    own in ~/.local/bin, a uv install was taken for pip, and `update` ran
+    `python -m pip` in an environment uv builds without pip. A pipx install
+    was taken for pip everywhere: `update` left pipx's record of it stale,
+    and the last step `uninstall` printed left pipx a broken install."""
+    prefix = Path(sys.prefix)
+    if (prefix / "uv-receipt.toml").is_file():
+        return "uv", ["uv", "tool", "upgrade", "compartment"]
+    if (prefix / "pipx_metadata.json").is_file():
+        return "pipx", ["pipx", "upgrade", "compartment"]
+    exe = Path(sys.argv[0]).resolve().as_posix()
+    if "uv/tools" in exe or shutil.which("uv") and "uv/tools" in Path(
+            shutil.which("compartment") or "").resolve().as_posix():
         return "uv", ["uv", "tool", "upgrade", "compartment"]
     return "pip", [sys.executable, "-m", "pip", "install", "--upgrade",
                    "compartment"]
@@ -448,6 +464,7 @@ def cmd_update(args) -> None:
     if args.source:
         target = "git+https://github.com/MaxFreedomPollard/Compartment@main"
         cmd = (["uv", "tool", "install", "--force", target] if kind == "uv"
+               else ["pipx", "install", "--force", target] if kind == "pipx"
                else [sys.executable, "-m", "pip", "install", "--upgrade",
                      "--force-reinstall", target])
     print(f"Compartment {__version__} - updating ({kind} install)")
@@ -670,6 +687,7 @@ def cmd_uninstall(args) -> None:
         print("  delete it yourself, or re-run with --purge, once you are sure")
     kind, _ = _install_kind()
     final = ("uv tool uninstall compartment" if kind == "uv"
+             else "pipx uninstall compartment" if kind == "pipx"
              else f"{sys.executable} -m pip uninstall compartment")
     print("\nOne step left, which cannot remove itself while it is running:")
     print(f"  {final}")
