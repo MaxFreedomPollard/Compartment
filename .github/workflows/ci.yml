@@ -3,6 +3,11 @@ name: CI
 on:
   push:
   pull_request:
+  # Weekly, because a dependency's new release can break an install on some
+  # platform without any commit here (see wheel-coverage).
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
 
 jobs:
   test-offline:
@@ -111,13 +116,30 @@ jobs:
         shell: bash
         run: python tools/mcp_smoke.py --command compartment
 
+  wheel-coverage:
+    # pip installs the newest release of every dependency and compiles it when
+    # that release has no wheel for the machine. That is how a plain
+    # `pip install compartment` broke on Windows on ARM and Intel Macs: an
+    # indirect dependency stopped shipping wheels there. This resolves the
+    # dependencies for every supported platform and Python, as pip would and
+    # wheels-only, and fails when they differ. A dependency release can break
+    # this without a commit here, so it also runs weekly.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install uv
+      - run: python tools/wheel_coverage.py
+
   lowest-dependencies:
     # pyproject.toml's lower bounds are a promise to everyone whose distro or
     # lock file holds an older library. It used to promise mcp>=1.0, and no
-    # release before 1.10 can even start the server (FastMCP arrived in 1.2,
-    # tool titles in 1.10). This installs the lowest version of every direct
-    # dependency the bounds allow and runs the suite, so a bound is a tested
-    # fact rather than a guess.
+    # release before 1.21.2 runs the server beside today's pydantic. This
+    # installs the lowest version of every direct dependency the bounds
+    # allow and runs the suite, so a bound is a tested fact, not a guess.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -126,12 +148,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install at the lowest versions the bounds allow
-        # mcp 1.10-1.12 import pydantic internals that pydantic 2.12 moved, a
-        # pairing their own metadata does not exclude; the constraint keeps
-        # the transitive pydantic to what those releases were built against.
         run: |
           python -m pip install uv
-          uv pip install --system --resolution lowest-direct -e ".[dev]" "pydantic<2.12"
+          uv pip install --system --resolution lowest-direct -e ".[dev]"
           python -m pip list
       - name: Test suite with offline guard active
         env:
