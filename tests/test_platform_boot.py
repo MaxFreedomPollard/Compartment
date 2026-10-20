@@ -92,3 +92,35 @@ def test_every_sysctl_dialect_of_kern_boottime_is_read(monkeypatch, stdout):
     _record_subprocesses(monkeypatch, stdout=stdout)
     est = platforms._sysctl_boot_estimate()
     assert est is not None and est[0] == 1_700_000_000.0
+
+
+# --- Windows: the tick count is 64 bits wide ---------------------------------
+
+class _CtypesFunction:
+    """A foreign function as ctypes models one: its result is read as the
+    restype says, and a function nobody described returns a C int."""
+
+    def __init__(self, value):
+        self.value = value
+        self.restype = ctypes.c_int
+        self.argtypes = None
+
+    def __call__(self):
+        return self.restype(self.value).value
+
+
+def test_windows_uptime_past_24_days_is_not_cut_to_32_bits(tmp_path,
+                                                           monkeypatch):
+    """Bare ctypes reads GetTickCount64's 64-bit result as a 32-bit int.
+    Past 2**31 ms (24.9 days, routine for a Windows machine that sleeps or
+    uses Fast Startup) the uptime went negative, the boot instant jumped by
+    49.7 days, the pin took it for a reboot, and the stored unlock
+    credential was deleted - and again every 49.7 days."""
+    import types
+    thirty_days_ms = 30 * 86_400 * 1000
+    kernel32 = types.SimpleNamespace(
+        GetTickCount64=_CtypesFunction(thirty_days_ms))
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(kernel32=kernel32), raising=False)
+    monkeypatch.setattr(platforms.time, "time", lambda: 1_800_000_000.0)
+    assert platforms._windows_boot_token() == str(1_800_000_000 - 30 * 86_400)

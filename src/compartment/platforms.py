@@ -283,8 +283,8 @@ def _pinned_boot_token(computed: float, uptime_s: float, marker: Path) -> str:
     mid-session in three ways this avoids:
       1. sub-second int() truncation flapping between two processes;
       2. wall-clock steps and NTP slew moving the derived boot instant;
-      3. a jump of the whole sleep duration where the uptime source
-         excludes sleep (Windows GetTickCount64).
+      3. a jump of the whole sleep duration, where an uptime source
+         excludes sleep (none of those used here does).
     A real reboot resets uptime and moves the boot instant far beyond the
     tolerance below, so it is detected and the token changes, as intended."""
     try:
@@ -325,13 +325,27 @@ def _windows_boot_token() -> str:
     credential and relocks the vault mid-session in three ways this avoids:
       1. sub-second int() truncation flapping between two processes;
       2. wall-clock drift after NTP slew accumulating past a second boundary;
-      3. a jump of the whole sleep duration after every sleep/resume
-         (GetTickCount64 excludes sleep; time.time() does not).
+      3. a jump of the whole sleep duration after every sleep/resume, were
+         the uptime source to skip sleep. GetTickCount64 does not (it
+         includes time suspended; PEP 418), and the tolerance relies on
+         that: QueryUnbiasedInterruptTime, which skips sleep, would read
+         every sleep longer than five minutes as a reboot.
     A real reboot resets uptime and moves the boot instant far beyond the
-    tolerance below, so it is detected and the token changes, as intended."""
+    tolerance below, so it is detected and the token changes, as intended.
+
+    GetTickCount64 returns a 64-bit count, and ctypes assumes a C int for
+    any function it is not told about. Called bare, the count was cut to 32
+    signed bits: past 2**31 ms of uptime - 24.9 days, which a Windows
+    machine that only ever sleeps, or shuts down with Fast Startup, reaches
+    easily - it went negative, the derived boot instant jumped 49.7 days,
+    the pin read that as a reboot, and the session credential was deleted;
+    then again every 49.7 days."""
     import ctypes
-    uptime_s = ctypes.windll.kernel32.GetTickCount64() / 1000.0  # excludes sleep
-    computed = time.time() - uptime_s                            # ~boot instant
+    get_tick_count = ctypes.windll.kernel32.GetTickCount64
+    get_tick_count.restype = ctypes.c_uint64
+    get_tick_count.argtypes = []
+    uptime_s = get_tick_count() / 1000.0                  # counts through sleep
+    computed = time.time() - uptime_s                     # ~boot instant
     return _pinned_boot_token(computed, uptime_s, _win_marker())
 
 
