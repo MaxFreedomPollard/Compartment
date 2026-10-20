@@ -21,7 +21,9 @@ holder that no filesystem backs:
     uid, mode 0600. It outlives the process that created it, is shared by
     every later process of this user, and dies with the kernel that holds it.
     On Linux that object is a file on the /dev/shm tmpfs; on macOS it has no
-    filesystem presence at all.
+    filesystem presence at all. FreeBSD keeps it in the kernel and NetBSD on
+    the /var/shm tmpfs. OpenBSD is refused: its shm_open is a plain file in
+    /tmp, which is on disk.
   * Windows: a REG_OPTION_VOLATILE key under HKEY_CURRENT_USER. Volatile keys
     are never written to the hive on disk and vanish when the hive unloads,
     which is at logoff and at every restart. Windows therefore also relocks
@@ -147,6 +149,11 @@ def _uid() -> str:
 
 _libc_cache = None
 
+#: What to do instead, for every error that means "no holder here".
+_ALTERNATIVES = (
+    "Use COMPARTMENT_PASSPHRASE, `compartment unlock --once`, `compartment "
+    "unlock --keychain` (macOS), or `compartment init --no-session`.")
+
 
 def _libc():
     """libc/librt with shm_open, argtypes set for the variadic call.
@@ -159,6 +166,18 @@ def _libc():
     global _libc_cache
     if _libc_cache is not None:
         return _libc_cache
+    if sys.platform.startswith("openbsd"):
+        # OpenBSD's libc implements shm_open as an ordinary file,
+        # /tmp/<sha256 of the name>.shm, on whatever /tmp is - a disk
+        # partition on a default install (lib/libc/gen/shm_open.c). The
+        # secret would then be on the same disk as the session file, and
+        # stay there after a power cut until the next boot prunes /tmp: a
+        # copy of that disk opens the credential, which is the one thing
+        # this holder exists to prevent.
+        raise CryptoError(
+            "OpenBSD keeps POSIX shared memory as a file in /tmp, on disk, "
+            "so it cannot hold a per-boot secret that a copy of the disk "
+            "would not carry. " + _ALTERNATIVES)
     for name in (None, "rt", "c"):
         try:
             lib = ctypes.CDLL(ctypes.util.find_library(name) if name else None,
@@ -177,9 +196,18 @@ def _libc():
         "No POSIX shared memory (shm_open) on this system, so there is "
         "nowhere to hold a per-boot secret that a restart destroys. "
         "Compartment will not fall back to a credential that anyone holding "
-        "the session file could recompute. Use `compartment unlock "
-        "--keychain` (macOS), COMPARTMENT_PASSPHRASE, `compartment unlock "
-        "--once`, or `compartment init --no-session`.")
+        "the session file could recompute. " + _ALTERNATIVES)
+
+
+#: Why shm_open fails where it exists at all. glibc keeps its objects in
+#: /dev/shm and fails ENOENT where that is not mounted (chroots, some build
+#: and CI containers, Android); a container's /dev/shm can be read-only or
+#: full; and sandboxes refuse names outside their own prefix (snap, the
+#: macOS App Sandbox) with EACCES or EPERM.
+_NO_SHM_HERE = (
+    "POSIX shared memory is not usable for this process: /dev/shm may be "
+    "missing, read-only or full (some containers and chroots), or a "
+    "sandbox may refuse it.")
 
 
 def _shm_open(name: str, flags: int, mode: int | None = None) -> int:
@@ -206,7 +234,8 @@ def _posix_read(name: str) -> tuple[str, bytes | None]:
         if exc.errno == errno.ENOENT:
             return "absent", None
         raise CryptoError(
-            f"Cannot open this boot's secret ({name}): {exc}") from exc
+            f"Cannot open this boot's secret ({name}): {exc}. "
+            f"{_NO_SHM_HERE} {_ALTERNATIVES}") from exc
     try:
         st = os.fstat(fd)
         if st.st_uid != os.getuid():
@@ -237,7 +266,8 @@ def _posix_create(name: str) -> bytes | None:
         if exc.errno == errno.EEXIST:
             return None
         raise CryptoError(
-            f"Cannot create this boot's secret ({name}): {exc}") from exc
+            f"Cannot create this boot's secret ({name}): {exc}. "
+            f"{_NO_SHM_HERE} {_ALTERNATIVES}") from exc
     try:
         os.ftruncate(fd, SECRET_LEN)
         secret = secrets.token_bytes(SECRET_LEN)

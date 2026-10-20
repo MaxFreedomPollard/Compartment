@@ -76,3 +76,45 @@ def test_a_store_with_a_wide_mode_is_still_narrowed(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(d))
     session.store(str(tmp_path / "v.vault"), b"k" * 32)
     assert (d.stat().st_mode & 0o777) == 0o700
+
+
+# --- no usable holder: the refusal has to say what to do instead ----------
+
+@pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.EACCES, errno.EROFS,
+                                  errno.ENOSPC])
+def test_a_holder_that_cannot_be_made_names_the_way_round_it(
+        tmp_path, monkeypatch, code):
+    """glibc keeps shm objects in /dev/shm and fails ENOENT where it is not
+    mounted (chroots, some CI and build containers); a container's can be
+    read-only or full, and a sandbox can refuse it. The bare "[Errno 2] No
+    such file or directory" left nobody knowing what to do."""
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "sess"))
+
+    def refuse(name, flags, mode=None):
+        if flags & os.O_CREAT:
+            raise OSError(code, os.strerror(code), name)
+        raise OSError(errno.ENOENT, os.strerror(errno.ENOENT), name)
+    monkeypatch.setattr(session, "_shm_open", refuse)
+    with pytest.raises(session.CryptoError) as err:
+        session.store(str(tmp_path / "v.vault"), b"k" * 32)
+    msg = str(err.value)
+    assert "/dev/shm" in msg
+    assert "COMPARTMENT_PASSPHRASE" in msg and "--once" in msg
+
+
+@pytest.mark.skipif(session.IS_WINDOWS, reason="POSIX holder")
+def test_openbsd_does_not_keep_the_secret_in_a_file_on_disk(
+        tmp_path, monkeypatch):
+    """OpenBSD's libc implements shm_open as /tmp/<sha256>.shm, an ordinary
+    file on disk (lib/libc/gen/shm_open.c), so the secret would travel with
+    any copy of the disk the session file is on. Storing must refuse there,
+    the way it does where shm_open is missing, and say what to use."""
+    monkeypatch.setenv("COMPARTMENT_SESSION_DIR", str(tmp_path / "sess"))
+    monkeypatch.setattr(session, "_libc_cache", None)
+    monkeypatch.setattr(session.sys, "platform", "openbsd7")
+    with pytest.raises(session.CryptoError) as err:
+        session.store(str(tmp_path / "v.vault"), b"k" * 32)
+    assert "OpenBSD" in str(err.value)
+    assert "COMPARTMENT_PASSPHRASE" in str(err.value)
+    assert not session.credential_path(str(tmp_path / "v.vault")).exists()
