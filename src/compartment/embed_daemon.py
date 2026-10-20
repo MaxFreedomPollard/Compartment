@@ -589,7 +589,14 @@ def run(path: Path | None = None, idle: int | None = None) -> int:
         print("compartment: the shared embedding daemon needs a POSIX system "
               "with Unix domain sockets", file=sys.stderr)
         return 2
-    return _Daemon(path or socket_path(), idle or idle_seconds()).run()
+    try:
+        path = path or socket_path()
+    except (OSError, RuntimeError) as exc:
+        print(f"compartment: no session directory to hold the embedding "
+              f"daemon's socket ({exc}); pass --socket PATH",
+              file=sys.stderr)
+        return 1
+    return _Daemon(path, idle or idle_seconds()).run()
 
 
 # ------------------------------------------------------------ starting it up
@@ -799,9 +806,12 @@ class RemoteEmbedder:
             return None
         try:
             return cls(model_name, path or socket_path(), spawn=spawn, wait=wait)
-        except (Unavailable, OSError):
+        except (Unavailable, OSError, RuntimeError):
             # OSError: the session directory or the lock files cannot be
             # made here (a read-only home), which is no daemon either.
+            # RuntimeError: there is no home directory at all (HOME unset
+            # and no password-database entry, as for a container's
+            # arbitrary uid), so no session directory to put a socket in.
             return None
 
     # -- properties the vault reports --------------------------------------
@@ -981,7 +991,7 @@ def status(path: Path | None = None) -> dict:
                           "embeds with a model of its own"}
     try:
         path = path or socket_path()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         return {"running": False, "socket": None,
                 "reason": f"no session directory to hold its socket ({exc})"}
     s = _connect(path, timeout=2.0)
@@ -1013,7 +1023,7 @@ def stop(path: Path | None = None, wait: float = 5.0) -> dict:
         return {"stopped": False, "socket": None}
     try:
         path = path or socket_path()
-    except OSError:
+    except (OSError, RuntimeError):
         return {"stopped": False, "socket": None}
     pid = None
     s = _connect(path, timeout=2.0)

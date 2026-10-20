@@ -878,3 +878,30 @@ def test_a_module_in_the_home_directory_does_not_replace_the_daemons_own(
                          capture_output=True, text=True, timeout=120)
     assert "shadowed" not in out.stdout + out.stderr
     assert out.returncode == 0 and "--socket" in out.stdout
+
+
+@pytest.mark.parametrize("error", [
+    PermissionError(13, "Permission denied"),
+    RuntimeError("Could not determine home directory."),
+])
+def test_no_session_directory_means_a_local_model_not_a_crash(monkeypatch,
+                                                              capsys, error):
+    """The socket lives in the session directory. Where that cannot be made
+    (a read-only home) or there is no home at all (HOME unset and no
+    password-database entry, as for a container's arbitrary uid), the
+    daemon is given up and this process embeds with its own model; status,
+    stop and `embed-daemon run` say why instead of raising."""
+    from compartment import session
+
+    def no_dir():
+        raise error
+    monkeypatch.setenv("COMPARTMENT_EMBED_DAEMON", "1")
+    monkeypatch.delenv("COMPARTMENT_EMBED_SOCKET", raising=False)
+    monkeypatch.setattr(session, "_session_dir", no_dir)
+    assert RemoteEmbedder.connect() is None
+    assert isinstance(get_embedder(), Embedder)
+    st = embed_daemon.status()
+    assert st["running"] is False and "session directory" in st["reason"]
+    assert embed_daemon.stop()["stopped"] is False
+    assert embed_daemon.run() == 1
+    assert "--socket" in capsys.readouterr().err
