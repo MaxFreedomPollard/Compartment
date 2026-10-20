@@ -126,3 +126,37 @@ def test_a_subcommand_without_them_keeps_the_top_level_values(tmp_path,
     cli.main(["--vault", str(tmp_path / "v.vault"), "serve"])
     assert seen[0].vault == str(tmp_path / "v.vault")
     assert seen[0].caller == "user" and seen[0].assert_offline is False
+
+
+# ------------------------------------------------------- import and export --
+@pytest.fixture()
+def open_vault(vault, vault_path, monkeypatch):
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", PASS)
+    vault.lock()
+    return vault_path
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_an_import_saved_by_a_windows_tool_is_read(open_vault, tmp_path,
+                                                   capsys, encoding):
+    """PowerShell 5.1 writes UTF-8 with a BOM, or UTF-16 for `>`: the first
+    ended in "Unexpected UTF-8 BOM", the second in UnicodeDecodeError."""
+    f = tmp_path / "memories.jsonl"
+    f.write_text('{"text": "The staging database runs Postgres 16"}\n',
+                 encoding=encoding)
+    cli.main(["--vault", open_vault, "import", str(f)])
+    assert "imported 1 record" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("body, said", [
+    ('{"text": "fine"}\nnot json\n', "line 2: not JSON"),
+    ('{"txt": "misspelt"}\n', 'line 1: a record needs a "text" string'),
+    ("[1, 2]\n", 'line 1: a record needs a "text" string'),
+])
+def test_an_import_that_is_not_records_is_refused_by_line(open_vault,
+                                                          tmp_path, capsys,
+                                                          body, said):
+    f = tmp_path / "memories.jsonl"
+    f.write_text(body, encoding="utf-8")
+    err = _ends(["--vault", open_vault, "import", str(f)], capsys)
+    assert said in err and "Traceback" not in err

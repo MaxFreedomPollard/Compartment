@@ -1179,9 +1179,47 @@ def cmd_export(args) -> None:
     _save_reads(v)
 
 
+def _read_text_file(path: str) -> str:
+    """A text file the user handed the CLI, as text, whatever Windows tool
+    saved it.
+
+    PowerShell 5.1 writes UTF-8 with a byte-order mark (`Out-File -Encoding
+    utf8`) and UTF-16 for a plain `>` redirect; Notepad wrote a BOM for
+    years. Read as bare UTF-8, the first gave JSONDecodeError "Unexpected
+    UTF-8 BOM" and the second UnicodeDecodeError, both as tracebacks. The
+    BOM says which it is; with none, the file is UTF-8, as `export` writes
+    it, and anything else is refused by name."""
+    raw = Path(path).read_bytes()
+    try:
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return raw.decode("utf-16")
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        _die(f"{path} is not UTF-8 text (byte {exc.start}): save it as "
+             "UTF-8 and import it again")
+
+
+def _check_jsonl(path: str, text: str) -> None:
+    """Refuse a JSONL file by line number before anything is imported: a
+    line that is not JSON, or a record with no text, ended the import in a
+    traceback that named neither the file's line nor the field."""
+    for no, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError as exc:
+            _die(f"{path}, line {no}: not JSON ({exc.msg}). Each line must "
+                 "be one record, as `compartment export` writes them")
+        if not isinstance(rec, dict) or not isinstance(rec.get("text"), str):
+            _die(f"{path}, line {no}: a record needs a \"text\" string")
+
+
 def cmd_import(args) -> None:
+    text = _read_text_file(args.file)
+    _check_jsonl(args.file, text)
     v = _open_vault(args)
-    n = v.import_jsonl(Path(args.file).read_text(encoding="utf-8"), namespace=args.namespace)
+    n = v.import_jsonl(text, namespace=args.namespace)
     print(f"imported {n} {'record' if n == 1 else 'records'}")
 
 
