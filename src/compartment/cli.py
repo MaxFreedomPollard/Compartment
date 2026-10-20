@@ -2638,6 +2638,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(fn=cmd_setup)
     ps.set_defaults(fn=cmd_setup, setup_cmd=None)
 
+    _accept_global_options_anywhere(ap)
     args = ap.parse_args(argv)
     if args.assert_offline:
         offline_guard.activate()
@@ -2667,6 +2668,47 @@ def main(argv: list[str] | None = None) -> None:
         # line naming the path, instead of a traceback an agent running
         # the CLI has to read to the bottom of to find the same thing.
         _die(_os_error_message(exc, args))
+
+
+#: The options of `compartment` itself, which every subcommand also takes
+#: after its own name. Help text only: the value comes from the top level.
+_GLOBAL_OPTIONS = (
+    (("--vault",), {"help": "vault path (also accepted before the "
+                            "subcommand)"}),
+    (("--caller",), {"help": "who is asking, for the ACL and the audit log"}),
+    (("--keyfile",), {"help": "second-factor keyfile, if 2FA moved it"}),
+    (("--assert-offline",), {"action": "store_true",
+                             "help": "abort if anything attempts network "
+                                     "access"}),
+)
+
+
+def _accept_global_options_anywhere(parser: argparse.ArgumentParser) -> None:
+    """Let `--vault`, `--caller`, `--keyfile` and `--assert-offline` follow
+    the subcommand as well as precede it.
+
+    argparse takes a parent's options only before the subcommand, so
+    `compartment serve --vault ~/v.vault` died with "unrecognized arguments:
+    --vault". That is the order MCP client configs are written in by hand
+    and by registries ("command": "compartment", "args": ["serve",
+    "--vault", ...]), and the order people type, and `compartment serve
+    --help` did not mention --vault at all. Each subcommand that does not
+    define one of these itself gets it with a SUPPRESS default, so it sets
+    the value only when it is given there, and the top-level value or
+    default stands otherwise."""
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        seen = set()
+        for child in action.choices.values():
+            if id(child) in seen:               # an alias: the same parser
+                continue
+            seen.add(id(child))
+            for flags, kw in _GLOBAL_OPTIONS:
+                if not any(f in child._option_string_actions for f in flags):
+                    child.add_argument(*flags, default=argparse.SUPPRESS,
+                                       **kw)
+            _accept_global_options_anywhere(child)
 
 
 def _os_error_message(exc: OSError, args) -> str:

@@ -96,3 +96,33 @@ def test_a_vault_found_but_unreadable_names_the_file(vault, vault_path,
     finally:
         os.chmod(vault_path, 0o600)
     assert vault_path in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("argv", [
+    ["serve", "--vault", "{vp}", "--caller", "cursor", "--assert-offline"],
+    ["--caller", "cursor", "serve", "--vault", "{vp}", "--assert-offline"],
+    ["--vault", "{vp}", "--caller", "cursor", "--assert-offline", "serve"],
+])
+def test_the_vault_and_caller_may_follow_the_subcommand(tmp_path, monkeypatch,
+                                                        argv):
+    """`compartment serve --vault PATH` is the order MCP configs are written
+    in by hand and by registries, and argparse refused it: "unrecognized
+    arguments: --vault", and the client showed a server that would not
+    start."""
+    vp = str(tmp_path / "v.vault")
+    seen = []
+    monkeypatch.setattr(cli, "cmd_serve", lambda args: seen.append(args))
+    monkeypatch.setattr(cli.offline_guard, "activate", lambda **k: None)
+    cli.main([a.replace("{vp}", vp) for a in argv])
+    (args,) = seen
+    assert (args.vault, args.caller, args.assert_offline) == (vp, "cursor",
+                                                              True)
+
+
+def test_a_subcommand_without_them_keeps_the_top_level_values(tmp_path,
+                                                              monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_serve", lambda args: seen.append(args))
+    cli.main(["--vault", str(tmp_path / "v.vault"), "serve"])
+    assert seen[0].vault == str(tmp_path / "v.vault")
+    assert seen[0].caller == "user" and seen[0].assert_offline is False
