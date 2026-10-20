@@ -197,8 +197,12 @@ def _sysctl_boot_estimate() -> tuple[float, float] | None:
     import struct
     try:
         import ctypes
-        import ctypes.util
-        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        # The process's own symbols, which include libc's. Not
+        # ctypes.util.find_library("c"): on FreeBSD, OpenBSD and DragonFly
+        # that runs /sbin/ldconfig -r, and on NetBSD it runs the C compiler,
+        # in a subprocess, on every call - a fork on every vault open, which
+        # is the thing reading this in-process was meant to avoid.
+        libc = ctypes.CDLL(None, use_errno=True)
         buf = ctypes.create_string_buffer(32)
         size = ctypes.c_size_t(len(buf))
         if libc.sysctlbyname(b"kern.boottime", buf, ctypes.byref(size), None, 0) == 0:
@@ -208,8 +212,16 @@ def _sysctl_boot_estimate() -> tuple[float, float] | None:
             sec = float(struct.unpack_from(fmt, buf.raw)[0])
             if sec > 0:
                 return sec, time.time() - sec
-    except (ImportError, OSError, AttributeError, ValueError, struct.error):
+    except (ImportError, OSError, AttributeError, ValueError, TypeError,
+            struct.error):
         pass
+    if platform.system() == "Darwin":
+        # macOS always has sysctlbyname, and the binary makes the same call:
+        # where the call above was refused - Seatbelt, under Claude Code and
+        # Codex - the binary is refused too. Forking it anyway cost every
+        # vault open in an agent's shell a process and a sandbox-violation
+        # report, for an answer that could not come.
+        return None
     try:
         out = subprocess.run(["sysctl", "-n", "kern.boottime"],
                              capture_output=True, text=True, check=True,
@@ -229,9 +241,14 @@ def _clock_boot_estimate() -> tuple[float, float] | None:
 
     Only clocks that keep counting through sleep qualify, or every resume
     would read as a reboot: CLOCK_BOOTTIME on Linux, Android and OpenBSD, and
-    CLOCK_MONOTONIC on macOS, where it is mach_continuous_time and includes
-    sleep. The result feeds _pinned_boot_token like any other estimate, so
-    the first value seen this boot is the one every process agrees on."""
+    CLOCK_MONOTONIC on macOS. There libc computes CLOCK_MONOTONIC as the wall
+    clock minus the kernel's boot time, read from the commpage, which no
+    sandbox gates; so wall clock minus it IS kern.boottime, to the
+    microsecond (checked under Seatbelt: constant across calls, and 8.6 s
+    away from mach_continuous_time, CLOCK_MONOTONIC_RAW, on a machine up
+    for two days). The result feeds _pinned_boot_token like any other
+    estimate, so the first value seen this boot is the one every process
+    agrees on."""
     names = ("CLOCK_MONOTONIC",) if platform.system() == "Darwin" else (
         "CLOCK_BOOTTIME",)
     for name in names:
