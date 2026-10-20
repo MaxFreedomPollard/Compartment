@@ -11,7 +11,6 @@ machine, and nothing is installed or downloaded.
 import json
 import os
 import pathlib
-import pty
 import re
 import shutil
 import subprocess
@@ -24,7 +23,7 @@ LINUX = ROOT / "install" / "install-linux.sh"
 MACOS = ROOT / "install" / "install-macos.sh"
 BASH = shutil.which("bash")
 
-pytestmark = pytest.mark.skipif(os.name == "nt" or BASH is None,
+needs_bash = pytest.mark.skipif(os.name == "nt" or BASH is None,
                                 reason="the shell installers need bash")
 
 _PYTHON_STUB = r'''#!{python}
@@ -171,6 +170,9 @@ def installer(tmp_path):
     """Run an installer with the stand-ins. `pythons` names the python
     stubs to put on PATH; `facts` is per-stub (or "*") platform facts;
     `tools` adds pipx and/or uv."""
+    if os.name == "nt" or BASH is None:
+        pytest.skip("the shell installers need bash")
+
     def run(script, pythons=("python3",), facts=None, tools=(), env=None,
             tty=True, stdin_script=False, cwd=None):
         root = tmp_path / "stubs"
@@ -210,6 +212,7 @@ def installer(tmp_path):
             argv, stdin = [BASH, str(script)], subprocess.DEVNULL
             if tty:
                 try:
+                    import pty              # POSIX only, like these tests
                     master, slave = pty.openpty()
                     stdin = slave
                 except OSError:
@@ -455,6 +458,51 @@ def test_apple_silicon_on_a_current_macos_takes_python_3_14(installer):
     assert r.init_args() == ["init"]
 
 
+@needs_bash
 def test_both_scripts_parse():
     for script in (LINUX, MACOS):
         subprocess.run([BASH, "-n", str(script)], check=True)
+
+
+# --- Windows: the interpreter probe ------------------------------------------
+#
+# PowerShell is not here to run the script itself, so its probe - the part
+# that decides which Python is used - runs under this Python with the
+# interpreter facts it reads stood in for.
+
+WINDOWS = ROOT / "install" / "install-windows.ps1"
+
+
+def _windows_probe(version, plat, monkeypatch, capsys):
+    text = WINDOWS.read_text(encoding="utf-8")
+    m = re.search(r"\$probe = @'\r?\n(.*?)\r?\n'@", text, re.S)
+    assert m, "install-windows.ps1 has no interpreter probe"
+    import sysconfig
+    monkeypatch.setattr(sys, "version_info", tuple(version) + (0, "final", 0))
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: plat)
+    try:
+        exec(compile(m.group(1), "<windows-probe>", "exec"), {"__name__": "__main__"})
+        code = 0
+    except SystemExit as exc:
+        code = exc.code or 0
+    return code, capsys.readouterr().out.strip()
+
+
+@pytest.mark.parametrize("version, plat, usable", [
+    ((3, 13), "win-amd64", True),
+    ((3, 11), "win-amd64", True),
+    ((3, 14), "win-arm64", True),
+    ((3, 11), "win-arm64", False),     # no pyyaml wheel for 3.11 on ARM64
+    ((3, 12), "win32", False),         # no 32-bit onnxruntime at all
+    ((3, 15), "win-amd64", False),     # newer than the wheels
+    ((3, 10), "win-amd64", False),
+])
+def test_the_windows_installer_picks_a_python_inside_the_wheel_matrix(
+        version, plat, usable, monkeypatch, capsys):
+    """The old script took whatever `py` started: the default Python, which
+    may be 32-bit, 3.10, 3.15, or 3.11 on ARM64, where pip then failed on a
+    dependency with no wheel."""
+    code, out = _windows_probe(version, plat, monkeypatch, capsys)
+    assert (code == 0) is usable, out
+    if not usable:
+        assert out
