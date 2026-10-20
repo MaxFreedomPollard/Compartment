@@ -42,16 +42,50 @@ def _entry(command: str) -> dict:
                        "timeout": TIMEOUT}]}
 
 
+#: Characters a word can hold and still mean itself to a POSIX shell.
+_SHELL_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                        "0123456789_./:@%+=,-")
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _shell_word(s: str, always: bool = False) -> str:
+    """`s` as one word for the shell Claude Code runs hooks in.
+
+    That shell is bash on every platform, Git Bash on Windows (Claude Code
+    2.1.47 and later), and an unquoted backslash is an escape character to
+    it. The hook used to quote the executable only when its path held a
+    space, so the usual Windows path (C:\\Users\\ana\\...\\compartment.exe)
+    reached bash as C:Usersana...compartment.exe: "command not found" after
+    every Write and Edit, and nothing was ever captured. On Windows the path is
+    written with forward slashes, which Git Bash, cmd and PowerShell all
+    take as a path and none of them treats as an escape; it is still the
+    same file to Windows, and the vault it names opens the same session,
+    since the session store normalises the path. Anything still special
+    inside double quotes ($, `, ", \\) is escaped, so a path with one of
+    those in it is not expanded either. A word that needs no quoting is
+    left bare unless `always`: a bare executable path is also one
+    PowerShell runs, where a quoted one is a string expression to it.
+    """
+    if _windows():
+        s = s.replace("\\", "/")
+    if not always and s and all(c in _SHELL_SAFE for c in s):
+        return s
+    for ch in ("\\", '"', "$", "`"):
+        s = s.replace(ch, "\\" + ch)
+    return f'"{s}"'
+
+
 def hook_command(compartment_bin: str | None = None, vault: str | None = None) -> str:
     """The exact shell command the hook runs.
 
     The compartment beside this interpreter, as every MCP registration
     names it: a bare name only works where `compartment` is on the PATH
     Claude Code's shell gets, and the .app install puts it on none."""
-    exe = compartment_bin or clients.executable()
-    if " " in exe:
-        exe = f'"{exe}"'
-    vault_part = f' --vault "{vault}"' if vault else ""
+    exe = _shell_word(compartment_bin or clients.executable())
+    vault_part = f" --vault {_shell_word(vault, always=True)}" if vault else ""
     return f"{exe}{vault_part} hook capture"
 
 
