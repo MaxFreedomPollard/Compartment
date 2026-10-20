@@ -400,6 +400,21 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
            jsonc=True, aliases=("qwen-code",)),
     Client("copilot-cli", "GitHub Copilot CLI",
            lambda: _home_from("COPILOT_HOME", ".copilot") / "mcp-config.json"),
+    # Kiro (IDE and CLI) and the Amazon Q Developer CLI it replaced; Kiro's
+    # directory moves with KIRO_HOME (kirodotdev/KiroCrew, config/paths.py),
+    # Amazon Q's is fixed (crates/chat-cli/src/util/paths.rs).
+    Client("kiro", "Kiro", lambda: _home_from("KIRO_HOME", ".kiro")
+           / "settings" / "mcp.json", aliases=("kiro-cli",)),
+    Client("amazon-q", "Amazon Q Developer CLI",
+           _home(".aws", "amazonq", "mcp.json"), aliases=("amazonq",)),
+    # Junie's user-level file, from JetBrains' own skill for driving it
+    # (JetBrains/junie, hermes-plugin/skills/junie/SKILL.md).
+    Client("junie", "Junie", _home(".junie", "mcp", "mcp.json"),
+           installed=lambda: (Path.home() / ".junie").is_dir()),
+    # Factory's droid; stdio is the default type (docs/cli/configuration/
+    # mcp.mdx in Factory-AI/factory).
+    Client("factory", "Factory Droid", _home(".factory", "mcp.json"),
+           aliases=("droid",)),
     # Oh My Pi reads a project-level .omp/mcp.json as well, but that one is
     # relative to whatever repository you happen to be in, so the user-level
     # file is the only one an integrate command can honestly write.
@@ -416,6 +431,12 @@ CLIENTS: dict[str, Client] = {c.key: c for c in [
     # Zed writes its settings.json with a block of // comments on first
     # run, so it is edited as JSON with comments: comments kept.
     Client("zed", "Zed", _zed_settings, root="context_servers", jsonc=True),
+    # Crush: $CRUSH_GLOBAL_CONFIG/crush.json, else crush/crush.json under
+    # XDG_CONFIG_HOME or ~/.config on every platform, servers under "mcp"
+    # with a required type (internal/config/load.go, config.go).
+    Client("crush", "Crush",
+           lambda: (_env_dir("CRUSH_GLOBAL_CONFIG") or _xdg() / "crush")
+           / "crush.json", root="mcp", entry=_entry_vscode),
     # The legacy "mcp": {name: entry} shape, which every release reads and
     # which current ones merge with the newer "mcp": {"servers": ...}.
     Client("opencode", "OpenCode", _opencode_config,

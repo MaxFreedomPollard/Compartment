@@ -285,3 +285,44 @@ def test_goose_path_root_moves_its_config(home, monkeypatch, tmp_path):
     monkeypatch.setenv("GOOSE_PATH_ROOT", "relative")      # ignored by Goose
     assert clients.CLIENTS["goose"].config_path() == (
         home / ".config" / "goose" / "config.yaml")
+
+
+# ---------------------------------------------------------- newer clients
+
+@pytest.mark.parametrize("key, rel, root, typed", [
+    ("kiro", ".kiro/settings/mcp.json", "mcpServers", False),
+    ("amazon-q", ".aws/amazonq/mcp.json", "mcpServers", False),
+    ("junie", ".junie/mcp/mcp.json", "mcpServers", False),
+    ("factory", ".factory/mcp.json", "mcpServers", False),
+    ("crush", ".config/crush/crush.json", "mcp", True),
+])
+def test_newer_clients_are_known_and_wired(key, rel, root, typed, home):
+    c = clients.CLIENTS[key]
+    p = home.joinpath(*rel.split("/"))
+    assert c.config_path() == p
+    assert c.present() is False
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({root: {"theirs": {"command": "x"}}}),
+                 encoding="utf-8")
+    assert c.present() is True
+    assert clients.register(c, VAULT)["written"] is True
+    servers = json.loads(p.read_text(encoding="utf-8"))[root]
+    assert servers["theirs"] == {"command": "x"}
+    assert servers["compartment"]["args"][:2] == ["--vault", VAULT]
+    assert ("type" in servers["compartment"]) is typed
+
+
+def test_kiro_and_crush_follow_their_variables(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("KIRO_HOME", str(tmp_path / "k"))
+    monkeypatch.setenv("CRUSH_GLOBAL_CONFIG", str(tmp_path / "c"))
+    assert clients.CLIENTS["kiro"].config_path() == (
+        tmp_path / "k" / "settings" / "mcp.json")
+    assert clients.CLIENTS["crush"].config_path() == (
+        tmp_path / "c" / "crush.json")
+
+
+def test_junie_is_present_before_its_first_server(home):
+    (home / ".junie").mkdir()
+    assert clients.CLIENTS["junie"].present() is True
+    assert clients.resolve("droid").key == "factory"
+    assert clients.resolve("amazonq").key == "amazon-q"
