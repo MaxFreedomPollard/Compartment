@@ -120,6 +120,33 @@ def discovery_date(value=None) -> str:
         return s[:40]
 
 
+def clean_text(value):
+    """Text as UTF-8 can carry it: every lone surrogate replaced by U+FFFD,
+    and a surrogate pair that arrived as two code points joined into the
+    character it encodes. Anything that is not a str (None, a number) and a
+    list of strings come back the same shape.
+
+    Python's json decoder turns "\\ud83d" into a lone surrogate without
+    complaint, and lone surrogates are common in what agents send: a
+    JavaScript client that cuts a string to length cuts emoji in half, and
+    Windows hands back unpaired UTF-16 from file names and the clipboard.
+    Such a string cannot be encoded as UTF-8, so the tokenizer refused it
+    ("TextInputSequence must be str") and SQLite would have refused it next:
+    the store or search failed outright, with an error that said nothing
+    about why. One replacement character is a far smaller loss than the
+    memory, and it is what every UTF-8 decoder shows for the same damage."""
+    if isinstance(value, list):
+        return [clean_text(v) for v in value]
+    if not isinstance(value, str):
+        return value
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("utf-16", "surrogatepass").decode("utf-16",
+                                                              "replace")
+
+
 def strip_provenance(text: str) -> str:
     """The claim on its own, without its provenance clause.
 
@@ -911,6 +938,10 @@ class Vault:
               _expiry_strict: bool = True, _gate: bool = True,
               _split_hint: str | None = None) -> dict:
         self._require_open()
+        text, source, discovered, namespace = (
+            clean_text(text), clean_text(source), clean_text(discovered),
+            clean_text(namespace))
+        tags = clean_text(tags)
         ns = namespace or self.config.default_namespace(caller)
         if pack is None:
             self.config.check(caller, ns, write=True)
@@ -1281,6 +1312,10 @@ class Vault:
         An explicit `top_k` still means exactly that many, unchanged, because
         callers that page or benchmark need a fixed window."""
         self._require_open()
+        query, namespace, tags = (clean_text(query), clean_text(namespace),
+                                  clean_text(tags))
+        discovered_since, discovered_until = (clean_text(discovered_since),
+                                              clean_text(discovered_until))
         self._maybe_expire()
         if namespace is not None:
             self.config.grant_for(caller, namespace)  # raises if no access
@@ -1724,6 +1759,9 @@ class Vault:
         host model (or the user), exactly like memory curation. Idempotent:
         re-linking the same triple returns the existing relation."""
         self._require_open()
+        subject, predicate, obj, namespace = (
+            clean_text(subject), clean_text(predicate), clean_text(obj),
+            clean_text(namespace))
         ns = namespace or self.config.default_namespace(caller)
         self.config.check(caller, ns, write=True)
         for label, val in (("subject", subject), ("predicate", predicate),
@@ -1774,6 +1812,9 @@ class Vault:
         subject OR object (case-insensitive); `as_of` keeps relations whose
         validity window covers that instant."""
         self._require_open()
+        entity, subject, predicate, obj, namespace = (
+            clean_text(entity), clean_text(subject), clean_text(predicate),
+            clean_text(obj), clean_text(namespace))
         if namespace is not None:
             self.config.grant_for(caller, namespace)
             allowed = {namespace}
