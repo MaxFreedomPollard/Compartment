@@ -54,10 +54,14 @@ class AclError(CryptoError):
     pass
 
 
-class ConfigError(AclError, ValueError):
-    """The config file exists and cannot be used. A ValueError as well, as
-    the json error it replaces was, so a caller that already catches a bad
-    config that way (the panel's settings switch) still does."""
+class ConfigError(ValueError):
+    """The config file exists and cannot be used.
+
+    A ValueError, as the json error it replaces was, and deliberately not a
+    CryptoError: callers read a CryptoError out of an unlock as "the vault
+    is locked" (the capture hook does, and says so), and a damaged settings
+    file is not that. Every caller that coped with the old error copes with
+    this one; what changes is that it says which file and what to do."""
 
 
 @dataclass

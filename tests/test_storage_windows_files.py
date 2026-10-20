@@ -12,7 +12,7 @@ import json
 import pytest
 
 from compartment import curate
-from compartment.acl import AclError, VaultConfig
+from compartment.acl import AclError, ConfigError, VaultConfig
 from compartment.vault import Vault
 
 from conftest import PASS
@@ -51,13 +51,16 @@ def test_a_config_that_cannot_be_used_is_refused_with_what_to_do(
     names the file and says what moving it aside would grant."""
     with open(VaultConfig.path_for(vault_path), "wb") as f:
         f.write(content)
-    with pytest.raises(AclError) as caught:
+    with pytest.raises(ConfigError) as caught:
         VaultConfig.load(vault_path)
     msg = str(caught.value)
     assert why in msg and VaultConfig.path_for(vault_path) in msg
     assert "move it aside" in msg
     assert isinstance(caught.value, ValueError), \
         "still what a caller catching the old json error catches"
+    from compartment.crypto import CryptoError
+    assert not isinstance(caught.value, CryptoError), \
+        "callers read a CryptoError from an unlock as 'locked'; this is not"
 
 
 def test_an_export_passed_through_powershell_imports(vault):
