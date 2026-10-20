@@ -266,3 +266,58 @@ def test_the_bundle_build_refuses_a_bundle_for_another_release():
     mod = _build_mcpb()
     with pytest.raises(SystemExit, match="not the package's"):
         mod.check("0.0.1")
+
+
+# ---------------------------------------------------- Docker MCP Catalog ----
+def _yaml(rel: str):
+    import pytest
+    yaml = pytest.importorskip("yaml")
+    return yaml.safe_load((ROOT / rel).read_text(encoding="utf-8"))
+
+
+def _dockerfile_entrypoint() -> list[str]:
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    return json.loads(re.search(r"^ENTRYPOINT (\[.*\])$", text, re.M).group(1))
+
+
+def test_the_docker_catalog_entry_builds_from_this_repository():
+    """docker/mcp-registry builds mcp/compartment from the Dockerfile at a
+    pinned commit; the entry is useless if either is wrong."""
+    d = _yaml("packaging/docker-mcp/server.yaml")
+    assert d["name"] == "compartment" and d["type"] == "server"
+    assert d["image"] == "mcp/compartment"
+    assert d["source"]["project"] == "https://github.com/MaxFreedomPollard/Compartment"
+    assert re.fullmatch(r"[0-9a-f]{40}", d["source"]["commit"])
+    assert d["about"]["title"] and d["about"]["icon"].startswith("https://")
+    assert d["meta"]["category"]
+
+
+def test_the_docker_catalog_runs_the_container_offline_on_the_users_vault():
+    """No network at all, enforced by Docker; the user's vault folder mounted
+    where the image's entrypoint looks for it; the passphrase from Docker
+    Desktop's secret store, as the Dockerfile documents."""
+    d = _yaml("packaging/docker-mcp/server.yaml")
+    assert d["run"]["disableNetwork"] is True
+    entry = _dockerfile_entrypoint()
+    vault = entry[entry.index("--vault") + 1]
+    (volume,) = d["run"]["volumes"]
+    param, target = re.fullmatch(r"\{\{compartment\.(\w+)\}\}:(/\S+)", volume).groups()
+    assert pathlib.PurePosixPath(vault).parent == pathlib.PurePosixPath(target)
+    assert param in d["config"]["parameters"]["properties"]
+    assert param in d["config"]["parameters"]["required"]
+    assert [s["env"] for s in d["config"]["secrets"]] == ["COMPARTMENT_PASSPHRASE"]
+    assert all(s["name"].startswith("compartment.") for s in d["config"]["secrets"])
+    assert entry[-1] == "serve"
+    assert not re.search(r"^EXPOSE\b", (ROOT / "Dockerfile").read_text(
+        encoding="utf-8"), re.M)
+
+
+# -------------------------------------------------------------- Continue ----
+def test_the_continue_block_is_a_block_continue_loads():
+    from compartment import clients
+    d = _yaml("packaging/continue/compartment.yaml")
+    assert d["schema"] == "v1" and d["name"] and d["version"]
+    (server,) = d["mcpServers"]
+    assert server["type"] == "stdio" and server["command"] == "compartment"
+    assert server["args"][-1] == "serve"
+    assert _caller(server["args"]) == clients.CLIENTS["continue"].key

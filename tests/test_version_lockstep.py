@@ -110,6 +110,12 @@ def test_the_claude_desktop_bundle_installs_this_release():
     assert re.search(r'"compartment==([^"]+)"', text).group(1) == _version()
 
 
+def test_the_continue_block_carries_this_release():
+    """Continue's hub shows a block's version; it is published from here."""
+    assert _yaml_version(ROOT / "packaging" / "continue" / "compartment.yaml") \
+        == _version()
+
+
 # ----------------------------------------------------------- coverage ------
 #: Every file above, and nothing else, may carry the package's version.
 GATED = {
@@ -123,6 +129,7 @@ GATED = {
     "src/compartment/data/hermes-plugin/plugin.yaml",
     "packaging/mcpb/manifest.json",
     "packaging/mcpb/pyproject.toml",
+    "packaging/continue/compartment.yaml",
 }
 
 #: Files whose version field is their own, not the package's.
