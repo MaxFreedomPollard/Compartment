@@ -221,3 +221,79 @@ def test_elsewhere_an_append_is_an_ordinary_fsync(vault_path, monkeypatch):
     fsyncs = _record_fsyncs(monkeypatch)
     v.store("A memory on Linux or Windows.", caller="t")
     assert len(fsyncs) == 1
+
+
+def _record_save(monkeypatch, name: str = "posix") -> list:
+    """What a save does to the disk, in order: syncs (with what they
+    synced), the rename, and every folder opened."""
+    order = []
+    real_sync, real_open = vaultfile._sync, os.open
+
+    def sync(fd):
+        order.append(("sync", None))
+        return real_sync(fd)
+
+    def replace(src, dst):
+        order.append(("replace", None))
+        return os.replace(src, dst)
+
+    def opener(path, flags, *args):
+        if os.path.isdir(path):
+            order.append(("open folder", path))
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(vaultfile, "_sync", sync)
+    monkeypatch.setattr(vaultfile, "os", _With(os, name=name, replace=replace,
+                                               open=opener))
+    return order
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a folder cannot be opened "
+                    "for syncing on Windows; the test below covers it")
+def test_the_rename_of_a_compaction_is_synced_through_its_folder(
+        vault_path, monkeypatch):
+    """Syncing the file makes its bytes durable, not the name pointing at
+    them. After a power cut the old vault could come back, and every store
+    acknowledged since the compaction - each appended to the NEW file -
+    went with it."""
+    v = Vault.create(vault_path, PASS, creator="t")
+    v.store("A memory that the compaction folds in.", caller="t")
+    order = _record_save(monkeypatch)
+    v.save()
+    kinds = [k for k, _ in order]
+    assert kinds == ["sync", "replace", "open folder", "sync"]
+    assert order[2][1] == os.path.dirname(os.path.abspath(vault_path))
+
+
+def test_on_windows_no_folder_is_opened(vault_path, monkeypatch):
+    """A directory cannot be opened for syncing on Windows, and NTFS
+    journals the rename itself."""
+    v = Vault.create(vault_path, PASS, creator="t")
+    order = _record_save(monkeypatch, name="nt")
+    v.save()
+    assert [k for k, _ in order] == ["sync", "replace"]
+
+
+def test_a_folder_that_cannot_be_synced_does_not_fail_the_save(
+        vault_path, monkeypatch):
+    """Some FUSE and network mounts refuse to sync a directory. The save
+    has already succeeded by then and must say so."""
+    v = Vault.create(vault_path, PASS, creator="t")
+    v.store("A memory on a mount that cannot sync folders.", caller="t")
+    real_sync, real_replace = vaultfile._sync, os.replace
+    renamed = []
+
+    def sync(fd):
+        if renamed:                     # the folder's sync, after the rename
+            raise OSError(errno.EINVAL, "Invalid argument")
+        return real_sync(fd)
+
+    def replace(src, dst):
+        renamed.append(dst)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(vaultfile, "_sync", sync)
+    monkeypatch.setattr(vaultfile, "os", _With(os, replace=replace))
+    v.save()
+    assert Vault.unlock(vault_path, passphrase=PASS).status()[
+        "organic_records"] == 1

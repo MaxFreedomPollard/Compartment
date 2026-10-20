@@ -7,10 +7,10 @@ Layout:
 
 Invariant I2: plaintext never touches disk. The payload and every journal
 entry are sealed before any byte is written. lock/save rewrites the file
-atomically (temp file → fsync → rename). Journal appends are fsync'd, so an
-acknowledged write survives kill -9 and power loss (see _sync for what that
-takes on macOS); a truncated *final* entry is an
-unacknowledged write and is discarded on open with a notice - any other
+atomically (temp file → fsync → rename → fsync of the folder). Journal
+appends are fsync'd, so an acknowledged write survives kill -9 and power
+loss (see _sync for what that takes on macOS); a truncated *final* entry is
+an unacknowledged write and is discarded on open with a notice - any other
 malformed byte is a tamper error.
 """
 from __future__ import annotations
@@ -179,6 +179,34 @@ def _sync(fd: int) -> None:
         except OSError:
             pass
     os.fsync(fd)
+
+
+def _sync_dir(path: str) -> None:
+    """Make the rename that just put `path` in place durable.
+
+    A rename is a change to the FOLDER, and on POSIX it is the folder that
+    has to be synced for it to survive a power cut: syncing the file makes
+    its bytes durable, not the name pointing at them. Lose the rename and
+    the old vault comes back, and with it every store acknowledged since the
+    compaction is gone, because each was appended to the new file. Best
+    effort: some filesystems (certain FUSE and network mounts) refuse to
+    sync a directory, and the save has already succeeded by then.
+
+    Not on Windows, where a directory cannot be opened for this at all and
+    NTFS journals the rename itself."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(os.path.dirname(os.path.abspath(path)),
+                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        _sync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _payload_aad(vault_id: str) -> bytes:
@@ -415,6 +443,7 @@ def write_vault_file(
         except OSError:
             pass
         raise
+    _sync_dir(path)
 
 
 def append_journal_entry(path: str, header: VaultHeader, seq: int, entry: dict, master_key: bytes) -> None:

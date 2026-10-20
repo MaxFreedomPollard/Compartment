@@ -149,7 +149,8 @@ requires the chain to extend the anchor. The anchor is mandatory: its absence
 is reported as tampering, not as an older vault.
 
 Compaction (`save`/`lock`): serialize → seal → write `path.tmp` → fsync →
-atomic rename; journal restarts empty.
+atomic rename → fsync of the containing folder (POSIX), so the rename itself
+survives power loss; journal restarts empty.
 
 ### Manifest (signed vaults)
 
