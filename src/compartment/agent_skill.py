@@ -15,7 +15,7 @@ Claude Code, Hermes and OpenClaw all read the same Agent Skills layout -
 `<agent home>/skills/<name>/SKILL.md`, YAML frontmatter, markdown body - so one
 packaged file serves all three and the only thing that differs is the root:
 
-    claude    ~/.claude/skills/compartmentalize/SKILL.md
+    claude    $CLAUDE_CONFIG_DIR or ~/.claude/skills/compartmentalize/SKILL.md
     hermes    $HERMES_HOME or ~/.hermes/skills/compartmentalize/SKILL.md
     openclaw  $OPENCLAW_HOME or ~/.openclaw/skills/compartmentalize/SKILL.md
 
@@ -36,9 +36,10 @@ SKILL_NAME = "compartmentalize"
 BACKUP_SUFFIX = ".compartment-backup"
 
 #: Every agent known to read the Agent Skills layout, and the environment
-#: variable that relocates its home. Claude Code has no such variable.
+#: variable that relocates its home. Claude Code's is CLAUDE_CONFIG_DIR,
+#: which moves its skills/ with everything else.
 SKILL_TARGETS = {
-    "claude": (None, Path.home() / ".claude"),
+    "claude": ("CLAUDE_CONFIG_DIR", Path.home() / ".claude"),
     "hermes": ("HERMES_HOME", Path.home() / ".hermes"),
     "openclaw": ("OPENCLAW_HOME", Path.home() / ".openclaw"),
 }

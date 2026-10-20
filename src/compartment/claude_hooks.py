@@ -25,7 +25,8 @@ from pathlib import Path
 
 from . import claude_memory, clients
 
-SETTINGS = Path.home() / ".claude" / "settings.json"
+#: Claude Code's user settings, which move with CLAUDE_CONFIG_DIR.
+SETTINGS = claude_memory.claude_config_dir() / "settings.json"
 # Identifies OUR entries. Both tokens, not one literal string: the command
 # carries `--vault ...` between them when a vault is pinned, so a single
 # substring would stop matching and re-installing would duplicate the hook.
@@ -216,12 +217,24 @@ def _file_from_payload(payload: dict) -> str | None:
 
 def is_memory_file(path: str | Path) -> bool:
     """True for Claude Code's own memory notes - and nothing else. The index
-    is a table of contents, so it is skipped like the importer skips it."""
+    is a table of contents, so it is skipped like the importer skips it.
+
+    A memory directory under the CLAUDE_CONFIG_DIR Claude Code was started
+    with counts as well: that directory need not be called .claude, and
+    when it was not, every memory write was passed over."""
     p = Path(path)
     if p.suffix.lower() != ".md" or p.name == claude_memory.INDEX_NAME:
         return False
     parts = [x.lower() for x in p.parts]
-    return "memory" in parts and ".claude" in parts
+    if "memory" not in parts:
+        return False
+    if ".claude" in parts:
+        return True
+    try:
+        return Path(os.path.abspath(p)).is_relative_to(
+            os.path.abspath(claude_memory.claude_config_dir()))
+    except (OSError, ValueError):
+        return False
 
 
 def _earlier_versions(v, tag: str, ns: str, text: str) -> list[str] | None:

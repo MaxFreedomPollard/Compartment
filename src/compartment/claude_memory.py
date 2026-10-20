@@ -27,8 +27,32 @@ import os
 import re
 from pathlib import Path
 
+
+
+def claude_config_dir() -> Path:
+    """Claude Code's own directory: $CLAUDE_CONFIG_DIR when it is set,
+    ~/.claude otherwise.
+
+    Claude Code keeps everything there - settings.json, the per-project
+    memory under projects/, skills/, the user CLAUDE.md - and moves all of
+    it when CLAUDE_CONFIG_DIR is set ("Respect CLAUDE_CONFIG_DIR
+    everywhere", Claude Code 1.0.6), which is how people run a second
+    account or keep it in a dotfiles tree. Compartment only ever looked in
+    ~/.claude, so for them the capture hook went into a settings.json
+    Claude Code never read, the import found no memories, and the skill
+    landed where no session would load it. Like Claude Code's own VS Code
+    extension, only an absolute path counts; an empty or relative value is
+    ignored."""
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if raw:
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            return p
+    return Path.home() / ".claude"
+
+
 # Claude Code's per-project memory lives under <root>/<project-slug>/memory.
-DEFAULT_ROOT = Path.home() / ".claude" / "projects"
+DEFAULT_ROOT = claude_config_dir() / "projects"
 INDEX_NAME = "MEMORY.md"          # a table of contents, not a fact
 
 # Frontmatter `type` -> Compartment importance. Mirrors the vault's own tiers:
@@ -199,4 +223,5 @@ def default_root_exists() -> bool:
 
 
 __all__ = ["DEFAULT_ROOT", "discover", "parse", "import_files", "pending",
-           "default_root_exists", "IMPORTANCE", "file_tag"]
+           "default_root_exists", "IMPORTANCE", "file_tag",
+           "claude_config_dir"]
