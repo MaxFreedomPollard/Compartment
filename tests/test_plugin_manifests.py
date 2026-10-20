@@ -83,3 +83,55 @@ def test_listing_pages_never_state_a_client_count_that_is_wrong():
             continue
         for n in re.findall(r"\b(\d+) (?:MCP )?clients\b", p.read_text(encoding="utf-8")):
             assert int(n) == len(clients.CLIENTS), (rel, n)
+
+
+# ------------------------------------------- Agent Plugins (Hermes, Codex) --
+#: Agent Plugins 1.0.0 is still the published release (1.1.0 is a working
+#: draft that Codex, Hermes and OpenClaw do not accept yet), and both of its
+#: schemas are closed: a host must reject the plugin on any field outside
+#: these, so this is the whole vocabulary.
+AGENT_PLUGIN_FIELDS = {"$schema", "name", "version", "description", "author",
+                       "homepage", "repository", "license", "keywords",
+                       "extensions"}
+AGENT_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+AGENT_MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+
+
+def test_the_agent_plugins_manifest_stays_inside_the_closed_schema():
+    d = _json("plugin.json")
+    assert set(d) <= AGENT_PLUGIN_FIELDS, set(d) - AGENT_PLUGIN_FIELDS
+    assert d["$schema"] == AGENT_PLUGIN_SCHEMA
+    assert re.fullmatch(r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
+                        d["name"]) and len(d["name"]) <= 64
+    assert set(d["author"]) <= {"name", "email", "url"}
+    assert all(isinstance(v, dict) for v in d.get("extensions", {}).values())
+
+
+def test_the_agent_plugins_mcp_json_stays_inside_the_closed_schema():
+    d = _json("mcp.json")
+    assert set(d) == {"$schema", "mcpServers"}
+    assert d["$schema"] == AGENT_MCP_SCHEMA
+    for server in d["mcpServers"].values():
+        assert set(server) <= {"type", "command", "args", "env", "cwd"}
+        assert server["type"] == "stdio"
+        # one executable token, never a path or a shell line: Codex, Hermes
+        # and OpenClaw all refuse anything else for this format
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", server["command"])
+        cwd = server.get("cwd", "./")
+        assert re.match(r"(?:\./|\$\{PLUGIN_ROOT\}(?:/|$)|\$\{PLUGIN_DATA\}(?:/|$))", cwd)
+
+
+def test_codex_gets_a_listing_of_its_own_from_the_agent_plugins_manifest():
+    """Codex installs from .claude-plugin/marketplace.json but loads the root
+    plugin.json first when it declares the Agent Plugins schema, and without
+    a com.openai extension it lists the plugin as "compartment", category
+    Other, with no prompt or logo. The extension is where Codex looks."""
+    ui = _json("plugin.json")["extensions"]["com.openai"]["interface"]
+    for field in ("displayName", "shortDescription", "longDescription",
+                  "developerName", "category", "capabilities", "defaultPrompt"):
+        assert ui[field], field
+    assert 1 <= len(ui["defaultPrompt"]) <= 3
+    assert all(len(p) <= 128 for p in ui["defaultPrompt"])
+    for field in ("websiteURL", "privacyPolicyURL"):
+        assert ui[field].startswith("https://")
+    assert ui["logo"].startswith("./") and (ROOT / ui["logo"]).is_file()
