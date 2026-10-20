@@ -48,6 +48,11 @@ jobs:
           - os: macos-15-intel
             python: "3.13"
     runs-on: ${{ matrix.os }}
+    # The suite takes minutes. A test that hangs (a pipe never closed, a
+    # child never reaped) used to hold a runner for six hours - and on macOS,
+    # where runners are scarce, every other macOS job behind it. pytest's
+    # --timeout below fails the one test with its stack; this caps the rest.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -58,12 +63,12 @@ jobs:
       - name: Test suite with offline guard active
         env:
           COMPARTMENT_ASSERT_OFFLINE: "1"
-        run: python tools/ci_report.py tests/ -q --cov=compartment --cov-report=xml --cov-append
+        run: python tools/ci_report.py tests/ -q --timeout=300 --cov=compartment --cov-report=xml --cov-append
 
       - name: Dashboard tests (loopback socket; offline guard intentionally off)
         # `compartment dash` binds 127.0.0.1 by design and is never run under the
         # offline guard, so its tests run here with the guard off.
-        run: python tools/ci_report.py tests/test_dash.py -q --cov=compartment --cov-report=xml --cov-append
+        run: python tools/ci_report.py tests/test_dash.py -q --timeout=300 --cov=compartment --cov-report=xml --cov-append
 
       - name: Coverage to Codecov
         # Never fail the build on a reporting service: the offline guard and the
@@ -202,7 +207,7 @@ jobs:
       - name: Test suite with offline guard active
         env:
           COMPARTMENT_ASSERT_OFFLINE: "1"
-        run: python tools/ci_report.py tests/ -q --ignore=tests/test_dash.py
+        run: python tools/ci_report.py tests/ -q --timeout=300 --ignore=tests/test_dash.py
 
   linux-panel:
     # Linux has no notification area worth relying on, so it draws the same
