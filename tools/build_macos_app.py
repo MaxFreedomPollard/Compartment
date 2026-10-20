@@ -49,6 +49,7 @@ import os
 import pathlib
 import plistlib
 import shutil
+import struct
 import subprocess
 import sys
 import sysconfig
@@ -59,7 +60,12 @@ _EMBEDDED_VER = [""]              # X.Y of the interpreter actually embedded
 BUILD = ROOT / "build"
 APP_NAME = "Compartment"
 BUNDLE_ID = "io.github.maxfreedompollard.compartment"
-MIN_MACOS = "13.0"                # also LSMinimumSystemVersion, below
+# The oldest macOS the app is built for, and the default of --min-macos. It
+# is LSMinimumSystemVersion, the launcher's -mmacosx-version-min, the .pkg's
+# allowed-os-versions, and - the part that is easy to miss - the platform
+# every wheel in the bundle is chosen for (_install_packages). 13 is also the
+# floor: SMAppService, which registers the login item, is macOS 13 and up.
+MIN_MACOS = "13.0"
 # Shown under the app's name in System Settings > General > Login Items.
 DESCRIPTION = ("Compartment keeps your AI agents' memory encrypted on this Mac. "
                "The menu bar item shows what it has remembered and lets you "
@@ -145,6 +151,189 @@ def _python_version(exe: str) -> str:
         [exe, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
         capture_output=True, text=True, check=True)
     return out.stdout.strip()
+
+
+def _python_arch(exe: str) -> str:
+    """The CPU the embedded interpreter is built for: arm64 or x86_64.
+
+    Asked of that interpreter, not of this one or of the machine. It decides
+    which wheels go into the bundle, which architecture the launcher is
+    compiled for, and which Macs the installer will agree to run on, and all
+    three have to be the interpreter's or the app cannot start."""
+    out = subprocess.run(
+        [exe, "-c", "import platform;print(platform.machine())"],
+        capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def _version_tuple(text: str) -> tuple[int, int]:
+    parts = (str(text).split(".") + ["0"])[:2]
+    return int(parts[0]), int(parts[1])
+
+
+def _install_packages(rt_python: pathlib.Path, spec: str, arch: str,
+                      min_macos: str) -> None:
+    """Install Compartment and its dependencies into the embedded runtime,
+    each as the wheel built for `min_macos` on `arch`.
+
+    pip on its own picks the wheel for the macOS it is running on, and the
+    build machine is the newest macOS there is. From onnxruntime 1.24 on,
+    the macOS wheels are arm64 only and tagged macosx_14_0, and numpy ships
+    a macosx_14_0 build beside its macosx_11_0 one; pip prefers the newer
+    tag whenever the machine allows it. So an app built on a current runner
+    carried libraries that need macOS 14 inside a bundle declaring 13.0:
+    Installer accepted it on macOS 13, and the app could not load its own
+    embedding model there.
+
+    So the wheels are chosen for the declared minimum instead. `pip
+    download --platform` resolves against that platform (and every older
+    one, so universal2 and macosx_11_0 wheels qualify), binary only, into a
+    wheelhouse; the install then takes only from the wheelhouse. On arm64
+    with a minimum of 13.0 that resolves onnxruntime 1.23.2, the last
+    release with a macosx_13_0 build, and on Intel the last with any macOS
+    x86_64 build at all. _verify_deployment_target checks the result.
+    """
+    major, minor = _version_tuple(min_macos)
+    platform_tag = f"macosx_{major}_{minor}_{arch}"
+    with tempfile.TemporaryDirectory(prefix="compartment-wheels-") as td:
+        house = pathlib.Path(td)
+        # Compartment itself, as a wheel, so the binary-only resolve below
+        # can take it: it is pure Python, built from this checkout (or
+        # fetched, for a --spec naming a release).
+        _run(rt_python, "-m", "pip", "wheel", "--quiet", "--no-deps",
+             "--wheel-dir", house, spec)
+        wheels = sorted(house.glob("compartment-*.whl"))
+        if not wheels:
+            raise SystemExit(f"error: building a wheel from {spec} produced "
+                             "no compartment wheel")
+        wanted = [str(wheels[-1]), "pyobjc-framework-Cocoa>=10.0"]
+        got = subprocess.run(
+            [str(rt_python), "-m", "pip", "download", "--quiet",
+             "--only-binary=:all:", "--platform", platform_tag,
+             "--dest", str(house), *wanted],
+            capture_output=True, text=True)
+        if got.returncode != 0:
+            raise SystemExit(
+                f"error: no complete set of wheels for Python "
+                f"{_EMBEDDED_VER[0]} on macOS {min_macos} ({arch})\n"
+                f"{(got.stderr or got.stdout).strip()[-1500:]}\n"
+                "  onnxruntime 1.23.2 is the last release with macOS 13 and "
+                "Intel wheels, and it\n  goes up to Python 3.13: embed 3.12 "
+                "or 3.13 (uv python install 3.12), or, on\n  Apple silicon "
+                "only, build for macOS 14 with --min-macos 14.0")
+        print(f"wheels chosen for {platform_tag}: "
+              + ", ".join(sorted(p.name.split("-")[0] + " "
+                                 + p.name.split("-")[1]
+                                 for p in house.glob("*.whl"))))
+        _run(rt_python, "-m", "pip", "install", "--quiet", "--no-index",
+             "--find-links", house, *wanted)
+
+
+# Mach-O, read directly: what the loader reads, with no tool to install and
+# a check that a test can feed bytes to on any OS.
+_FAT_MAGICS = (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf")
+_THIN_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe")   # 64, 32 bit LE
+_CPU_NAMES = {0x01000007: "x86_64", 0x0100000C: "arm64", 7: "i386",
+              12: "arm"}
+_LC_VERSION_MIN_MACOSX = 0x24
+_LC_BUILD_VERSION = 0x32
+_PLATFORM_MACOS = 1
+
+
+def _macho_thin(f, start: int) -> tuple[str, tuple[int, int] | None] | None:
+    """(architecture, minimum macOS) of the Mach-O image at `start`."""
+    f.seek(start)
+    head = f.read(28)
+    if len(head) < 28 or head[:4] not in _THIN_MAGICS:
+        return None
+    cputype, _sub, _ftype, ncmds, sizeofcmds, _flags = struct.unpack(
+        "<IiIIII", head[4:28])
+    if head[:4] == _THIN_MAGICS[0]:
+        f.read(4)                               # mach_header_64.reserved
+    cmds = f.read(sizeofcmds)
+    minos, pos = None, 0
+    for _ in range(ncmds):
+        if pos + 16 > len(cmds):
+            break
+        cmd, size, a, b = struct.unpack_from("<IIII", cmds, pos)
+        if cmd == _LC_BUILD_VERSION and a == _PLATFORM_MACOS:
+            minos = (b >> 16, (b >> 8) & 0xFF)
+        elif cmd == _LC_VERSION_MIN_MACOSX:
+            minos = (a >> 16, (a >> 8) & 0xFF)
+        if size < 8:
+            break
+        pos += size
+    return _CPU_NAMES.get(cputype, hex(cputype)), minos
+
+
+def _macho_slices(path: pathlib.Path) -> dict[str, tuple[int, int] | None]:
+    """{architecture: minimum macOS} for each slice of a Mach-O file, or {}
+    for anything that is not one. The minimum is None for an image that
+    records none."""
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+            if magic in _THIN_MAGICS:
+                one = _macho_thin(f, 0)
+                return dict([one]) if one else {}
+            if magic not in _FAT_MAGICS:
+                return {}
+            wide = magic == _FAT_MAGICS[1]
+            (count,) = struct.unpack(">I", f.read(4))
+            # A Java class file starts with the same four bytes, followed by
+            # its version, 45 and up. No universal binary has that many
+            # slices.
+            if not 0 < count <= 16:
+                return {}
+            entry = ">IIQQII" if wide else ">IIIII"
+            offsets = [struct.unpack(entry, f.read(struct.calcsize(entry)))[2]
+                       for _ in range(count)]
+            out = {}
+            for off in offsets:
+                one = _macho_thin(f, off)
+                if one is None:
+                    return {}
+                out[one[0]] = one[1]
+            return out
+    except (OSError, struct.error):
+        return {}
+
+
+def _verify_deployment_target(app: pathlib.Path, arch: str,
+                              min_macos: str) -> None:
+    """Every binary in the bundle runs on `arch` under `min_macos`.
+
+    The check that would have caught the macOS 14 onnxruntime in a bundle
+    declaring 13.0, and an arm64-only library in an Intel build. A Mach-O
+    built for a newer macOS than the bundle declares fails to load on the
+    older one with nothing on screen - the menu bar app has no window to
+    report it in - so this is fatal, as the signature check is."""
+    floor = _version_tuple(min_macos)
+    too_new, wrong_arch, count = [], [], 0
+    for p in sorted(app.rglob("*")):
+        if p.is_symlink() or not p.is_file():
+            continue
+        slices = _macho_slices(p)
+        if not slices:
+            continue
+        count += 1
+        rel = p.relative_to(app)
+        if arch not in slices:
+            wrong_arch.append(f"{rel} ({', '.join(sorted(slices))})")
+        elif slices[arch] is not None and slices[arch] > floor:
+            need = slices[arch]
+            too_new.append(f"{rel} needs macOS {need[0]}.{need[1]}")
+    problems = []
+    if wrong_arch:
+        problems.append(f"built without {arch}, so it cannot load in this "
+                        "app:\n  " + "\n  ".join(wrong_arch[:20]))
+    if too_new:
+        problems.append(f"built for a newer macOS than the {min_macos} the "
+                        "app declares:\n  " + "\n  ".join(too_new[:20]))
+    if problems:
+        raise SystemExit("error: " + "\nerror: ".join(problems))
+    print(f"{count} binaries, every one {arch} and none needing more than "
+          f"macOS {min_macos}")
 
 
 def _strip(lib: pathlib.Path) -> None:
@@ -284,12 +473,21 @@ def _verify_self_contained(app: pathlib.Path) -> None:
 
 
 def build_app(spec: str | None = None, out: pathlib.Path | None = None,
-              python: str | None = None) -> pathlib.Path:
+              python: str | None = None,
+              min_macos: str = MIN_MACOS) -> pathlib.Path:
     """spec: what to pip-install (default: this checkout, so the build always
     matches the source it came from)."""
     version = _version()
+    if _version_tuple(min_macos) < (13, 0):
+        raise SystemExit("error: --min-macos cannot go below 13.0: the login "
+                         "item is registered with SMAppService, which is "
+                         "macOS 13 and up")
     base_python = python or find_standalone_python()
-    print(f"embedding {base_python}")
+    arch = _python_arch(base_python)
+    if arch not in ("arm64", "x86_64"):
+        raise SystemExit(f"error: {base_python} is built for {arch!r}; the "
+                         "app is built for arm64 or x86_64")
+    print(f"embedding {base_python} ({arch}), for macOS {min_macos} and up")
     app = (out or BUILD / f"{APP_NAME}.app")
     if app.exists():
         shutil.rmtree(app)
@@ -322,9 +520,10 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     # bundle, and installing into it is the entire point.
     (runtime / "lib" / f"python{ver}" / "EXTERNALLY-MANAGED").unlink(
         missing_ok=True)
-    _run(rt_python, "-m", "pip", "install", "--quiet", spec or str(ROOT))
-    _run(rt_python, "-m", "pip", "install", "--quiet",
-         "pyobjc-framework-Cocoa>=10.0")
+    if subprocess.run([str(rt_python), "-m", "pip", "--version"],
+                      capture_output=True).returncode != 0:
+        _run(rt_python, "-m", "ensurepip", "--default-pip")  # a pip-less build
+    _install_packages(rt_python, spec or str(ROOT), arch, min_macos)
 
     _strip(runtime / "lib")
 
@@ -353,7 +552,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     #    an image and a window - but the menu bar never gives it a slot, and
     #    the icon simply never appears. See tools/launcher.c.
     launcher = macos / APP_NAME
-    _run("cc", "-O2", f"-mmacosx-version-min={MIN_MACOS}",
+    _run("cc", "-O2", "-arch", arch, f"-mmacosx-version-min={min_macos}",
          "-o", str(launcher), str(pathlib.Path(__file__).with_name("launcher.c")),
          f"-I{runtime / 'include' / f'python{ver}'}",
          f"-L{runtime / 'lib'}", f"-lpython{ver}",
@@ -375,7 +574,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
         "CFBundleVersion": version,
         "CFBundleInfoDictionaryVersion": "6.0",
         "LSUIElement": True,               # menu bar only, no dock icon
-        "LSMinimumSystemVersion": MIN_MACOS,
+        "LSMinimumSystemVersion": min_macos,
         "NSHumanReadableCopyright": "https://github.com/"
                                     "MaxFreedomPollard/Compartment",
         "NSHumanReadableDescription": DESCRIPTION,
@@ -391,6 +590,7 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     # Checked BEFORE signing: running the interpreter is what writes bytecode
     # into the bundle, and doing that afterwards is what broke the seal.
     _verify_self_contained(app)
+    _verify_deployment_target(app, arch, min_macos)
 
     _run("codesign", "--force", "--deep", "--sign", "-",
          "--identifier", BUNDLE_ID, app)
@@ -464,9 +664,19 @@ def _login_plist(app: pathlib.Path) -> dict:
     }
 
 
+def _app_min_macos(app: pathlib.Path) -> str:
+    """The minimum macOS the built app declares. The installers take it from
+    the app rather than from a constant of their own, so a .pkg can never
+    accept a macOS the app inside it was not built for."""
+    with open(app / "Contents" / "Info.plist", "rb") as fh:
+        return str(plistlib.load(fh).get("LSMinimumSystemVersion")
+                   or MIN_MACOS)
+
+
 def build_pkg(app: pathlib.Path) -> pathlib.Path:
     """A .pkg whose second, optional component starts it at login."""
     version = _version()
+    min_macos = _app_min_macos(app)
     staging = BUILD / "pkgroot"
     login_root = BUILD / "pkgroot-login"
     for d in (staging, login_root):
@@ -540,7 +750,7 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
 <installer-gui-script minSpecVersion="2">
   <title>Compartment</title>
   <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>
-  <volume-check><allowed-os-versions><os-version min="13.0"/></allowed-os-versions></volume-check>
+  <volume-check><allowed-os-versions><os-version min="{min_macos}"/></allowed-os-versions></volume-check>
   <choices-outline>
     <line choice="core"/>
     <line choice="login"/>
@@ -611,11 +821,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", help="what to pip install (default: this repo)")
     ap.add_argument("--python", help="standalone interpreter to embed")
+    ap.add_argument("--min-macos", default=MIN_MACOS,
+                    help=f"oldest macOS the app runs on (default {MIN_MACOS}); "
+                         "every wheel is chosen for it")
     ap.add_argument("--dmg", action="store_true")
     ap.add_argument("--pkg", action="store_true")
     args = ap.parse_args()
     BUILD.mkdir(exist_ok=True)
-    app = build_app(args.spec, python=args.python)
+    app = build_app(args.spec, python=args.python, min_macos=args.min_macos)
     if args.dmg:
         build_dmg(app)
     if args.pkg:
