@@ -6,6 +6,7 @@ exactly what an in-process encoder would, that it starts itself and goes
 away on its own, and that a vault never notices when it is missing.
 """
 import contextlib
+import errno
 import json
 import os
 import shutil
@@ -31,6 +32,45 @@ from conftest import PASS
 
 pytestmark = pytest.mark.skipif(not embed_daemon.supported(),
                                 reason="the daemon needs Unix domain sockets")
+
+
+def _bind_refused_here() -> str | None:
+    """Why this machine refuses this process a listening AF_UNIX socket, or
+    None. An agent's sandbox does (macOS Seatbelt as Claude Code and Codex
+    apply it to their shell commands refuses bind() with EPERM), and a test
+    that needs a real daemon cannot run there; what such a sandbox gets
+    instead, a model of its own at once, is tested below on every machine
+    by refusing bind() in-process."""
+    if not embed_daemon.supported():
+        return None
+    d = tempfile.mkdtemp(prefix="cmpt-")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.bind(os.path.join(d, "probe"))
+    except PermissionError as exc:
+        return str(exc)
+    except OSError:
+        return None
+    finally:
+        s.close()
+        shutil.rmtree(d, ignore_errors=True)
+    return None
+
+
+_BIND_REFUSED = _bind_refused_here()
+
+needs_bind = pytest.mark.skipif(
+    _BIND_REFUSED is not None,
+    reason=f"this machine refuses AF_UNIX bind() ({_BIND_REFUSED}), as an "
+           "agent's sandbox does, so no daemon can run here; the fallback "
+           "such a sandbox gets is tested by test_a_sandbox_*")
+
+
+@pytest.fixture(autouse=True)
+def no_refusal_carried_over(monkeypatch):
+    """embed_daemon remembers a refusal for the life of the process; each
+    test starts as a fresh process would."""
+    monkeypatch.setattr(embed_daemon, "_refused", None)
 
 
 @pytest.fixture()
@@ -64,6 +104,7 @@ def _wait_until(pred, timeout=15.0):
 
 
 # ------------------------------------------------------------- same vectors --
+@needs_bind
 def test_the_daemon_answers_with_the_in_process_vectors(daemon_env, local):
     r = RemoteEmbedder.connect()
     assert r is not None and r.shared and r.daemon_pid
@@ -81,6 +122,7 @@ def test_the_daemon_answers_with_the_in_process_vectors(daemon_env, local):
 
 
 # ------------------------------------------------------------ one of them --
+@needs_bind
 def test_several_clients_share_one_daemon(daemon_env):
     clients = [RemoteEmbedder.connect() for _ in range(4)]
     assert all(c is not None for c in clients)
@@ -92,6 +134,7 @@ def test_several_clients_share_one_daemon(daemon_env):
     assert _wait_until(lambda: embed_daemon.status(daemon_env).get("clients") == 0)
 
 
+@needs_bind
 def test_clients_arriving_together_start_exactly_one_daemon(daemon_env):
     """Six MCP servers start within the same second when a client comes up;
     the spawn lock makes one of them start the daemon and the rest wait."""
@@ -110,6 +153,7 @@ def test_clients_arriving_together_start_exactly_one_daemon(daemon_env):
     assert all(r.embed_query("x").shape == (r.dim,) for r in results)
 
 
+@needs_bind
 def test_the_daemon_starts_fast_and_loads_the_model_on_demand(daemon_env):
     t0 = time.monotonic()
     r = RemoteEmbedder.connect()
@@ -123,6 +167,7 @@ def test_the_daemon_starts_fast_and_loads_the_model_on_demand(daemon_env):
 
 
 # ------------------------------------------------------------- lifecycle --
+@needs_bind
 def test_the_daemon_exits_when_nobody_is_connected(daemon_env):
     r = RemoteEmbedder.connect()
     assert r is not None
@@ -131,6 +176,7 @@ def test_the_daemon_exits_when_nobody_is_connected(daemon_env):
     assert _wait_until(lambda: not daemon_env.exists(), 5)
 
 
+@needs_bind
 def test_a_client_arriving_as_an_idle_daemon_exits_starts_the_next_one(
         daemon_env, monkeypatch):
     """An idle daemon takes its socket file away first, so that a client
@@ -151,6 +197,7 @@ def test_a_client_arriving_as_an_idle_daemon_exits_starts_the_next_one(
     assert late is not None and late.shared and late.daemon_pid != pid
 
 
+@needs_bind
 def test_a_client_survives_the_daemon_being_killed(daemon_env):
     r = RemoteEmbedder.connect()
     first = r.daemon_pid
@@ -172,6 +219,7 @@ def _returns_within(seconds, fn):
     return out[0]
 
 
+@needs_bind
 def test_a_daemon_that_stops_answering_does_not_hang_its_clients(
         daemon_env, monkeypatch, local):
     """A daemon that is alive but not serving (suspended with Ctrl-Z, stuck
@@ -196,6 +244,7 @@ def test_a_daemon_that_stops_answering_does_not_hang_its_clients(
     assert isinstance(fresh, Embedder)
 
 
+@needs_bind
 def test_a_text_the_model_rejects_is_an_error_not_a_lost_daemon(daemon_env):
     """A text the tokenizer cannot encode, such as one with a lone surrogate
     from a cut emoji, comes back from the daemon as an error reply. The
@@ -213,6 +262,7 @@ def test_a_text_the_model_rejects_is_an_error_not_a_lost_daemon(daemon_env):
     assert r.shared
 
 
+@needs_bind
 def test_a_long_list_of_passages_is_embedded_once_through_the_daemon(
         monkeypatch):
     """A reply carries 2 KB a text, so from 32,768 texts on it was longer
@@ -258,6 +308,7 @@ def test_a_long_list_of_passages_is_embedded_once_through_the_daemon(
         shutil.rmtree(d, ignore_errors=True)
 
 
+@needs_bind
 def test_a_dead_socket_file_is_replaced(daemon_env):
     daemon_env.parent.mkdir(parents=True, exist_ok=True)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -268,6 +319,7 @@ def test_a_dead_socket_file_is_replaced(daemon_env):
     assert r is not None and r.embed_query("x").shape == (r.dim,)
 
 
+@needs_bind
 def test_stop_ends_it_and_status_says_so(daemon_env):
     r = RemoteEmbedder.connect()
     pid = r.daemon_pid
@@ -278,6 +330,7 @@ def test_stop_ends_it_and_status_says_so(daemon_env):
     assert r.embed_query("after stop").shape == (r.dim,)   # starts a new one
 
 
+@needs_bind
 def test_status_and_stop_from_the_command_line(daemon_env, capsys):
     r = RemoteEmbedder.connect()
     assert r is not None
@@ -292,6 +345,7 @@ def test_status_and_stop_from_the_command_line(daemon_env, capsys):
 
 
 # ------------------------------------------------------------ versions --
+@needs_bind
 def test_an_older_client_leaves_a_newer_daemon_alone(daemon_env, monkeypatch):
     keep = RemoteEmbedder.connect()                 # the "newer" daemon
     pid = keep.daemon_pid
@@ -300,6 +354,7 @@ def test_an_older_client_leaves_a_newer_daemon_alone(daemon_env, monkeypatch):
     assert embed_daemon.status(daemon_env)["pid"] == pid
 
 
+@needs_bind
 def test_a_newer_client_replaces_an_older_daemon(daemon_env, monkeypatch):
     old = RemoteEmbedder.connect()
     pid = old.daemon_pid
@@ -340,6 +395,7 @@ sys.exit(embed_daemon.main(sys.argv[1:]))
 """
 
 
+@needs_bind
 def test_a_newer_client_takes_over_from_an_older_daemon_at_once(daemon_env):
     """Every upgrade meets the daemon the older install left running. The
     newer client told it to go and started its own as soon as its socket
@@ -389,6 +445,7 @@ def _hello(path):
         s.close()
 
 
+@needs_bind
 def test_the_daemon_a_guarded_process_starts_is_guarded(daemon_env,
                                                         guarded_by_the_flag):
     """The flag guarded the server and the CLI, and the daemon they started,
@@ -432,6 +489,7 @@ def _a_daemon_answering(path, hello):
         srv.close()
 
 
+@needs_bind
 def test_a_guarded_client_keeps_its_own_model_beside_an_unguarded_daemon(
         daemon_env, guarded_by_the_flag):
     """The daemon is shared, so a guarded server could send its texts to a
@@ -464,6 +522,7 @@ def test_disabled_means_a_local_encoder(monkeypatch):
     assert isinstance(get_embedder(), Embedder)
 
 
+@needs_bind
 def test_enabled_means_the_shared_one(daemon_env):
     e = get_embedder()
     assert isinstance(e, RemoteEmbedder) and e.shared
@@ -508,6 +567,7 @@ def test_the_peer_credential_is_this_user():
 
 
 # ------------------------------------------------------------- the vault --
+@needs_bind
 def test_a_vault_searches_identically_through_the_daemon(daemon_env, tmp_path, monkeypatch):
     vp = str(tmp_path / "shared.vault")
     v = Vault.create(vp, PASS, creator="test")
@@ -575,3 +635,104 @@ def test_a_home_that_cannot_hold_the_socket_embeds_with_its_own_model(
     # A model that is not installed is still the error that names the remedy.
     with pytest.raises(ModelError, match="download-model"):
         get_embedder("multilingual-e5-small-int8")
+
+
+# ------------------------------------------------------- inside a sandbox --
+class _RefusingSocket(socket.socket):
+    """A socket the way an agent's sandbox hands them out: it can be made,
+    but bind() and connect() on a path are refused with EPERM."""
+
+    def bind(self, address):
+        if self.family == socket.AF_UNIX:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        return super().bind(address)
+
+    def connect(self, address):
+        if self.family == socket.AF_UNIX:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        return super().connect(address)
+
+
+@pytest.fixture()
+def sandboxed(monkeypatch):
+    """Unix domain sockets refused as a sandbox refuses them, the daemon
+    switched on, and every attempt to start one recorded."""
+    d = tempfile.mkdtemp(prefix="cmpt-")
+    monkeypatch.setenv("COMPARTMENT_EMBED_DAEMON", "1")
+    monkeypatch.setenv("COMPARTMENT_EMBED_SOCKET", str(Path(d) / "embed.sock"))
+    monkeypatch.setattr(socket, "socket", _RefusingSocket)
+    spawned = []
+
+    def spawn(path, idle):
+        spawned.append(path)
+        raise AssertionError("started a daemon that could never listen")
+    monkeypatch.setattr(embed_daemon, "_spawn", spawn)
+    yield Path(d), spawned
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_sandbox_that_refuses_binding_gets_a_local_model_at_once(sandboxed):
+    """Claude Code and Codex run an agent's shell commands under a sandbox
+    that refuses bind() on a Unix domain socket. Every `compartment search`
+    an agent ran there started a daemon, waited for it to import numpy and
+    onnxruntime and fail, and only then used a model of its own: a wasted
+    process and a quarter of a second or more per command, and again at
+    every reconnect in a server."""
+    d, spawned = sandboxed
+    for _ in range(3):
+        t0 = time.monotonic()
+        assert isinstance(get_embedder(), Embedder)
+        assert time.monotonic() - t0 < 5
+    assert spawned == []
+    assert "bind" in embed_daemon._refused
+    assert not any(p.name.endswith(".p") for p in d.iterdir())
+    st = embed_daemon.status()
+    assert st["running"] is False and "sandbox" in st["reason"]
+
+
+def test_a_sandbox_that_refuses_connecting_starts_no_daemon(sandboxed,
+                                                           monkeypatch):
+    """A daemon an unsandboxed server started is listening, and the sandbox
+    refuses this process the connection: starting a second daemon for the
+    same socket cannot help, and used to be tried on every call."""
+    d, spawned = sandboxed
+    monkeypatch.setattr(embed_daemon, "_owned_socket", lambda p: True)
+    assert RemoteEmbedder.connect() is None
+    assert spawned == []
+    assert "connect" in embed_daemon._refused
+    assert isinstance(get_embedder(), Embedder)
+    assert spawned == []
+
+
+def test_a_sandbox_that_refuses_starting_processes_is_asked_once(monkeypatch):
+    """Some sandboxes refuse to start a process at all; every vault opened
+    asked again."""
+    d = tempfile.mkdtemp(prefix="cmpt-")
+    monkeypatch.setenv("COMPARTMENT_EMBED_DAEMON", "1")
+    monkeypatch.setenv("COMPARTMENT_EMBED_SOCKET", str(Path(d) / "embed.sock"))
+    monkeypatch.setattr(embed_daemon, "_bind_refused", lambda path: False)
+    tries = []
+
+    def popen(*a, **k):
+        tries.append(a)
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+    monkeypatch.setattr(embed_daemon.subprocess, "Popen", popen)
+    try:
+        for _ in range(3):
+            assert isinstance(get_embedder(), Embedder)
+        assert len(tries) == 1
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_daemon_run_where_it_cannot_listen_says_why(sandboxed, monkeypatch,
+                                                      capsys):
+    """`compartment embed-daemon run` in a sandbox exited 1 and said
+    nothing."""
+    d, _ = sandboxed
+    with pytest.raises(SystemExit) as e:
+        cli.main(["embed-daemon", "run", "--socket", str(d / "embed.sock"),
+                  "--idle", "1"])
+    assert e.value.code == 1
+    err = capsys.readouterr().err
+    assert "cannot listen" in err and os.strerror(errno.EPERM) in err

@@ -31,6 +31,9 @@ AF_UNIX, so the offline guard is exactly as strict as it was.
 
 Windows has no AF_UNIX in Python, so there every process keeps its own model
 as it always did; `enabled()` says no and `get_embedder` never comes here.
+Neither does a process the operating system refuses Unix domain sockets, as
+an agent's sandbox does: after the first refusal it keeps its own model too,
+without starting a daemon that could never listen (see `_refused`).
 """
 from __future__ import annotations
 
@@ -113,6 +116,31 @@ _TIMEOUT_PER_TEXT = 1.0
 
 class Unavailable(RuntimeError):
     """The shared daemon cannot be used; the caller embeds locally."""
+
+
+#: Why the operating system will not let this process use a Unix domain
+#: socket at all, once it has said so; None until then.
+#:
+#: An agent's own shell is often sandboxed: on macOS, Claude Code and Codex
+#: run their shell commands under a Seatbelt profile that refuses bind() on
+#: an AF_UNIX path with EPERM, and other sandboxes refuse connect() or
+#: starting a process as well. There, every `compartment search` and `store` an agent ran started a
+#: daemon that could only fail to bind and exit, and waited for it to do so:
+#: a fresh interpreter, numpy and onnxruntime imported, a quarter of a
+#: second or more, at every command, and again at every reconnect in a
+#: server, before the in-process model it was always going to use. A
+#: sandbox does not lift while a process runs, so the answer is kept for
+#: the life of the process: the first refusal costs one failed system call,
+#: and every later embedder goes straight to its own model.
+_refused: str | None = None
+
+
+def _note_refused(what: str, exc: OSError) -> None:
+    global _refused
+    if _refused is None:
+        _refused = (f"this process may not {what} ({exc.strerror or exc}),"
+                    " as inside an agent's sandbox: it embeds with a model "
+                    "of its own")
 
 
 # --------------------------------------------------------------- where and if
@@ -272,7 +300,14 @@ class _Daemon:
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             srv.bind(str(self.path))
-        except OSError:
+        except OSError as exc:
+            # Said for `compartment embed-daemon run`; a daemon a client
+            # started has no stderr, and the client goes on without it.
+            print(f"compartment: the embedding daemon cannot listen at "
+                  f"{self.path}: {exc.strerror or exc}", file=sys.stderr)
+            srv.close()
+            fd, self._lock_fd = self._lock_fd, None
+            os.close(fd)                # releases the flock
             return 1
         os.chmod(self.path, 0o600)
         self._inode = os.stat(self.path).st_ino
@@ -521,10 +556,23 @@ def run(path: Path | None = None, idle: int | None = None) -> int:
 def _connect(path: Path, timeout: float = 5.0) -> socket.socket | None:
     if not _owned_socket(path):
         return None
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except PermissionError as exc:
+        _note_refused("create a Unix domain socket", exc)
+        return None
+    except OSError:
+        return None
     s.settimeout(timeout)
     try:
         s.connect(str(path))
+    except PermissionError as exc:
+        # The socket is this user's own (checked above) in this user's own
+        # directory, so a refusal is not its permissions: it is a sandbox
+        # that will not let this process reach any socket file.
+        s.close()
+        _note_refused("connect to a Unix domain socket", exc)
+        return None
     except OSError:
         s.close()
         return None
@@ -533,6 +581,46 @@ def _connect(path: Path, timeout: float = 5.0) -> socket.socket | None:
     # waits for it forever. RemoteEmbedder sets its own limits on the hello
     # and on each request.
     return s
+
+
+def _bind_refused(path: Path) -> bool:
+    """Whether the operating system refuses this process a listening Unix
+    domain socket beside `path`, which is what the daemon it would start
+    needs: the daemon inherits whatever sandbox this process is in.
+
+    Asked with one bind() on a name of its own, which is removed again,
+    instead of with a daemon: a refusal is EPERM or EACCES at once, while a
+    daemon has to be started, import numpy and onnxruntime, and exit before
+    anyone learns the same thing. Any other error (a path too long, a name
+    in use) is left for the daemon to meet, as before."""
+    if _refused is not None:
+        return True
+    probe = str(path) + ".p"
+    try:
+        os.unlink(probe)                # one a killed probe left behind
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except PermissionError as exc:
+        _note_refused("create a Unix domain socket", exc)
+        return True
+    except OSError:
+        return False
+    try:
+        s.bind(probe)
+    except PermissionError as exc:
+        _note_refused("bind a Unix domain socket", exc)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+    return False
 
 
 def _spawn(path: Path, idle: int) -> subprocess.Popen:
@@ -570,9 +658,14 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
     daemon, the others wait on the lock and connect to it. Whoever spawned
     it polls until the socket accepts, which is a few hundred milliseconds
     - the daemon binds first and loads the model on the first request.
+
+    Where the operating system refuses this process Unix domain sockets
+    (see `_refused`), nothing is started and None comes back at once.
     """
+    if _refused is not None:
+        return None
     s = _connect(path)
-    if s is not None or not spawn:
+    if s is not None or not spawn or _refused is not None:
         return s
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path) + ".spawn", os.O_RDWR | os.O_CREAT, 0o600)
@@ -587,10 +680,17 @@ def connect_or_spawn(path: Path, idle: int, *, spawn: bool = True,
                     return None
                 time.sleep(0.05)
         s = _connect(path)
-        if s is not None:
+        if s is not None or _refused is not None:
             return s
+        if _bind_refused(path):
+            return None
         try:
             child = _spawn(path, idle)
+        except PermissionError as exc:
+            # A sandbox that forbids starting processes forbids it every
+            # time: one try per process, not one per vault opened.
+            _note_refused("start the embedding daemon", exc)
+            return None
         except OSError:
             return None
         while time.monotonic() < deadline:
@@ -826,14 +926,25 @@ class RemoteEmbedder:
 # ------------------------------------------------------- status, stop, main
 
 def status(path: Path | None = None) -> dict:
-    """What the daemon at `path` reports, or that nothing is running."""
-    path = path or socket_path()
+    """What the daemon at `path` reports, or that nothing is running, and
+    when nothing can run for this process, why."""
     if not supported():
-        return {"running": False, "socket": str(path),
-                "reason": "not supported on this platform"}
+        # Before socket_path(): its fallback names the file after the uid,
+        # which Windows does not have.
+        return {"running": False, "socket": None,
+                "reason": "not supported on this platform: every process "
+                          "embeds with a model of its own"}
+    try:
+        path = path or socket_path()
+    except OSError as exc:
+        return {"running": False, "socket": None,
+                "reason": f"no session directory to hold its socket ({exc})"}
     s = _connect(path, timeout=2.0)
     if s is None:
-        return {"running": False, "socket": str(path)}
+        out = {"running": False, "socket": str(path)}
+        if _bind_refused(path):
+            out["reason"] = _refused
+        return out
     try:
         w, r = s.makefile("wb"), s.makefile("rb")
         _write(w, {"op": "status"})
@@ -853,9 +964,12 @@ def stop(path: Path | None = None, wait: float = 5.0) -> dict:
     gets SIGTERM. Stale files a crashed daemon left are removed so the next
     client starts cleanly.
     """
-    path = path or socket_path()
     if not supported():
-        return {"stopped": False, "socket": str(path)}
+        return {"stopped": False, "socket": None}
+    try:
+        path = path or socket_path()
+    except OSError:
+        return {"stopped": False, "socket": None}
     pid = None
     s = _connect(path, timeout=2.0)
     if s is not None:
