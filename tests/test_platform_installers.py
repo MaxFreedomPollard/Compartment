@@ -203,7 +203,11 @@ def installer(tmp_path):
              "STUB_COMPARTMENT": str(comp),
              "STUB_USER_BIN": str(home / ".local" / "bin"),
              "STUB_VENV_BIN": str(root / "active-venv" / "bin"),
-             "STUB_TOOL_BIN": str(home / ".local" / "bin")}
+             "STUB_TOOL_BIN": str(home / ".local" / "bin"),
+             # The macOS script also tries Homebrew's and python.org's
+             # absolute paths; on a real Mac those are this machine's own
+             # interpreters, which a test must never install into.
+             "CMPT_EXTRA_PYTHONS": ""}
         e.update(env or {})
         master = slave = None
         if stdin_script:
@@ -506,3 +510,14 @@ def test_the_windows_installer_picks_a_python_inside_the_wheel_matrix(
     assert (code == 0) is usable, out
     if not usable:
         assert out
+
+
+@needs_bash
+def test_the_macos_script_tries_the_well_known_paths_unless_told_otherwise():
+    """The absolute interpreter paths are on by default for users and
+    replaceable, so the suite's stand-in Mac never reaches a real one: on a
+    GitHub macOS runner it found the real Python 3.13, ran a real install
+    and then waited for a passphrase until the job timed out."""
+    script = MACOS.read_text(encoding="utf-8")
+    assert "${CMPT_EXTRA_PYTHONS-/opt/homebrew/bin/python3.13" in script
+    assert "$EXTRA_PYTHONS" in script

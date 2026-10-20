@@ -72,15 +72,17 @@ PY=""
 NEWEST=""
 PYARCH=""
 TOO_OLD=""
+# Where Homebrew and the python.org installer put interpreters that are not
+# on PATH. CMPT_EXTRA_PYTHONS replaces the list when it is set, even to
+# nothing: the test suite sets it empty, so the stand-in machine it builds
+# can never reach the real interpreters of the Mac running the tests (which
+# then installed into one of them and sat waiting for a passphrase).
+EXTRA_PYTHONS="${CMPT_EXTRA_PYTHONS-/opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.11 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3}"
 if [ -n "${PYTHON:-}" ]; then
   set -- "$PYTHON"
 else
-  set -- python3 python3.13 python3.12 python3.11 python3.14 \
-    /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 \
-    /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
-    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
-    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-    /Library/Frameworks/Python.framework/Versions/3.11/bin/python3
+  # shellcheck disable=SC2086  # one word per path, none has a space
+  set -- python3 python3.13 python3.12 python3.11 python3.14 $EXTRA_PYTHONS
 fi
 for cand in "$@"; do
   usable_name "$cand" || continue
