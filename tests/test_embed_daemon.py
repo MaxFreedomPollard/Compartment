@@ -792,3 +792,31 @@ def test_a_link_left_at_the_lock_files_name_is_not_written_through(
     assert RemoteEmbedder.connect(path=sock, wait=0.5) is None
     assert embed_daemon._locked_pid(sock) is None
     assert profile.read_text() == "export PATH=/opt/bin:$PATH\n"
+
+
+def test_a_module_in_the_home_directory_does_not_replace_the_daemons_own(
+        tmp_path, monkeypatch):
+    """The daemon starts in the home directory with `python -m`, which puts
+    that directory first on sys.path: a tempfile.py, random.py, json.py or
+    compartment.py kept there was imported instead of the real module, the
+    daemon died at start, and every agent loaded a model of its own. The
+    command the client builds is run here with --help, from such a home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "tempfile.py").write_text(
+        "raise SystemExit('the home directory shadowed tempfile')\n")
+    built = {}
+    real_popen = subprocess.Popen
+
+    def popen(cmd, **kwargs):
+        built.update(cmd=cmd, **kwargs)
+        raise OSError("not started in this test")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with pytest.raises(OSError):
+        embed_daemon._spawn(tmp_path / "embed.sock", 1)
+    monkeypatch.setattr(subprocess, "Popen", real_popen)
+    assert built["cwd"] == str(tmp_path)
+    cmd = built["cmd"][:built["cmd"].index("--socket")] + ["--help"]
+    out = subprocess.run(cmd, cwd=built["cwd"], env=built["env"],
+                         capture_output=True, text=True, timeout=120)
+    assert "shadowed" not in out.stdout + out.stderr
+    assert out.returncode == 0 and "--socket" in out.stdout

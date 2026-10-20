@@ -669,7 +669,11 @@ def _spawn(path: Path, idle: int) -> subprocess.Popen:
     client's process-group cleanup nor a closing terminal takes it down,
     and no inherited stdio, because stdout of an MCP server IS the
     transport."""
-    cmd = [sys.executable, "-m", "compartment.embed_daemon",
+    # -P: `-m` puts the working directory first on sys.path, and that is the
+    # home directory, so a random.py, json.py or compartment.py anyone keeps
+    # there was imported in place of the real one and the daemon died at
+    # start, every time, leaving every agent to load a model of its own.
+    cmd = [sys.executable, "-P", "-m", "compartment.embed_daemon",
            "--socket", str(path), "--idle", str(idle)]
     # The daemon must run the same code as the client that starts it, so it
     # imports the package from wherever this module was imported from - a
