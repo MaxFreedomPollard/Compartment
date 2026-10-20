@@ -130,6 +130,7 @@ GATED = {
     "packaging/mcpb/manifest.json",
     "packaging/mcpb/pyproject.toml",
     "packaging/continue/compartment.yaml",
+    "integrations/hermes/upstream/plugin.yaml",
 }
 
 #: Files whose version field is their own, not the package's.
@@ -146,12 +147,7 @@ OWN_VERSION = {
 
 #: Known drift in a file this test does not own the fix for. Strict, so the
 #: day it is fixed the marker has to go and the file joins GATED.
-KNOWN_STALE = {
-    # The plugin.yaml prepared for a PR to hermes-agent still says 1.7.0 and
-    # compartment>=2.3. It is not shipped by anything in this repository,
-    # which is why nothing caught it.
-    "integrations/hermes/upstream/plugin.yaml",
-}
+KNOWN_STALE: set[str] = set()
 
 _SKIP_DIRS = {".git", "tests", "models", "build", "dist", ".venv", "venv",
               "node_modules", "__pycache__"}
@@ -225,3 +221,14 @@ def test_the_shipped_plugin_is_the_one_in_integrations():
     something no one has read."""
     a, b = (p.read_text(encoding="utf-8") for p in PLUGIN_YAMLS)
     assert a == b
+
+
+def test_the_upstream_hermes_plugin_yaml_matches_the_package():
+    """The copy prepared for a PR to hermes-agent sat at 1.7.0 and
+    compartment>=2.3 while the package shipped 4.12.0, because nothing read
+    it. It names this release and the same engine floor as the shipped one."""
+    up = ROOT / "integrations" / "hermes" / "upstream" / "plugin.yaml"
+    assert _yaml_version(up) == _version()
+    shipped = PLUGIN_YAMLS[0].read_text(encoding="utf-8")
+    floor = re.search(r'"compartment>=([0-9.]+)"', shipped).group(1)
+    assert f'"compartment>={floor}"' in up.read_text(encoding="utf-8")

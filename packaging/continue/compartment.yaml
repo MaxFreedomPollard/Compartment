@@ -11,7 +11,7 @@
 # version moves with the package (tests/test_version_lockstep.py), so the
 # hub shows the release the block was published from.
 name: Compartment
-version: 4.12.0
+version: 4.13.0
 schema: v1
 mcpServers:
   - name: Compartment

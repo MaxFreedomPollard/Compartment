@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "compartment",
   "display_name": "Compartment",
-  "version": "4.12.0",
+  "version": "4.13.0",
   "description": "Encrypted, fully offline memory for Claude: one vault on your machine, shared with every MCP client. No network, no API key.",
   "long_description": "Compartment is persistent memory for AI agents, stored on your own computer and encrypted at rest. What Claude learns in one conversation is available in every later one, and to Claude Code, Cursor, Codex, Gemini CLI, Hermes Agent, OpenClaw and any other MCP client on the same machine. Nothing leaves it: the embedding model runs locally, the server speaks stdio only and opens no ports, and there is no account.\n\n**Before the first run**, create the vault once in a terminal: `pip install compartment && compartment init` (or `pipx install compartment`, or `uv tool install compartment`). It asks for a passphrase you choose; that passphrase is the only key and Compartment cannot recover it. If the vault is locked after a restart, run `compartment unlock`.\n\nIf you already connected Claude Desktop with `compartment integrate claude` or the app's Connect button, you do not need this extension as well: both would start the same server and Claude would see every tool twice.",
   "author": {
