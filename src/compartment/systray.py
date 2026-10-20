@@ -791,6 +791,155 @@ def set_login(enabled: bool, vault: str | None = None) -> str:
         return f"error: {exc}"
 
 
+# --- when the panel cannot draw ---------------------------------------------
+# pip cannot install tkinter: it comes with the Python, or with a package of
+# the distribution's. "Install your distribution's Python Tk package" left
+# the user to find out what that is called, which differs on every family,
+# and is the wrong advice altogether for a Python the distribution did not
+# provide (pyenv, asdf, conda, one built from source), where the package
+# changes nothing.
+
+#: Per distribution family: the package that adds Tk to the distribution's
+#: own Python, and the headers a Python built from source needs to build it.
+_TK_BY_FAMILY = {
+    "debian": ("sudo apt install python3-tk", "sudo apt install tk-dev"),
+    "fedora": ("sudo dnf install python3-tkinter",
+               "sudo dnf install tk-devel"),
+    "suse": ("sudo zypper install python3-tk", "sudo zypper install tk-devel"),
+    "arch": ("sudo pacman -S tk", "sudo pacman -S tk"),
+    "alpine": ("sudo apk add python3-tkinter", "sudo apk add tk-dev"),
+    "void": ("sudo xbps-install python3-tkinter",
+             "sudo xbps-install tk-devel"),
+    "gentoo": ("enable the tk USE flag for dev-lang/python, then: "
+               "sudo emerge --oneshot dev-lang/python",
+               "sudo emerge dev-lang/tk"),
+}
+
+#: os-release ID and ID_LIKE words, to a family above.
+_TK_FAMILY_OF = {
+    "debian": "debian", "ubuntu": "debian", "linuxmint": "debian",
+    "pop": "debian", "raspbian": "debian", "kali": "debian",
+    "elementary": "debian", "zorin": "debian", "neon": "debian",
+    "fedora": "fedora", "rhel": "fedora", "centos": "fedora",
+    "rocky": "fedora", "almalinux": "fedora", "amzn": "fedora",
+    "ol": "fedora", "nobara": "fedora",
+    "suse": "suse", "opensuse": "suse", "sles": "suse",
+    "arch": "arch", "manjaro": "arch", "endeavouros": "arch",
+    "cachyos": "arch", "garuda": "arch", "steamos": "arch",
+    "alpine": "alpine", "postmarketos": "alpine",
+    "void": "void", "gentoo": "gentoo",
+}
+
+
+def _os_release() -> str:
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            continue
+    return ""
+
+
+def _distro_family(os_release: str) -> str | None:
+    fields = {}
+    for line in os_release.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip().strip("\"'").lower()
+    words = [fields.get("ID", "")] + fields.get("ID_LIKE", "").split()
+    for word in words:
+        if not word:
+            continue
+        # opensuse-tumbleweed, opensuse-leap, sles_sap and the like
+        for name in (word, word.split("-")[0], word.split("_")[0]):
+            if name in _TK_FAMILY_OF:
+                return _TK_FAMILY_OF[name]
+    return None
+
+
+def tk_install_hint(os_release: str | None = None,
+                    base_prefix: str | None = None,
+                    platform: str | None = None) -> str:
+    """The command that gives this Python tkinter, as exactly as this
+    machine allows. Pure given its arguments, which default to this
+    machine's, so every family is testable anywhere."""
+    platform = platform or sys.platform
+    prefix = base_prefix if base_prefix is not None else sys.base_prefix
+    ver = f"{sys.version_info[0]}{sys.version_info[1]}"
+    if "com.termux" in prefix:
+        return "pkg install x11-repo && pkg install python-tkinter"
+    if platform.startswith("freebsd"):
+        return f"sudo pkg install py{ver}-tkinter"
+    if platform.startswith("openbsd"):
+        return "doas pkg_add python-tkinter"
+    if platform.startswith("netbsd"):
+        return f"sudo pkgin install py{ver}-Tk"
+    if os.path.isdir(os.path.join(prefix, "conda-meta")):
+        return "conda install tk"
+    if "linuxbrew" in prefix or "homebrew" in prefix.lower():
+        return ("brew install "
+                f"python-tk@{sys.version_info[0]}.{sys.version_info[1]}")
+    if "/uv/python/" in prefix.replace(os.sep, "/"):
+        # uv's Pythons carry Tk; one without it is a damaged install.
+        return ("uv python install --reinstall "
+                f"{sys.version_info[0]}.{sys.version_info[1]}")
+    family = _distro_family(_os_release() if os_release is None
+                            else os_release)
+    system, headers = _TK_BY_FAMILY.get(family, (None, None))
+    if prefix.rstrip("/") not in ("/usr", ""):
+        # Not the distribution's Python: pyenv, asdf, a source build in
+        # /usr/local. Its _tkinter is built when the Python is, against
+        # Tk's headers, so the headers go in first and the Python is
+        # built again.
+        build = ("then build this Python again (pyenv: "
+                 "pyenv install --force "
+                 f"{sys.version_info[0]}.{sys.version_info[1]}."
+                 f"{sys.version_info[2]})")
+        return (f"{headers}, {build}" if headers else
+                f"install Tk's development headers, {build}")
+    return system or ("install your distribution's Tk package for Python "
+                      "(often python3-tk or python3-tkinter)")
+
+
+def tk_missing_message(what: str = "panel") -> str:
+    return ("error: this Python has no tkinter, which the "
+            f"{what} needs.\n"
+            f"  This Python is {sys.executable}. To give it tkinter:\n"
+            f"    {tk_install_hint()}\n"
+            "  Or install Compartment with uv, which brings its own Python "
+            "with tkinter in it:\n"
+            "    uv tool install compartment\n"
+            "  Everything else works without it: the CLI, the MCP server, "
+            "and `compartment dash`.")
+
+
+def no_display_message(exc: Exception) -> str:
+    """Why Tk could not open a window, in words that say what to do."""
+    text = str(exc)
+    low = text.lower()
+    if "init.tcl" in low or "tk.tcl" in low:
+        return (f"error: this Python's Tcl/Tk files are missing or not where "
+                f"it looks for them ({text}).\n"
+                "  Reinstall this Python, or install Compartment with uv, "
+                "whose Python carries its own:\n"
+                "    uv tool install compartment")
+    if (sys.platform not in ("win32", "darwin")
+            and os.environ.get("WAYLAND_DISPLAY")
+            and not os.environ.get("DISPLAY")):
+        # Tk draws through X11 only. A Wayland desktop runs XWayland for
+        # programs like it, usually on demand; this one has none running.
+        return ("error: the panel is drawn with Tk, which needs X11, and "
+                "this Wayland session has no X server (DISPLAY is not set).\n"
+                "  Turn XWayland on in your compositor (sway: `xwayland "
+                "enable`; GNOME and KDE start it by themselves when it is\n"
+                "  installed: package xwayland or xorg-x11-server-Xwayland), "
+                "or use `compartment dash` to read the vault in a browser.")
+    return (f"error: no graphical display to draw the panel on ({text}).\n"
+            "  On a headless machine use the CLI, or `compartment dash` to\n"
+            "  read the vault in a browser.")
+
+
 def panel_geometry(content: int, maximum: int) -> tuple[int, bool]:
     """How tall to draw the panel, and whether it needs a scrollbar.
 
@@ -856,13 +1005,7 @@ def run(vault: str | None = None, show: bool = False,
         import tkinter as tk
         from tkinter import ttk
     except ImportError:
-        print("error: this Python has no tkinter, which the "
-              f"{'tray panel' if tray else 'panel'} needs.\n"
-              "  The quickest fix is to install Compartment with uv, which\n"
-              "  brings its own Python with tkinter already in it:\n"
-              "    uv tool install compartment\n"
-              "  Otherwise install your distribution's Python Tk package\n"
-              "  (Debian/Ubuntu: python3-tk, Fedora: python3-tkinter).",
+        print(tk_missing_message("tray panel" if tray else "panel"),
               file=sys.stderr)
         return 3
     pystray = Image = None
@@ -871,8 +1014,13 @@ def run(vault: str | None = None, show: bool = False,
             import pystray
             from PIL import Image
         except ImportError:
-            print("error: the tray app needs pystray and Pillow.\n"
-                  "  pip install 'compartment[tray]'", file=sys.stderr)
+            # Into this interpreter, by name. The [tray] extra this used to
+            # name has been empty since the two became base dependencies,
+            # so installing it changed nothing.
+            print("error: the tray app needs pystray and Pillow, which this "
+                  "Python does not have.\n"
+                  f'  "{sys.executable}" -m pip install pystray pillow',
+                  file=sys.stderr)
             return 3
 
     # Read the DPI (and declare awareness) before the first window exists.
@@ -885,11 +1033,10 @@ def run(vault: str | None = None, show: bool = False,
     try:
         root = tk.Tk()
     except tk.TclError as exc:
-        # A machine with no desktop: SSH, a container, a CI runner. Say so
-        # in one line rather than showing a Tk stack trace.
-        print(f"error: no graphical display to draw the panel on ({exc}).\n"
-              "  On a headless machine use the CLI, or `compartment dash` to\n"
-              "  read the vault in a browser.", file=sys.stderr)
+        # A machine with no desktop (SSH, a container, a CI runner), a
+        # Wayland session with no XWayland, or a Python whose Tcl files are
+        # not where it looks. Say which, rather than show a Tk stack trace.
+        print(no_display_message(exc), file=sys.stderr)
         return 4
     if S != 1.0:
         # Tk sizes fonts in points; this is what turns a point into a pixel.

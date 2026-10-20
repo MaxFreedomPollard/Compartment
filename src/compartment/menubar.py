@@ -2060,8 +2060,13 @@ def run(vault: str | None = None, show: bool = False,
         from Foundation import (NSBundle, NSDistributedNotificationCenter,
                                 NSObject)
     except ImportError:
-        print("error: the menu bar app needs PyObjC.\n"
-              "  pip install 'compartment[menubar]'", file=sys.stderr)
+        # Into this interpreter, by name. The [menubar] extra this used to
+        # name has been empty since PyObjC became a base dependency, so
+        # installing it changed nothing.
+        print("error: the menu bar app needs PyObjC, which this Python does "
+              "not have.\n"
+              f'  "{sys.executable}" -m pip install pyobjc-framework-Cocoa',
+              file=sys.stderr)
         return 1
 
     vault_path = vault or default_vault()
