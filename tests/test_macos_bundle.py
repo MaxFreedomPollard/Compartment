@@ -200,3 +200,356 @@ def test_a_system_python_is_never_embedded():
     """The whole prefix gets copied in, so /usr would mean copying /usr."""
     src = SPEC.read_text(encoding="utf-8")
     assert '("/usr", "/System", "/Library")' in src
+
+
+# ------------------------------------- every binary runs where the app claims
+
+def _macho(arch="arm64", minos=(13, 0), legacy=False) -> bytes:
+    """A minimal 64-bit Mach-O header with the one load command that names
+    its minimum macOS: LC_BUILD_VERSION, or the older LC_VERSION_MIN_MACOSX."""
+    import struct
+    cpu = {"arm64": 0x0100000C, "x86_64": 0x01000007}[arch]
+    v = (minos[0] << 16) | (minos[1] << 8)
+    cmd = (struct.pack("<IIII", 0x24, 16, v, v) if legacy
+           else struct.pack("<IIIIII", 0x32, 24, 1, v, v, 0))
+    return struct.pack("<4sIiIIIII", b"\xcf\xfa\xed\xfe", cpu, 0, 6, 1,
+                       len(cmd), 0, 0) + cmd
+
+
+def _fat(*slices) -> bytes:
+    import struct
+    cpus = {"arm64": 0x0100000C, "x86_64": 0x01000007}
+    entries, body = b"", b""
+    for arch, data in slices:
+        entries += struct.pack(">IIIII", cpus[arch], 0, 4096 + len(body),
+                               len(data), 12)
+        body += data.ljust(4096, b"\0")
+    head = struct.pack(">II", 0xCAFEBABE, len(slices)) + entries
+    return head.ljust(4096, b"\0") + body
+
+
+def test_the_mach_o_reader_finds_each_slice_and_its_minimum(tmp_path):
+    b = _builder()
+    thin = tmp_path / "thin.so"
+    thin.write_bytes(_macho("arm64", (14, 0)))
+    assert b._macho_slices(thin) == {"arm64": (14, 0)}
+    old = tmp_path / "old.so"
+    old.write_bytes(_macho("x86_64", (10, 9), legacy=True))
+    assert b._macho_slices(old) == {"x86_64": (10, 9)}
+    fat = tmp_path / "fat.so"
+    fat.write_bytes(_fat(("x86_64", _macho("x86_64", (10, 13))),
+                         ("arm64", _macho("arm64", (11, 0)))))
+    assert b._macho_slices(fat) == {"x86_64": (10, 13), "arm64": (11, 0)}
+    # Not Mach-O: text, and a Java class file, which shares the fat magic.
+    (tmp_path / "a.py").write_text("print('hi')\n")
+    (tmp_path / "A.class").write_bytes(b"\xca\xfe\xba\xbe\x00\x00\x00\x34")
+    assert b._macho_slices(tmp_path / "a.py") == {}
+    assert b._macho_slices(tmp_path / "A.class") == {}
+
+
+def _fake_app(tmp_path, files: dict) -> pathlib.Path:
+    app = tmp_path / "Compartment.app"
+    for rel, data in files.items():
+        p = app / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return app
+
+
+def test_a_library_built_for_a_newer_macos_than_the_app_is_refused(tmp_path):
+    """onnxruntime 1.24 and later ship macOS wheels tagged macosx_14_0 only,
+    and pip on a current build machine takes them, so the bundle declaring
+    13.0 carried an embedding model that macOS 13 cannot load."""
+    lib = ("Contents/Resources/runtime/lib/python3.12/site-packages/"
+           "onnxruntime/capi/onnxruntime_pybind11_state.so")
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (13, 0)),
+        lib: _macho("arm64", (14, 0)),
+        "Contents/Resources/runtime/lib/python3.12/os.py": b"# stdlib\n"})
+    b = _builder()
+    with pytest.raises(SystemExit) as e:
+        b._verify_deployment_target(app, "arm64", "13.0")
+    assert "onnxruntime_pybind11_state.so needs macOS 14.0" in str(e.value)
+    b._verify_deployment_target(app, "arm64", "14.0")        # must not raise
+
+
+def test_an_intel_build_refuses_a_library_without_an_intel_slice(tmp_path):
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("x86_64", (13, 0)),
+        "Contents/Resources/runtime/lib/x.so": _macho("arm64", (11, 0)),
+        "Contents/Resources/runtime/lib/u.so": _fat(
+            ("x86_64", _macho("x86_64", (10, 13))),
+            ("arm64", _macho("arm64", (11, 0))))})
+    b = _builder()
+    with pytest.raises(SystemExit) as e:
+        b._verify_deployment_target(app, "x86_64", "13.0")
+    assert "x.so (arm64)" in str(e.value)
+    assert "u.so" not in str(e.value), "a universal2 library is fine"
+
+
+def test_the_build_runs_the_deployment_check_before_signing():
+    src = SPEC.read_text(encoding="utf-8")
+    body = src.split("def build_app")[1]
+    assert body.index("_verify_deployment_target(app, arch, min_macos)") \
+        < body.index('_run("codesign"')
+
+
+def test_wheels_are_chosen_for_the_declared_minimum_macos(tmp_path,
+                                                          monkeypatch):
+    """pip on its own picks wheels for the macOS it runs on. The build has to
+    ask for the macOS the app declares, binary only, and install nothing
+    else."""
+    import subprocess
+    b = _builder()
+    b._EMBEDDED_VER[0] = "3.12"
+    calls = []
+
+    def fake_run(*args, **kw):
+        argv = [str(a) for a in args]
+        calls.append(argv)
+        if "wheel" in argv:
+            house = pathlib.Path(argv[argv.index("--wheel-dir") + 1])
+            (house / "compartment-4.13.0-py3-none-any.whl").write_bytes(b"")
+        return subprocess.CompletedProcess(argv, 0)
+
+    def fake_subprocess_run(argv, **kw):
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(b, "_run", fake_run)
+    monkeypatch.setattr(b.subprocess, "run", fake_subprocess_run)
+    b._install_packages(pathlib.Path("/rt/bin/python3.12"), "/src",
+                        "arm64", "13.0")
+    download = next(c for c in calls if "download" in c)
+    assert download[download.index("--platform") + 1] == "macosx_13_0_arm64"
+    assert "--only-binary=:all:" in download
+    install = next(c for c in calls if "install" in c)
+    assert "--no-index" in install, "only the wheels chosen above"
+    assert not any("install" in c and "--no-index" not in c for c in calls)
+
+
+def test_no_wheels_for_the_minimum_says_what_to_embed_instead(tmp_path,
+                                                             monkeypatch):
+    import subprocess
+    b = _builder()
+    b._EMBEDDED_VER[0] = "3.14"
+
+    def fake_run(*args, **kw):
+        argv = [str(a) for a in args]
+        if "wheel" in argv:
+            house = pathlib.Path(argv[argv.index("--wheel-dir") + 1])
+            (house / "compartment-4.13.0-py3-none-any.whl").write_bytes(b"")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(b, "_run", fake_run)
+    monkeypatch.setattr(b.subprocess, "run", lambda argv, **kw: (
+        subprocess.CompletedProcess(argv, 1, "", "ERROR: No matching "
+                                    "distribution found for onnxruntime")))
+    with pytest.raises(SystemExit) as e:
+        b._install_packages(pathlib.Path("/rt/bin/python3.14"), "/src",
+                            "arm64", "13.0")
+    msg = str(e.value)
+    assert "Python 3.14 on macOS 13.0" in msg and "onnxruntime" in msg
+    assert "--min-macos 14.0" in msg and "3.12" in msg
+
+
+def test_the_installer_accepts_only_the_macos_the_app_declares(tmp_path,
+                                                              monkeypatch):
+    import plistlib
+    b = _builder()
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (14, 0))})
+    with open(app / "Contents" / "Info.plist", "wb") as fh:
+        plistlib.dump({"LSMinimumSystemVersion": "14.0"}, fh)
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(b, "_run", lambda *a, **k: None)
+    b.build_pkg(app)
+    dist = (tmp_path / "build" / "distribution.xml").read_text()
+    assert '<os-version min="14.0"/>' in dist
+
+
+def test_a_minimum_below_what_the_login_item_needs_is_refused():
+    with pytest.raises(SystemExit, match="SMAppService"):
+        _builder().build_app(python="/nonexistent", min_macos="12.0")
+
+
+# ---------------------------- the CLI inside the bundle runs on another Mac
+
+def _pip_written(runtime: pathlib.Path, name: str, long_form=False) -> None:
+    """A console script as pip writes it: the absolute path of the
+    interpreter that installed it, plain or in the exec form pip uses for a
+    path with a space in it."""
+    py = runtime / "bin" / "python3.12"
+    head = (f"#!/bin/sh\n'''exec' \"{py}\" \"$0\" \"$@\"\n' '''\n"
+            if long_form else f"#!{py}\n")
+    (runtime / "bin" / name).write_text(
+        head + "# -*- coding: utf-8 -*-\nimport sys\n"
+        "print('ran', sys.argv[1:])\n", encoding="utf-8")
+    (runtime / "bin" / name).chmod(0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the bundle is POSIX")
+def test_console_scripts_still_run_after_the_bundle_moves(tmp_path):
+    """pip names the build directory's interpreter in every script it writes,
+    and `compartment` inside the app is what the panel writes into each
+    agent's config. Installed anywhere else - which is everywhere but the
+    build machine - it failed with "bad interpreter"."""
+    import shutil
+    import subprocess
+    if not shutil.which("realpath"):
+        pytest.skip("no realpath here")
+    build = tmp_path / "build dir" / "runtime"
+    (build / "bin").mkdir(parents=True)
+    (build / "bin" / "python3.12").symlink_to(sys.executable)
+    _pip_written(build, "compartment")
+    _pip_written(build, "cmpt", long_form=True)
+    relocatable = "#!/bin/sh\n'''exec' \"$(dirname -- \"$0\")/python3.12\" \"$0\"\n' '''\nprint(1)\n"
+    (build / "bin" / "pip").write_text(relocatable, encoding="utf-8")
+    assert sorted(_builder()._relocate_scripts(build)) == ["cmpt",
+                                                           "compartment"]
+    assert (build / "bin" / "pip").read_text() == relocatable, \
+        "a script that is relocatable already is left alone"
+    installed = tmp_path / "Applications" / "runtime"
+    installed.parent.mkdir()
+    shutil.move(str(build), str(installed))
+    for name in ("compartment", "cmpt"):
+        script = installed / "bin" / name
+        assert str(build) not in script.read_text()
+        r = subprocess.run([str(script), "--version"], capture_output=True,
+                           text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "ran ['--version']"
+
+
+def test_a_script_naming_the_build_directory_fails_the_build(tmp_path):
+    app = tmp_path / "Compartment.app"
+    runtime = app / "Contents" / "Resources" / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    _pip_written(runtime, "compartment")
+    with pytest.raises(SystemExit, match="name the build directory"):
+        _builder()._verify_console_scripts(app)
+
+
+def test_the_build_makes_its_scripts_relocatable_and_checks_them():
+    src = SPEC.read_text(encoding="utf-8")
+    body = src.split("def build_app")[1]
+    assert body.index("_relocate_scripts(runtime)") < body.index("compileall")
+    assert body.index("_verify_console_scripts(app)") \
+        < body.index('_run("codesign"')
+
+
+# ------------------------------- an Intel build is an installer of its own
+
+def test_release_names_keep_apple_silicon_where_it_was_and_mark_intel():
+    b = _builder()
+    assert b.artifact_name("4.13.0", "arm64", "pkg") == "Compartment-4.13.0.pkg"
+    assert b.artifact_name("4.13.0", "arm64", "dmg") == "Compartment-4.13.0.dmg"
+    assert b.artifact_name("4.13.0", "x86_64", "pkg") == \
+        "Compartment-4.13.0-intel.pkg"
+
+
+@pytest.mark.parametrize("arch,suffix", [("arm64", ""),
+                                         ("x86_64", "-intel")])
+def test_the_installer_runs_only_on_the_macs_the_app_can_start_on(
+        tmp_path, monkeypatch, arch, suffix):
+    """It said arm64,x86_64 whatever was inside, so an Intel Mac installed
+    the Apple silicon app, which could never launch."""
+    import plistlib
+    b = _builder()
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho(arch, (13, 0))})
+    with open(app / "Contents" / "Info.plist", "wb") as fh:
+        plistlib.dump({"LSMinimumSystemVersion": "13.0"}, fh)
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    ran = []
+    monkeypatch.setattr(b, "_run", lambda *a, **k: ran.append(a))
+    out = b.build_pkg(app)
+    dist = (tmp_path / "build" / "distribution.xml").read_text()
+    assert f'hostArchitectures="{arch}"' in dist
+    version = b._version()
+    assert out.name == f"Compartment-{version}{suffix}.pkg"
+    dmg = b.build_dmg(app)
+    assert dmg.name == f"Compartment-{version}{suffix}.dmg"
+    readme = (tmp_path / "build" / "dmg" / "READ ME FIRST.txt").read_text()
+    assert f"Compartment-{version}{suffix}.pkg" in readme
+
+
+# ----------------------------------------------------- a build CI can run
+
+def test_the_icon_needs_no_pillow_in_the_python_running_the_build(
+        tmp_path, monkeypatch):
+    """A runner given only uv's standalone Python has no Pillow, and the
+    build died at the icon after every other step had passed."""
+    monkeypatch.setitem(sys.modules, "PIL", None)        # import PIL fails
+    b = _builder()
+    out = b.build_icon(tmp_path / "Resources" / "Compartment.icns")
+    shipped = ROOT / "src" / "compartment" / "data" / "app.icns"
+    assert out.read_bytes() == shipped.read_bytes()
+
+
+def _main(b, monkeypatch, tmp_path, argv):
+    monkeypatch.setattr(b.sys, "platform", "darwin")
+    monkeypatch.setattr(b.sys, "argv", ["build_macos_app.py", *argv])
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    return b.main()
+
+
+def test_a_failed_step_exits_non_zero_naming_the_step(tmp_path, monkeypatch,
+                                                      capsys):
+    import subprocess
+    b = _builder()
+
+    def fail(*a, **k):
+        raise subprocess.CalledProcessError(2, ["pkgbuild", "--root", "x"])
+
+    monkeypatch.setattr(b, "build_app", fail)
+    assert _main(b, monkeypatch, tmp_path, ["--pkg"]) == 1
+    err = capsys.readouterr().err
+    assert "error: `pkgbuild --root x` exited 2" in err
+    assert "Traceback" not in err
+
+
+def test_the_build_lists_what_it_made(tmp_path, monkeypatch, capsys):
+    b = _builder()
+    app = tmp_path / "build" / "Compartment.app"
+    monkeypatch.setattr(b, "build_app", lambda *a, **k: app)
+    monkeypatch.setattr(b, "build_pkg", lambda a: a.with_name("C-1.pkg"))
+    monkeypatch.setattr(b, "build_dmg", lambda a: a.with_name("C-1.dmg"))
+    assert _main(b, monkeypatch, tmp_path, ["--pkg", "--dmg"]) == 0
+    listed = [ln.split(": ", 1)[1] for ln in capsys.readouterr().out
+              .splitlines() if ln.startswith("artifact: ")]
+    assert listed == [str(app), str(app.with_name("C-1.dmg")),
+                      str(app.with_name("C-1.pkg"))]
+
+
+def test_a_busy_disk_image_is_tried_again(tmp_path, monkeypatch):
+    import subprocess
+    b = _builder()
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (13, 0))})
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(b.time, "sleep", lambda s: None)
+    tries = []
+
+    def run(*args, **kw):
+        if args[0] == "hdiutil":
+            tries.append(args)
+            if len(tries) < 3:
+                raise subprocess.CalledProcessError(1, list(args))
+
+    monkeypatch.setattr(b, "_run", run)
+    b.build_dmg(app)
+    assert len(tries) == 3
+
+
+def test_the_default_minimum_is_what_the_bundled_onnxruntime_needs():
+    """onnxruntime 1.23.2's macosx_13_0 wheels hold libraries that record a
+    minimum of macOS 13.4 (arm64 and x86_64), and 1.23.2 is the newest
+    release a macOS 13 build can have. A bundle declaring 13.0 installed on
+    13.0 to 13.3 and could not load its model there."""
+    b = _builder()
+    assert b._version_tuple(b.MIN_MACOS) >= (13, 4)
+    # pip's tags for macOS 11 and later are major versions only, so 13.4
+    # still selects the macosx_13_0 wheels it has to.
+    major, _minor = b._version_tuple(b.MIN_MACOS)
+    assert major == 13
