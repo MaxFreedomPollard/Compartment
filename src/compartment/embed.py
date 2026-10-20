@@ -114,7 +114,12 @@ def bundled_model_dir() -> Path:
 
 
 def user_model_dir() -> Path:
-    return Path(env("MODEL_DIR", home() / "models"))
+    # COMPARTMENT_MODEL_DIR first, and the home only without it: the default
+    # was computed even when the variable was set, so with no home directory
+    # (HOME unset and no password-database entry) naming the folder did not
+    # help, and a downloaded model could not be found.
+    explicit = env("MODEL_DIR")
+    return Path(explicit) if explicit else home() / "models"
 
 
 def resolve_model_dir(name: str) -> Path:

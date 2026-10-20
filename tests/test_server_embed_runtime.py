@@ -107,3 +107,12 @@ def test_the_embedder_runs_with_that_many_threads(monkeypatch):
     e = embed.Embedder()
     assert e.sess.get_session_options().intra_op_num_threads == 2
     assert e.embed_query("router passphrase").shape == (e.dim,)
+
+
+def test_a_model_folder_named_in_the_environment_needs_no_home(tmp_path,
+                                                               monkeypatch):
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+    monkeypatch.setattr(embed, "home", no_home)
+    monkeypatch.setenv("COMPARTMENT_MODEL_DIR", str(tmp_path / "models"))
+    assert embed.user_model_dir() == tmp_path / "models"
