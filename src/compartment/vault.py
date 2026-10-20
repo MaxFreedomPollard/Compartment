@@ -87,8 +87,57 @@ def local_stamp(created: float | None) -> str:
     try:
         return datetime.datetime.fromtimestamp(
             float(created)).strftime("%Y-%m-%d %H:%M")
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, OverflowError):
+        # OverflowError: an infinite or vast value, which a JSONL import
+        # could carry in, raised past every reader of the record, so one
+        # such memory failed every search that would have returned it.
         return ""
+
+
+#: The span a stored instant may take: what a calendar date can be made of
+#: (years 1 to 9999, in UTC), checked as a number so the answer does not
+#: depend on what the platform's C library will convert.
+_MIN_INSTANT = -62135596800.0
+_MAX_INSTANT = 253402300799.0
+
+
+def instant(value) -> float | None:
+    """A moment as unix seconds, or None when `value` does not name one.
+
+    `created` and `affirmed` reach the vault from outside on the restore
+    paths - a JSONL import, a curation plan - and whatever a file holds was
+    stored as it came: an ISO string such as "2024-05-01T09:30:00Z" went
+    into the REAL column as text, and the next search failed converting it
+    for the recency prior. Every search, for good, since every search reads
+    the whole population. So the value is read the way a person would read
+    it: a number of seconds; numeric text; an ISO date or datetime (one
+    without a zone is local time, as a person writing it means); or a count
+    of milliseconds, which is what JavaScript's Date.now() writes and which
+    as seconds would be a date thousands of years away. Anything else,
+    including NaN and infinity, is None, and the caller falls back to now
+    rather than keep a date nothing can read."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        t = float(value)
+    else:
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            t = float(s)
+        except ValueError:
+            try:
+                t = datetime.datetime.fromisoformat(s).timestamp()
+            except (ValueError, OverflowError, OSError):
+                return None
+    if not math.isfinite(t):
+        return None
+    if _MIN_INSTANT <= t <= _MAX_INSTANT:
+        return t
+    if _MIN_INSTANT <= t / 1000.0 <= _MAX_INSTANT:
+        return t / 1000.0
+    return None
 
 
 # A memory's own account of where it came from, written at the end of its text
@@ -467,7 +516,9 @@ class Vault:
             v._replay(e)
         merged = v._merge_legacy_starter()
         rewired = v._migrate_wire_format()
-        if entries or loaded.truncated_tail or merged or rewired or slots_migrated:
+        repaired = v._repair_instants()
+        if (entries or loaded.truncated_tail or merged or rewired
+                or slots_migrated or repaired):
             if loaded.truncated_tail:
                 # Reaching here means the framing proved this was an
                 # interrupted append: an intact, checksummed length prefix
@@ -539,6 +590,37 @@ class Vault:
         n = self.db.migrate_wire(self._master)
         self.header.extra["wire"] = wire.WIRE_FORMAT
         return n or 1   # truthy even for an empty vault: the marker must save
+
+    def _repair_instants(self) -> int:
+        """Give every record a `created` (and `affirmed`) that is a number.
+
+        Builds before `instant` stored an imported date as whatever the file
+        held, so a vault that took one line with an ISO string, a NaN or a
+        word in it failed every search from then on, and nothing in it could
+        be fixed from the outside because finding the record needed a
+        search. Each bad value is read as `instant` reads it; one that names
+        no moment becomes the time the row was written (`accessed` starts
+        there, and a record no search could return was never touched since),
+        and a bad `affirmed` is dropped. Writes nothing itself: the caller's
+        save commits it, as with the other migrations here."""
+        rows = self.db.conn.execute(
+            "SELECT id, created, affirmed, accessed FROM records"
+            " WHERE typeof(created) NOT IN ('integer', 'real')"
+            " OR (affirmed IS NOT NULL"
+            "     AND typeof(affirmed) NOT IN ('integer', 'real'))").fetchall()
+        for r in rows:
+            created = (instant(r["created"]) or instant(r["accessed"])
+                       or time.time())
+            self.db.conn.execute(
+                "UPDATE records SET created = ?, affirmed = ? WHERE id = ?",
+                (created, instant(r["affirmed"]), r["id"]))
+        if rows:
+            # Direct SQL, so the cache of the population's times is stale.
+            self.db._invalidate_recency()
+            self._audit_and_capture(
+                "system", "repair",
+                f"{len(rows)} records given a readable stored date")
+        return len(rows)
 
     def _merge_legacy_starter(self) -> int:
         """One-time reorganization: fold the legacy read-only packs/starter
@@ -999,6 +1081,9 @@ class Vault:
             # excluded so the vector represents the claim itself.
             vec = self.embedder.embed_record(strip_provenance(text))
         vec = np.atleast_2d(np.asarray(vec, dtype=np.float32))
+        # Read as moments, or dropped: see instant. Stored as they came, an
+        # ISO string or a NaN from an import broke every later search.
+        created, affirmed = instant(created), instant(affirmed)
         # Kept to 0..1 as the server's tools keep it, so a value on another
         # scale (1-10, say) lands in a dashboard bucket; a NaN is the default.
         importance = float(importance)
