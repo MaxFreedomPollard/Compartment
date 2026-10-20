@@ -174,3 +174,14 @@ def test_a_plaintext_export_is_readable_by_its_owner_alone(open_vault,
     cli.main(["--vault", open_vault, "export", str(out), "--plaintext"])
     assert os.stat(out).st_mode & 0o777 == 0o600
     assert "an older export" not in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_an_atomize_listing_is_readable_by_its_owner_alone(open_vault,
+                                                          tmp_path, capsys):
+    """`atomize --out` writes the over-limit memories decrypted, behind the
+    same --plaintext confirmation as export, and with the umask's mode."""
+    out = tmp_path / "blobs.jsonl"
+    cli.main(["--vault", open_vault, "atomize", "--out", str(out),
+              "--plaintext"])
+    assert os.stat(out).st_mode & 0o777 == 0o600

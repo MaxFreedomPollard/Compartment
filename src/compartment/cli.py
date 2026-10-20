@@ -800,6 +800,25 @@ def cmd_status(args) -> None:
     _print(v.status())
 
 
+def _write_private(path: str, text: str) -> None:
+    """Write decrypted memory text where only this user can read it.
+
+    Readable by its owner alone, as the vault file is (VAULT_MODE): an
+    export is every memory the vault holds, credentials included, in the
+    clear, and a plain write left it to the umask, 0644 on most systems, so
+    any local account could read one made into /tmp or a shared home.
+    fchmod for a file that already existed, whose mode O_CREAT leaves as it
+    was."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if hasattr(os, "fchmod"):
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
+        f.write(text)
+
+
 def cmd_store(args) -> None:
     v = _open_vault(args)
     supersedes = getattr(args, "supersedes", None)
@@ -852,8 +871,7 @@ def cmd_atomize(args) -> None:
     lines = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     if args.out:
         try:
-            with open(args.out, "w", encoding="utf-8") as f:
-                f.write(lines)
+            _write_private(args.out, lines)
         except OSError as exc:
             _die(f"cannot write {args.out}: {exc}")
     else:
@@ -1168,20 +1186,7 @@ def cmd_export(args) -> None:
     data = v.export_jsonl()
     if args.plaintext:
         print("WARNING: exporting PLAINTEXT memories to disk", file=sys.stderr)
-        # Readable by this user alone, as the vault file is (VAULT_MODE):
-        # this is every memory the vault holds, credentials included, in
-        # the clear, and write_text left it to the umask, 0644 on most
-        # systems, so any local account could read an export made into
-        # /tmp or a shared home. fchmod for a file that already existed,
-        # whose mode O_CREAT leaves as it was.
-        fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            if hasattr(os, "fchmod"):
-                try:
-                    os.fchmod(fd, 0o600)
-                except OSError:
-                    pass
-            f.write(data)
+        _write_private(args.out, data)
         # Count the lines actually written rather than newline characters:
         # export_jsonl ends with a trailing newline only when it is non-empty,
         # so a newline count is one off the moment that changes.
