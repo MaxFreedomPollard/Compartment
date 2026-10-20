@@ -20,6 +20,7 @@ GitHub's machines and attaches them to a draft, so nobody has to remember:
 | `compartment-<version>-py3-none-any.whl` | pip / offline installs, any OS |
 | `compartment-<version>.tar.gz` | source distribution, packagers, air-gapped builds |
 | `SHA256SUMS.txt` | the checksums of everything above |
+| `compartment-<version>.mcpb` | Claude Desktop extension (attached by publish.yml once PyPI serves the version, because its lock file pins that release) |
 
 GitHub adds "Source code (zip/tar.gz)" on its own. The notes should also carry
 the `pip install compartment` line for people who want the CLI and MCP
@@ -77,7 +78,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 # 3. review the draft on the Releases page, then press Publish. Publishing
 #    triggers publish.yml, which uploads the release's own wheel and sdist to
-#    PyPI (the same bytes as the downloads), and publish-registry.yml.
+#    PyPI (the same bytes as the downloads), then builds the Claude Desktop
+#    bundle against that PyPI release and attaches it; and publish-registry.yml.
 #    A rebuild of an existing tag: Actions -> Release -> Run workflow -> tag.
 #
 #    Building by hand still works when it has to, from a Mac:
