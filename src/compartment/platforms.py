@@ -227,7 +227,11 @@ def _sysctl_boot_estimate() -> tuple[float, float] | None:
                              capture_output=True, text=True, check=True,
                              timeout=_SUBPROCESS_TIMEOUT).stdout
         import re
-        m = re.search(r"sec = (\d+)", out)
+        # FreeBSD: "{ sec = 1700000000, usec = 0 } Tue Nov 14 ...".
+        # OpenBSD, the one that needs this path, prints only the seconds
+        # under -n (sbin/sysctl/sysctl.c), which the first pattern missed.
+        m = (re.search(r"sec = (\d+)", out)
+             or re.fullmatch(r"\s*(\d+)\s*", out))
         if m:
             sec = float(m.group(1))
             return sec, time.time() - sec

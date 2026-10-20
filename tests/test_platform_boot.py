@@ -73,3 +73,22 @@ def test_the_linux_clock_estimate_matches_the_kernel_btime():
         pytest.skip("/proc/stat btime not readable here")
     clock = platforms._clock_boot_estimate()
     assert clock is not None and abs(clock[0] - btime) < 2
+
+
+@pytest.mark.parametrize("stdout", [
+    "1700000000\n",                                         # OpenBSD -n
+    "{ sec = 1700000000, usec = 123456 } Tue Nov 14 22:13:20 2023\n",  # FreeBSD
+])
+def test_every_sysctl_dialect_of_kern_boottime_is_read(monkeypatch, stdout):
+    """OpenBSD has no sysctlbyname, so the binary is its only kernel record,
+    and `sysctl -n kern.boottime` prints the bare seconds there
+    (sbin/sysctl/sysctl.c). Only FreeBSD's "sec = N" was understood, so
+    OpenBSD always fell through to the clock."""
+    monkeypatch.setattr(platforms.platform, "system", lambda: "OpenBSD")
+
+    class NoSysctlbyname:
+        pass
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **kw: NoSysctlbyname())
+    _record_subprocesses(monkeypatch, stdout=stdout)
+    est = platforms._sysctl_boot_estimate()
+    assert est is not None and est[0] == 1_700_000_000.0
