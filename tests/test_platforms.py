@@ -154,8 +154,9 @@ def test_a_sandbox_that_hides_the_boot_record_still_gets_a_boot_token(
     _no_kernel_boot_record(monkeypatch, system)
     clock = "CLOCK_MONOTONIC" if system == "Darwin" else "CLOCK_BOOTTIME"
     monkeypatch.setattr(platforms.time, clock, 777, raising=False)
+    # raising=False: Windows' time module has no clock_gettime at all.
     monkeypatch.setattr(platforms.time, "clock_gettime",
-                        lambda c: 500.0 if c == 777 else 1.0)
+                        lambda c: 500.0 if c == 777 else 1.0, raising=False)
     monkeypatch.setattr(platforms.time, "time", lambda: 10_500.0)
     assert platforms.boot_time() == platforms.boot_time() == "10000"
 
@@ -171,7 +172,9 @@ def test_the_clock_fallback_agrees_with_the_pinned_kernel_reading(
                         lambda: (10_000.0, 500.0))
     assert platforms.boot_time() == "10000"
     monkeypatch.setattr(platforms, "_sysctl_boot_estimate", lambda: None)
-    monkeypatch.setattr(platforms.time, "clock_gettime", lambda c: 501.0)
+    monkeypatch.setattr(platforms.time, "CLOCK_MONOTONIC", 1, raising=False)
+    monkeypatch.setattr(platforms.time, "clock_gettime", lambda c: 501.0,
+                        raising=False)
     monkeypatch.setattr(platforms.time, "time", lambda: 10_501.7)
     assert platforms.boot_time() == "10000"
 

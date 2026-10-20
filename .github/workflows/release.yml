@@ -1,0 +1,183 @@
+name: Release
+
+# Every release ships every download (RELEASING.md). They used to be built by
+# hand on one laptop, which tied each release to that laptop and could only
+# ever produce installers for the laptop's own architecture. This builds all
+# of them on GitHub's machines from the tagged commit - the wheel, the sdist,
+# and the macOS .pkg and .dmg for Apple silicon AND for Intel - and attaches
+# them, with their SHA-256 sums, to a DRAFT release.
+#
+# Publishing the draft stays a human decision. Publishing is what triggers
+# publish.yml (PyPI, which uploads these very wheel and sdist files) and
+# publish-registry.yml (the MCP registry).
+#
+#     git tag v4.13.0 && git push origin v4.13.0      # then review the draft
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing tag to build or rebuild, e.g. v4.13.0"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: The tag and every version field agree
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - id: v
+        name: The tag names the package version
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(python -c "import re, pathlib; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('src/compartment/__init__.py').read_text(encoding='utf-8')).group(1))")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match the package version $version"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Every manifest carries that version
+        # The lockstep test reads files only, so it runs without the package's
+        # dependencies and without the suite's conftest.
+        run: |
+          python -m pip install pytest
+          python -m pytest -q -p no:cacheprovider --noconftest tests/test_version_lockstep.py
+
+  python-dist:
+    name: Wheel and sdist
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build and check the metadata
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check --strict dist/*
+          ls -l dist
+      - name: The wheel installs and starts
+        env:
+          COMPARTMENT_ASSERT_OFFLINE: "1"
+        run: |
+          python -m pip install dist/*.whl
+          compartment --version | grep -F "${{ needs.check.outputs.version }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+
+  macos-app:
+    name: macOS app (${{ matrix.arch }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: apple-silicon
+          # onnxruntime's last macOS x86_64 wheels are 1.23.2 for Python up
+          # to 3.13; the build selects it on its own.
+          - runner: macos-15-intel
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: astral-sh/setup-uv@v10
+      - name: A standalone, non-framework Python to embed
+        # tools/build_macos_app.py explains why it must not be a framework
+        # build: the app would then report itself as org.python.python.
+        shell: bash
+        run: |
+          uv python install 3.12
+          echo "EMBED_PY=$(uv python find --managed-python 3.12)" >> "$GITHUB_ENV"
+      - name: Build Compartment.app, the .pkg and the .dmg
+        # On an Intel runner the script names them Compartment-<v>-intel.*
+        # itself, and the installer refuses to run on the other architecture.
+        shell: bash
+        run: |
+          "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg
+          ls -l build
+      - name: Exactly one .pkg and one .dmg of this version
+        shell: bash
+        env:
+          V: ${{ needs.check.outputs.version }}
+        run: |
+          mkdir -p out
+          cp build/Compartment-"$V"*.pkg build/Compartment-"$V"*.dmg out/
+          ls -l out
+          test "$(ls out | wc -l)" -eq 2
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  draft:
+    name: Draft the release with every download
+    needs: [check, python-dist, macos-app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create the draft, or refresh its downloads on a rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
+        shell: bash
+        run: |
+          notes=".github/release-notes/$TAG.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+            echo "refreshed the downloads on the existing release $TAG"
+          else
+            if [ -f "$notes" ]; then
+              gh release create "$TAG" --draft --verify-tag \
+                --title "Compartment $VERSION" --notes-file "$notes" assets/*
+            else
+              gh release create "$TAG" --draft --verify-tag \
+                --title "Compartment $VERSION" --generate-notes assets/*
+            fi
+            echo "drafted $TAG; review it and press Publish"
+          fi

@@ -175,11 +175,12 @@ def _winreg():
 def _autostart_command(vault: str | None = None) -> str:
     """What Windows runs at sign-in.
 
-    Two things this has to get right. It launches through the console script
-    or pythonw.exe rather than python.exe, because python.exe opens a console
-    window behind a tray app that has no window, at every single sign-in. And
-    it carries the vault path, because a user running a non-default vault
-    would otherwise silently get the default one back after a reboot.
+    Two things this has to get right. It launches through pythonw.exe, the
+    one interpreter that opens no console, because anything else opens a
+    console window behind a tray app that has no window, at every single
+    sign-in. And it carries the vault path, because a user running a
+    non-default vault would otherwise silently get the default one back
+    after a reboot.
     """
     exe, args = _autostart_parts(vault)
     return f'"{exe}" {args}'
@@ -188,14 +189,25 @@ def _autostart_command(vault: str | None = None) -> str:
 def _autostart_parts(vault: str | None = None) -> tuple[str, str]:
     """The same command, split. A scheduled task wants the program and its
     arguments in separate XML elements, and re-parsing a quoted command line
-    to get them back would be a second place for the quoting to be wrong."""
+    to get them back would be a second place for the quoting to be wrong.
+
+    pythonw.exe beside this interpreter comes first, and the console script
+    only when there is none. compartment.exe, which pip and uv write for the
+    console script, is a console program like python.exe: started at
+    sign-in it opened a console window that stayed for the whole session,
+    since that process IS the tray app, and closing the window quit it. It
+    used to come first. Every venv, uv tool environment and python.org
+    install has a pythonw.exe beside python.exe, and it runs the same
+    environment's compartment.
+    """
     vault = vault or env("VAULT") or str(home() / "memory.vault")
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    if pyw.is_file():
+        return str(pyw), f'-m compartment.cli --vault "{vault}" tray'
     exe = shutil.which("compartment")
     if exe:
         return exe, f'--vault "{vault}" tray'
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    runner = str(pyw) if pyw.is_file() else sys.executable
-    return runner, f'-m compartment.cli --vault "{vault}" tray'
+    return sys.executable, f'-m compartment.cli --vault "{vault}" tray'
 
 
 # --- the Linux application entry --------------------------------------------
@@ -362,6 +374,22 @@ def systemd_available() -> bool:
     # unable to reach one at all is a no.
     return not ("failed to connect" in low or "offline" in low
                 or "no medium" in low or not out)
+
+
+def graphical_session_active() -> bool:
+    """Does this login's desktop start graphical-session.target?
+
+    The unit is WantedBy that target, so it starts at login only on a
+    desktop whose session manager activates it: GNOME, KDE Plasma, and
+    compositors set up for it. Xfce, MATE, Cinnamon (Linux Mint's default),
+    LXQt and a bare window manager never do, and there an enabled unit is a
+    unit that never starts - while the autostart entry it replaced, which
+    every XDG desktop reads, was deleted as the redundant second starter.
+    Asked while the desktop is up (install time, from its terminal); asked
+    from SSH or a text console it is inactive too, and the autostart entry,
+    which works everywhere, is the right answer there as well.
+    """
+    return _systemctl("is-active", "graphical-session.target")[0] == 0
 
 
 def systemd_unit_text(vault: str | None = None) -> str:
@@ -708,6 +736,32 @@ def _delete_run_value() -> None:
         pass
 
 
+#: Present at the root of every Flatpak sandbox.
+_FLATPAK_INFO = "/.flatpak-info"
+
+
+def _app_sandbox() -> str | None:
+    """The Flatpak or Snap this process is confined in, if any.
+
+    Inside one, XDG_CONFIG_HOME and XDG_DATA_HOME (Flatpak) or HOME itself
+    (Snap) point into the app's private directory, which the desktop never
+    reads, and the Python an entry would name is the sandbox's own, which
+    the desktop cannot run. `compartment init` typed into the terminal of a
+    Flatpak editor wrote its autostart entry there and reported start at
+    login as on."""
+    flatpak = os.environ.get("FLATPAK_ID")
+    if flatpak or os.path.isfile(_FLATPAK_INFO):
+        return f"a Flatpak sandbox ({flatpak or 'unknown app'})"
+    # Strict confinement only, which is what moves HOME to the snap's own
+    # SNAP_USER_DATA. A classic snap - VS Code's, among others - sets
+    # SNAP_NAME for every terminal it opens and confines nothing.
+    snap = os.environ.get("SNAP_NAME")
+    if (snap and os.environ.get("SNAP_USER_DATA")
+            and os.environ.get("HOME") == os.environ.get("SNAP_USER_DATA")):
+        return f"a Snap sandbox ({snap})"
+    return None
+
+
 def set_login(enabled: bool, vault: str | None = None) -> str:
     """Register or drop start at sign-in. Returns what actually happened.
 
@@ -722,6 +776,12 @@ def set_login(enabled: bool, vault: str | None = None) -> str:
             remove_systemd_unit()
             remove_autostart_entry()
             return "off" if remove_desktop_entry() else "error"
+        sandbox = _app_sandbox()
+        if sandbox:
+            return (f"error: this is running inside {sandbox}, where an "
+                    "entry would be written somewhere your desktop never "
+                    "reads. Run `compartment panel --login on` from a "
+                    "terminal outside it.")
         # Both, and they are not the same thing: the menu entry is how the
         # app is found, the autostart entry is how it comes up at login.
         out = install_desktop_entry(vault)
@@ -730,7 +790,8 @@ def set_login(enabled: bool, vault: str | None = None) -> str:
         # Supervised where the machine can be. A unit that enables but never
         # starts is not proof of anything, so it has to be active too, and
         # anything short of that is undone rather than left half installed.
-        if systemd_available():
+        # Only on a desktop that starts the unit's target at login at all.
+        if systemd_available() and graphical_session_active():
             if install_systemd_unit(vault) == "on" and systemd_active():
                 remove_autostart_entry()          # exactly one starter
                 return "on"
@@ -777,6 +838,155 @@ def set_login(enabled: bool, vault: str | None = None) -> str:
             return "off"
     except Exception as exc:                          # noqa: BLE001
         return f"error: {exc}"
+
+
+# --- when the panel cannot draw ---------------------------------------------
+# pip cannot install tkinter: it comes with the Python, or with a package of
+# the distribution's. "Install your distribution's Python Tk package" left
+# the user to find out what that is called, which differs on every family,
+# and is the wrong advice altogether for a Python the distribution did not
+# provide (pyenv, asdf, conda, one built from source), where the package
+# changes nothing.
+
+#: Per distribution family: the package that adds Tk to the distribution's
+#: own Python, and the headers a Python built from source needs to build it.
+_TK_BY_FAMILY = {
+    "debian": ("sudo apt install python3-tk", "sudo apt install tk-dev"),
+    "fedora": ("sudo dnf install python3-tkinter",
+               "sudo dnf install tk-devel"),
+    "suse": ("sudo zypper install python3-tk", "sudo zypper install tk-devel"),
+    "arch": ("sudo pacman -S tk", "sudo pacman -S tk"),
+    "alpine": ("sudo apk add python3-tkinter", "sudo apk add tk-dev"),
+    "void": ("sudo xbps-install python3-tkinter",
+             "sudo xbps-install tk-devel"),
+    "gentoo": ("enable the tk USE flag for dev-lang/python, then: "
+               "sudo emerge --oneshot dev-lang/python",
+               "sudo emerge dev-lang/tk"),
+}
+
+#: os-release ID and ID_LIKE words, to a family above.
+_TK_FAMILY_OF = {
+    "debian": "debian", "ubuntu": "debian", "linuxmint": "debian",
+    "pop": "debian", "raspbian": "debian", "kali": "debian",
+    "elementary": "debian", "zorin": "debian", "neon": "debian",
+    "fedora": "fedora", "rhel": "fedora", "centos": "fedora",
+    "rocky": "fedora", "almalinux": "fedora", "amzn": "fedora",
+    "ol": "fedora", "nobara": "fedora",
+    "suse": "suse", "opensuse": "suse", "sles": "suse",
+    "arch": "arch", "manjaro": "arch", "endeavouros": "arch",
+    "cachyos": "arch", "garuda": "arch", "steamos": "arch",
+    "alpine": "alpine", "postmarketos": "alpine",
+    "void": "void", "gentoo": "gentoo",
+}
+
+
+def _os_release() -> str:
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            continue
+    return ""
+
+
+def _distro_family(os_release: str) -> str | None:
+    fields = {}
+    for line in os_release.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip().strip("\"'").lower()
+    words = [fields.get("ID", "")] + fields.get("ID_LIKE", "").split()
+    for word in words:
+        if not word:
+            continue
+        # opensuse-tumbleweed, opensuse-leap, sles_sap and the like
+        for name in (word, word.split("-")[0], word.split("_")[0]):
+            if name in _TK_FAMILY_OF:
+                return _TK_FAMILY_OF[name]
+    return None
+
+
+def tk_install_hint(os_release: str | None = None,
+                    base_prefix: str | None = None,
+                    platform: str | None = None) -> str:
+    """The command that gives this Python tkinter, as exactly as this
+    machine allows. Pure given its arguments, which default to this
+    machine's, so every family is testable anywhere."""
+    platform = platform or sys.platform
+    prefix = base_prefix if base_prefix is not None else sys.base_prefix
+    ver = f"{sys.version_info[0]}{sys.version_info[1]}"
+    if "com.termux" in prefix:
+        return "pkg install x11-repo && pkg install python-tkinter"
+    if platform.startswith("freebsd"):
+        return f"sudo pkg install py{ver}-tkinter"
+    if platform.startswith("openbsd"):
+        return "doas pkg_add python-tkinter"
+    if platform.startswith("netbsd"):
+        return f"sudo pkgin install py{ver}-Tk"
+    if os.path.isdir(os.path.join(prefix, "conda-meta")):
+        return "conda install tk"
+    if "linuxbrew" in prefix or "homebrew" in prefix.lower():
+        return ("brew install "
+                f"python-tk@{sys.version_info[0]}.{sys.version_info[1]}")
+    if "/uv/python/" in prefix.replace(os.sep, "/"):
+        # uv's Pythons carry Tk; one without it is a damaged install.
+        return ("uv python install --reinstall "
+                f"{sys.version_info[0]}.{sys.version_info[1]}")
+    family = _distro_family(_os_release() if os_release is None
+                            else os_release)
+    system, headers = _TK_BY_FAMILY.get(family, (None, None))
+    if prefix.rstrip("/") not in ("/usr", ""):
+        # Not the distribution's Python: pyenv, asdf, a source build in
+        # /usr/local. Its _tkinter is built when the Python is, against
+        # Tk's headers, so the headers go in first and the Python is
+        # built again.
+        build = ("then build this Python again (pyenv: "
+                 "pyenv install --force "
+                 f"{sys.version_info[0]}.{sys.version_info[1]}."
+                 f"{sys.version_info[2]})")
+        return (f"{headers}, {build}" if headers else
+                f"install Tk's development headers, {build}")
+    return system or ("install your distribution's Tk package for Python "
+                      "(often python3-tk or python3-tkinter)")
+
+
+def tk_missing_message(what: str = "panel") -> str:
+    return ("error: this Python has no tkinter, which the "
+            f"{what} needs.\n"
+            f"  This Python is {sys.executable}. To give it tkinter:\n"
+            f"    {tk_install_hint()}\n"
+            "  Or install Compartment with uv, which brings its own Python "
+            "with tkinter in it:\n"
+            "    uv tool install compartment\n"
+            "  Everything else works without it: the CLI, the MCP server, "
+            "and `compartment dash`.")
+
+
+def no_display_message(exc: Exception) -> str:
+    """Why Tk could not open a window, in words that say what to do."""
+    text = str(exc)
+    low = text.lower()
+    if "init.tcl" in low or "tk.tcl" in low:
+        return (f"error: this Python's Tcl/Tk files are missing or not where "
+                f"it looks for them ({text}).\n"
+                "  Reinstall this Python, or install Compartment with uv, "
+                "whose Python carries its own:\n"
+                "    uv tool install compartment")
+    if (sys.platform not in ("win32", "darwin")
+            and os.environ.get("WAYLAND_DISPLAY")
+            and not os.environ.get("DISPLAY")):
+        # Tk draws through X11 only. A Wayland desktop runs XWayland for
+        # programs like it, usually on demand; this one has none running.
+        return ("error: the panel is drawn with Tk, which needs X11, and "
+                "this Wayland session has no X server (DISPLAY is not set).\n"
+                "  Turn XWayland on in your compositor (sway: `xwayland "
+                "enable`; GNOME and KDE start it by themselves when it is\n"
+                "  installed: package xwayland or xorg-x11-server-Xwayland), "
+                "or use `compartment dash` to read the vault in a browser.")
+    return (f"error: no graphical display to draw the panel on ({text}).\n"
+            "  On a headless machine use the CLI, or `compartment dash` to\n"
+            "  read the vault in a browser.")
 
 
 def panel_geometry(content: int, maximum: int) -> tuple[int, bool]:
@@ -844,13 +1054,7 @@ def run(vault: str | None = None, show: bool = False,
         import tkinter as tk
         from tkinter import ttk
     except ImportError:
-        print("error: this Python has no tkinter, which the "
-              f"{'tray panel' if tray else 'panel'} needs.\n"
-              "  The quickest fix is to install Compartment with uv, which\n"
-              "  brings its own Python with tkinter already in it:\n"
-              "    uv tool install compartment\n"
-              "  Otherwise install your distribution's Python Tk package\n"
-              "  (Debian/Ubuntu: python3-tk, Fedora: python3-tkinter).",
+        print(tk_missing_message("tray panel" if tray else "panel"),
               file=sys.stderr)
         return 3
     pystray = Image = None
@@ -859,8 +1063,13 @@ def run(vault: str | None = None, show: bool = False,
             import pystray
             from PIL import Image
         except ImportError:
-            print("error: the tray app needs pystray and Pillow.\n"
-                  "  pip install 'compartment[tray]'", file=sys.stderr)
+            # Into this interpreter, by name. The [tray] extra this used to
+            # name has been empty since the two became base dependencies,
+            # so installing it changed nothing.
+            print("error: the tray app needs pystray and Pillow, which this "
+                  "Python does not have.\n"
+                  f'  "{sys.executable}" -m pip install pystray pillow',
+                  file=sys.stderr)
             return 3
 
     # Read the DPI (and declare awareness) before the first window exists.
@@ -873,11 +1082,10 @@ def run(vault: str | None = None, show: bool = False,
     try:
         root = tk.Tk()
     except tk.TclError as exc:
-        # A machine with no desktop: SSH, a container, a CI runner. Say so
-        # in one line rather than showing a Tk stack trace.
-        print(f"error: no graphical display to draw the panel on ({exc}).\n"
-              "  On a headless machine use the CLI, or `compartment dash` to\n"
-              "  read the vault in a browser.", file=sys.stderr)
+        # A machine with no desktop (SSH, a container, a CI runner), a
+        # Wayland session with no XWayland, or a Python whose Tcl files are
+        # not where it looks. Say which, rather than show a Tk stack trace.
+        print(no_display_message(exc), file=sys.stderr)
         return 4
     if S != 1.0:
         # Tk sizes fonts in points; this is what turns a point into a pixel.
@@ -1362,10 +1570,27 @@ def run(vault: str | None = None, show: bool = False,
     return 0
 
 
-#: Every process on Windows with the command line that started it, as CSV.
+#: Every process on Windows with the command line that started it and the
+#: sign-in session it runs in, as CSV. SessionId is last, so the first three
+#: columns are where they always were.
 _WINDOWS_PROCESSES = ("Get-CimInstance Win32_Process | Select-Object "
-                      "ProcessId, ParentProcessId, CommandLine | "
+                      "ProcessId, ParentProcessId, CommandLine, SessionId | "
                       "ConvertTo-Csv -NoTypeInformation")
+
+
+def _windows_session() -> str | None:
+    """The Windows session this process runs in (one per signed-in user,
+    fast user switching included), or None if it cannot be asked."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        sid = wintypes.DWORD()
+        if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(),
+                                                       ctypes.byref(sid)):
+            return str(sid.value)
+    except Exception:                                 # noqa: BLE001
+        pass
+    return None
 
 #: A Windows command line that is the panel: the CLI, then its subcommand.
 _WINDOWS_APP = re.compile(r"compartment.*\s(menubar|panel|tray)(\s|$)",
@@ -1395,12 +1620,19 @@ def running_pids() -> list[int]:
         except (OSError, subprocess.SubprocessError):
             return []
         mine, pids = {os.getpid(), os.getppid()}, []
+        # Only this session's. With fast user switching, a second person
+        # signed in on the same PC has a tray app of their own, and from an
+        # elevated prompt their command lines are readable too: `init` then
+        # took theirs as this user's app coming up, and started none.
+        session = _windows_session()
         # Anything that is not a row - the header, a message instead of a
         # table - has no pid in its first field to misread.
         for row in csv.reader((out or "").splitlines()):
             if (len(row) > 2 and row[0].isdigit()
                     and int(row[0]) not in mine
-                    and _WINDOWS_APP.search(row[2])):
+                    and _WINDOWS_APP.search(row[2])
+                    and (session is None or len(row) < 4
+                         or row[3] == session)):
                 pids.append(int(row[0]))
         return pids
     # The app's own command line and this user's processes, as on macOS:
@@ -1462,6 +1694,7 @@ __all__ = ["run", "self_check", "login_status", "set_login", "quit_running",
            "autostart_entry_path", "install_autostart_entry",
            "autostart_is_enabled", "remove_autostart_entry",
            "systemd_unit_path", "systemd_unit_text", "systemd_available",
+           "graphical_session_active",
            "systemd_enabled", "install_systemd_unit", "remove_systemd_unit",
            "scheduled_task_xml", "install_scheduled_task",
            "remove_scheduled_task", "scheduled_task_registered",
