@@ -2773,7 +2773,10 @@ def main(argv: list[str] | None = None) -> None:
         args.fn(args)
         # Inside the try: buffered output reaches a pipe here, and a reader
         # that has gone away fails this flush, not one at interpreter exit.
-        sys.stdout.flush()
+        # A stdout already closed is left alone: mcp 1.x's stdio transport
+        # closes the buffer under sys.stdout when `serve` ends.
+        if not sys.stdout.closed:
+            sys.stdout.flush()
     except CryptoError as exc:
         _die(str(exc))
     except BrokenPipeError:

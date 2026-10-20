@@ -207,3 +207,16 @@ def test_a_new_signing_identity_is_readable_by_its_owner_alone(
                  out=tmp_path / "notes.mpack") for a in command]])
     assert os.stat(identity).st_mode & 0o777 == 0o600
     assert "generated signing identity" in capsys.readouterr().out
+
+
+def test_serve_ending_with_stdout_closed_by_the_transport_exits_cleanly(
+        monkeypatch, tmp_path):
+    """mcp 1.x's stdio transport closes the buffer under sys.stdout when the
+    session ends; the flush the CLI makes after every command then raised
+    ValueError, and `compartment serve` ended in a traceback with exit 1
+    each time a client hung up."""
+    import io
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr(cli, "cmd_serve", lambda args: out.buffer.close())
+    cli.main(["--vault", str(tmp_path / "v.vault"), "serve"])
