@@ -198,6 +198,10 @@ def _credential_gone(v: Vault) -> bool:
     return False
 
 
+class VaultMissingError(CryptoError):
+    """The vault this server was pointed at does not exist."""
+
+
 def _vault() -> Vault:
     v = _state["vault"]
     if v is not None and not v._locked and _credential_gone(v):
@@ -216,6 +220,13 @@ def _vault() -> Vault:
         _state["vault"] = None
         stale, v = v, None
     if v is None or v._locked:
+        if not os.path.exists(_state["path"]):
+            # Not "locked": `compartment unlock` cannot make a vault that is
+            # not there, and that is what the locked message sent people to.
+            raise VaultMissingError(
+                f"No vault at {_state['path']}. Create one with `compartment "
+                "init` on this machine, or point --vault in this client's "
+                "MCP config at the vault that exists.")
         # try silent re-unlock via keychain/env (user intent persists until
         # `compartment lock` clears the credential)
         sig = _credential_signature()
@@ -409,7 +420,18 @@ def _offload(fn):
     async def wrapper(*args, **kwargs):
         def _call():
             with _toolgate:
-                return fn(*args, **kwargs)
+                try:
+                    return fn(*args, **kwargs)
+                except ToolError:
+                    raise
+                except Exception as exc:                # noqa: BLE001
+                    # mcp 2.x passes the model the text of a ToolError
+                    # only; anything else arrives as "Error executing tool
+                    # <name>" and nothing more. A full disk, a vault file
+                    # this user cannot read, the shared embedding process
+                    # refusing a text: each says what it is, so the model
+                    # can tell the user, as mcp 1.x always let it.
+                    raise _fail(exc) from exc
         return await anyio.to_thread.run_sync(_call)
     return wrapper
 
@@ -822,6 +844,9 @@ def memory_status() -> str:
         # genuinely locked: say so, do not fail the call
         return json.dumps({"vault": _state["path"], "locked": True,
                            "message": str(exc)})
+    except VaultMissingError as exc:
+        return json.dumps({"vault": _state["path"], "exists": False,
+                           "message": str(exc)})
     except CryptoError as exc:
         raise _fail(exc) from exc
 
@@ -1001,6 +1026,13 @@ def main(argv: list[str] | None = None) -> None:
         _read_settings()
     except CryptoError:
         _state["vault"] = None  # start locked; tools will say so
+    except OSError as exc:
+        # The file is missing or unreadable. Starting anyway gives the
+        # client a server whose tools say what is wrong; dying here gave it
+        # a server that "failed to start", with the reason in a log file.
+        print(f"compartment: cannot open the vault at {args.vault}: {exc}",
+              file=sys.stderr, flush=True)
+        _state["vault"] = None
     threading.Thread(target=_autolock_loop, daemon=True).start()
     threading.Thread(target=_retag_loop, daemon=True).start()
     # SIGHUP too, where there is one: a client running in a terminal, as

@@ -522,6 +522,40 @@ def test_a_locked_vault_tells_the_model_what_to_run(vault_path, monkeypatch):
     assert "compartment unlock" in str(e.value), str(e.value)
 
 
+def test_a_vault_that_is_not_there_is_not_called_locked(tmp_path,
+                                                        monkeypatch):
+    """A client configured before `compartment init` ran, or with a --vault
+    that points nowhere: every tool said the vault was locked and to run
+    `compartment unlock`, which cannot make a vault that is not there."""
+    missing = str(tmp_path / "nowhere.vault")
+    monkeypatch.setenv("COMPARTMENT_PASSPHRASE", "CorrectHorse")
+    for key, value in (("vault", None), ("path", missing),
+                       ("caller", "agent")):
+        monkeypatch.setitem(server._state, key, value)
+    with pytest.raises(Exception) as e:
+        _through_the_sdk(monkeypatch, "memory_search", {"query": "anything"})
+    assert f"No vault at {missing}" in str(e.value), str(e.value)
+    assert "compartment init" in str(e.value)
+    status = json.loads(server.memory_status.__wrapped__())
+    assert status["exists"] is False and "compartment init" in \
+        status["message"]
+
+
+def test_a_failure_that_is_not_the_vaults_own_still_reaches_the_model(
+        serving, monkeypatch):
+    """mcp 2.x passes the model the text of a ToolError only. A full disk, a
+    file this user cannot read, the embedding process refusing a text, all
+    arrived as "Error executing tool memory_store" and nothing else."""
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(serving, "store", full)
+    with pytest.raises(Exception) as e:
+        _through_the_sdk(monkeypatch, "memory_store",
+                         {"text": "The staging database runs Postgres 16",
+                          "source": "from chat"})
+    assert "No space left on device" in str(e.value), str(e.value)
+
+
 @pytest.fixture()
 def own_state(monkeypatch):
     """A copy of server._state for this test, so that main() leaves nothing
@@ -625,6 +659,17 @@ def test_a_server_stopped_with_sigterm_saves_them_too(
         signal.raise_signal(signal.SIGTERM)
     _serve(monkeypatch, vault_path, session)
     assert ended == [(os.getpid(), signal.SIGTERM, signal.SIG_DFL, "search")]
+
+
+def test_a_server_whose_vault_is_missing_still_starts(tmp_path, own_state,
+                                                      monkeypatch):
+    """With the passphrase in the environment, a vault path that pointed
+    nowhere raised FileNotFoundError out of main(): the client showed a
+    server that failed to start, the reason in a log nobody opens."""
+    ran = []
+    _serve(monkeypatch, str(tmp_path / "nowhere.vault"),
+           lambda: ran.append(True))
+    assert ran == [True] and server._state["vault"] is None
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"),
