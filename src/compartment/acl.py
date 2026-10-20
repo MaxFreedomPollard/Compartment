@@ -54,6 +54,12 @@ class AclError(CryptoError):
     pass
 
 
+class ConfigError(AclError, ValueError):
+    """The config file exists and cannot be used. A ValueError as well, as
+    the json error it replaces was, so a caller that already catches a bad
+    config that way (the panel's settings switch) still does."""
+
+
 @dataclass
 class VaultConfig:
     # Deep copies: a shallow copy would hand every VaultConfig in the process
@@ -73,12 +79,41 @@ class VaultConfig:
         p = cls.path_for(vault_path)
         if not os.path.exists(p):
             return cls()
-        with open(p, encoding="utf-8") as f:
-            data = json.load(f)
+        # Bytes, not text: json.loads detects the encoding itself, so a file
+        # saved with a UTF-8 byte order mark (Notepad's "UTF-8 with BOM",
+        # Windows PowerShell 5.1's Set-Content -Encoding UTF8) or as UTF-16
+        # (that PowerShell's `>` redirection) opens like any other. Read as
+        # UTF-8 text, the first of those failed every unlock with
+        # "Unexpected UTF-8 BOM", after a user had done nothing but edit
+        # their ACLs in the editor Windows ships.
+        with open(p, "rb") as f:
+            raw = f.read()
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ConfigError(
+                cls._unreadable(p, f"it is not valid JSON ({exc})")) from None
+        if not isinstance(data, dict) or not isinstance(
+                data.get("callers", {}), dict) or not isinstance(
+                data.get("settings", {}), dict):
+            raise ConfigError(cls._unreadable(
+                p, 'it must be a JSON object whose "callers" and "settings" '
+                   'are objects'))
         cfg = cls()
         cfg.callers = data.get("callers", cfg.callers)
         cfg.settings = {**cfg.settings, **data.get("settings", {})}
         return cfg
+
+    @staticmethod
+    def _unreadable(path: str, why: str) -> str:
+        """The refusal for a config that cannot be used. It holds the access
+        rules, so the vault does not open on a guess, and the message says
+        what moving it aside would mean, since the defaults grant every
+        caller read-write everywhere."""
+        return (f"{path} cannot be used: {why}. It holds this vault's access "
+                "rules and settings, so the vault is not opened without it. "
+                "Fix the file, or move it aside to fall back to the defaults "
+                "(every caller reads and writes every namespace).")
 
     def save(self, vault_path: str) -> None:
         # Every unlock reads this file, so it is never rewritten in place: a

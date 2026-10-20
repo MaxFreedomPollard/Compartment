@@ -2174,7 +2174,11 @@ class Vault:
     def import_jsonl(self, text: str, caller: str = "user",
                      namespace: str | None = None) -> int:
         self._require_open()
-        records = [json.loads(l) for l in text.splitlines() if l.strip()]
+        # A file saved with a byte order mark (Notepad, Windows PowerShell's
+        # Out-File) arrives with U+FEFF in front of its first line, which
+        # json.loads refuses, and the whole import failed on line one.
+        records = [json.loads(l) for l in text.lstrip("\ufeff").splitlines()
+                   if l.strip()]
         # What store() embeds: the claim without its provenance clause, every
         # window of it. All of them go in one batched call, and each record
         # is handed its own block of rows. A claim of at most CHUNK_WINDOW
