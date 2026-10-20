@@ -291,16 +291,134 @@ def executable() -> str:
     `Compartment`, macOS filesystems are case-insensitive by default, and a
     config pointed at it would start the menu bar app every time a client
     tried to open a memory server.
+
+    `pip install --user`, which is what the install scripts for all three
+    platforms run, puts the script in the user scheme's directory
+    (~/Library/Python/3.X/bin, ~/.local/bin, or on Windows
+    %APPDATA%\\Python\\PythonXY\\Scripts), beside no interpreter and on no
+    PATH a GUI app or the panel's child process has. Looking only beside the interpreter and then on PATH
+    found nothing there and wrote the bare name: every client then failed
+    to start the server with "spawn compartment ENOENT". So the scripts
+    directory of the scheme this package was actually installed under is
+    asked first; it is the one pip wrote the script into, by definition.
+
+    A script found inside a package manager's versioned tree (Homebrew's
+    Cellar/compartment/<version>/libexec/bin) is dead after the next
+    upgrade and cleanup, while the link the package manager keeps on PATH
+    for it (/opt/homebrew/bin/compartment, and pipx's and uv's
+    ~/.local/bin links) is repointed by every upgrade. So when such a link
+    resolves to the very script found, the link is what is written.
     """
-    prefix = Path(sys.prefix)
-    for c in (prefix / "bin" / NAME, prefix / "Scripts" / f"{NAME}.exe",
-              Path(sys.executable).parent / NAME):
+    found = _installed_script()
+    if found is None:
+        which = shutil.which(NAME)
+        return which or NAME
+    return str(_stable_link(found))
+
+
+def _script_in(directory: Path) -> Path | None:
+    """The compartment console script in `directory`, if there is one and it
+    is not an app bundle's launcher."""
+    for c in (directory / NAME, directory / f"{NAME}.exe"):
         try:
             if c.is_file() and c.parent.name != "MacOS":
-                return str(c)
+                return c
         except OSError:
             pass
-    return shutil.which(NAME) or NAME
+    return None
+
+
+def _package_root() -> Path:
+    """The site-packages directory this copy of compartment was imported
+    from. An editable install's is the source tree, which no scheme
+    names."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _scheme_scripts() -> list[Path]:
+    """The scripts directory of each install scheme whose library directory
+    holds this package: where pip put the console script for this copy.
+
+    The schemes are expanded against the running interpreter's own prefix,
+    the venv's inside a venv, and the user scheme is the one pip uses for
+    `--user` on this platform (osx_framework_user for python.org's macOS
+    builds, nt_user on Windows, posix_user elsewhere)."""
+    import sysconfig
+    try:
+        here = _package_root()
+    except OSError:
+        return []
+    names = []
+    for get in (sysconfig.get_default_scheme,
+                lambda: sysconfig.get_preferred_scheme("prefix"),
+                lambda: sysconfig.get_preferred_scheme("user")):
+        try:
+            names.append(get())
+        except (KeyError, ValueError, AttributeError):
+            pass
+    out = []
+    for scheme in dict.fromkeys(names):
+        try:
+            paths = sysconfig.get_paths(scheme, vars={
+                "base": sys.prefix, "platbase": sys.exec_prefix})
+            libs = {Path(paths["purelib"]).resolve(),
+                    Path(paths["platlib"]).resolve()}
+        except (KeyError, ValueError, OSError):
+            continue
+        if here in libs:
+            out.append(Path(paths["scripts"]))
+    return out
+
+
+def _installed_script() -> Path | None:
+    """The console script that belongs to the running copy of compartment,
+    or None when there is none to be found (a source checkout run with
+    `python -m`)."""
+    prefix = Path(sys.prefix)
+    for d in (*_scheme_scripts(), prefix / "bin", prefix / "Scripts"):
+        hit = _script_in(d)
+        if hit is not None:
+            return hit
+    beside = Path(sys.executable).parent / NAME
+    try:
+        if beside.is_file() and beside.parent.name != "MacOS":
+            return beside
+    except OSError:
+        pass
+    return None
+
+
+def _link_dirs() -> list[Path]:
+    """Where package managers keep the links they repoint on upgrade."""
+    h = Path.home()
+    dirs = [h / ".local" / "bin", Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"), Path("/home/linuxbrew/.linuxbrew/bin"),
+            h / ".linuxbrew" / "bin", h / ".nix-profile" / "bin",
+            Path("/run/current-system/sw/bin"), h / "bin"]
+    user = os.environ.get("USER")
+    if user:
+        dirs.append(Path("/etc/profiles/per-user") / user / "bin")
+    return dirs
+
+
+def _stable_link(script: Path) -> Path:
+    """A link on PATH, or in a package manager's bin directory, that
+    resolves to `script` itself; `script` when there is none."""
+    try:
+        real = os.path.realpath(script)
+    except (OSError, ValueError):
+        return script
+    which = shutil.which(NAME)
+    candidates = ([Path(which)] if which else []) + [d / NAME
+                                                     for d in _link_dirs()]
+    for c in candidates:
+        try:
+            if (c.is_absolute() and c != script and c.is_symlink()
+                    and os.path.realpath(c) == real):
+                return c
+        except (OSError, ValueError):
+            continue
+    return script
 
 
 def server_args(vault: str, caller: str) -> list[str]:
