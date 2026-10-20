@@ -9,6 +9,15 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+# One run per branch at a time. A push to a pull request's branch fires both
+# `push` and `pull_request`, and every new commit used to leave the previous
+# runs going too, so the macOS jobs - the slowest runners to come free -
+# queued behind runs nobody would read. Keyed on the branch for both events,
+# the newest run cancels the rest; the weekly run has its own group.
+concurrency:
+  group: ci-${{ github.event_name == 'schedule' && 'weekly' || (github.head_ref || github.ref_name) }}
+  cancel-in-progress: true
+
 jobs:
   test-offline:
     # The full suite - including init, seed-pack install, selftest, store,
