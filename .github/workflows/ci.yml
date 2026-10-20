@@ -143,7 +143,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0  # exact: no floating major tags are published
       - name: A standalone, non-framework Python to embed
         shell: bash
         run: |
