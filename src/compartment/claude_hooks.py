@@ -154,7 +154,9 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
     data = _read(path)                                  # raises on malformed
     groups = _groups(data, path)                        # and on a bad shape
 
-    hooks = data.setdefault("hooks", {})
+    if data.get("hooks") is None:                       # absent, or null
+        data["hooks"] = {}
+    hooks = data["hooks"]
     # drop only our own previous entries, so re-installing updates in place
     kept = []
     for group in groups:

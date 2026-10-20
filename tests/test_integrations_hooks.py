@@ -106,3 +106,13 @@ def test_settings_whose_hooks_are_the_wrong_shape_are_refused_untouched(
         with pytest.raises(ValueError, match="refusing to touch it"):
             call()
     assert p.read_text(encoding="utf-8") == settings
+
+
+def test_settings_whose_hooks_are_null_get_the_hook(tmp_path):
+    """`"hooks": null` is no hooks at all; install died with TypeError on
+    it, which nothing catches."""
+    p = tmp_path / "settings.json"
+    p.write_text('{"hooks": null, "model": "opus"}', encoding="utf-8")
+    claude_hooks.install("compartment", settings=p)
+    assert claude_hooks.is_installed(settings=p) is True
+    assert claude_hooks.uninstall(settings=p) is True

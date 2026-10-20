@@ -965,7 +965,7 @@ def _jsonc_insert(text: str, obj: _JsoncObject, key: str, value,
                 + text[obj.open + 1:])
 
     first_key = min(k for k, _, _ in obj.spans.values())
-    last_key, _, last_end = max(obj.spans.values())
+    _, _, last_end = max(obj.spans.values())
     member_indent = _own_line_indent(text, first_key)
     if member_indent is None:                   # a one-line object
         compact = json.dumps(value)
