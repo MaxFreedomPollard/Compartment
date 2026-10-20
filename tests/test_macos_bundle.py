@@ -540,3 +540,16 @@ def test_a_busy_disk_image_is_tried_again(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "_run", run)
     b.build_dmg(app)
     assert len(tries) == 3
+
+
+def test_the_default_minimum_is_what_the_bundled_onnxruntime_needs():
+    """onnxruntime 1.23.2's macosx_13_0 wheels hold libraries that record a
+    minimum of macOS 13.4 (arm64 and x86_64), and 1.23.2 is the newest
+    release a macOS 13 build can have. A bundle declaring 13.0 installed on
+    13.0 to 13.3 and could not load its model there."""
+    b = _builder()
+    assert b._version_tuple(b.MIN_MACOS) >= (13, 4)
+    # pip's tags for macOS 11 and later are major versions only, so 13.4
+    # still selects the macosx_13_0 wheels it has to.
+    major, _minor = b._version_tuple(b.MIN_MACOS)
+    assert major == 13

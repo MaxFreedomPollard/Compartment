@@ -78,7 +78,14 @@ BUNDLE_ID = "io.github.maxfreedompollard.compartment"
 # allowed-os-versions, and - the part that is easy to miss - the platform
 # every wheel in the bundle is chosen for (_install_packages). 13 is also the
 # floor: SMAppService, which registers the login item, is macOS 13 and up.
-MIN_MACOS = "13.0"
+#
+# 13.4, not 13.0. onnxruntime 1.23.2 is the last release with macOS 13 (and
+# Intel) wheels, and its wheels are tagged macosx_13_0 while the libraries
+# inside record a minimum of 13.4, on arm64 and x86_64 alike (found by
+# _verify_deployment_target on a real build). Declaring 13.0 let macOS 13.0
+# to 13.3 install an app that could not load its embedding model. 13.4 is a
+# free update every macOS 13 Mac can take.
+MIN_MACOS = "13.4"
 # Shown under the app's name in System Settings > General > Login Items.
 DESCRIPTION = ("Compartment keeps your AI agents' memory encrypted on this Mac. "
                "The menu bar item shows what it has remembered and lets you "
