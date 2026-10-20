@@ -71,3 +71,19 @@ def test_an_export_passed_through_powershell_imports(vault):
 def test_a_curation_plan_with_a_byte_order_mark_parses():
     plan = curate.parse_plan('﻿{"id": "abc", "pieces": [{"text": "x"}]}\n')
     assert plan[0]["id"] == "abc"
+
+
+def test_an_export_from_another_tool_with_line_separators_in_text_imports(
+        vault):
+    """JSONL written with ensure_ascii=False leaves U+2028, U+2029 and U+0085
+    unescaped inside strings. splitlines() cut those lines in two and the
+    whole import failed on the first memory that contained one; CRLF line
+    ends are the Windows shape of the same file."""
+    texts = ["Line one line two of the same memory.",
+             "A paragraph and the next.",
+             "Next line\u0085character inside."]
+    jsonl = "\r\n".join(json.dumps({"text": t}, ensure_ascii=False)
+                        for t in texts) + "\r\n"
+    assert vault.import_jsonl(jsonl, caller="t") == 3
+    stored = sorted(r["text"] for r in vault.recent("t")["results"])
+    assert [t.split(" [")[0] for t in stored] == sorted(texts)

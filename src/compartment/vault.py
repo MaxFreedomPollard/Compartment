@@ -2177,7 +2177,13 @@ class Vault:
         # A file saved with a byte order mark (Notepad, Windows PowerShell's
         # Out-File) arrives with U+FEFF in front of its first line, which
         # json.loads refuses, and the whole import failed on line one.
-        records = [json.loads(l) for l in text.lstrip("\ufeff").splitlines()
+        # Split on newlines only, never splitlines(), for the reason
+        # curate.parse_plan gives: JSONL written with ensure_ascii=False
+        # (most tools other than this one) carries U+2028, U+2029 and U+0085
+        # unescaped inside strings, and splitlines() cut such a line in two,
+        # failing the whole import on a memory that merely contained one. A
+        # trailing \r from CRLF is whitespace to json.loads.
+        records = [json.loads(l) for l in text.lstrip("\ufeff").split("\n")
                    if l.strip()]
         # What store() embeds: the claim without its provenance clause, every
         # window of it. All of them go in one batched call, and each record
