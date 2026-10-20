@@ -89,6 +89,11 @@ def _can_prompt() -> bool:
 
 
 def _open_vault(args) -> Vault:
+    if not os.path.exists(args.vault):
+        # Before the credential: with none stored, a missing vault was
+        # reported as a locked one, and `compartment unlock` cannot help.
+        _die(f"no vault at {args.vault} (run `compartment init`, or pass "
+             "--vault PATH)")
     try:
         pw, key = Vault.resolve_credential(args.vault)
     except CryptoError:
@@ -2620,8 +2625,45 @@ def main(argv: list[str] | None = None) -> None:
         offline_guard.activate()
     try:
         args.fn(args)
+        # Inside the try: buffered output reaches a pipe here, and a reader
+        # that has gone away fails this flush, not one at interpreter exit.
+        sys.stdout.flush()
     except CryptoError as exc:
         _die(str(exc))
+    except BrokenPipeError:
+        # `compartment recent --all | head`: the reader took what it wanted
+        # and closed the pipe. Not a failure of the command, and not a
+        # traceback; stdout goes to the null device so that the flush at
+        # exit does not raise the same error again.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        sys.exit(130)
+    except OSError as exc:
+        # A file named on the command line that is not there or cannot be
+        # read, a folder that cannot be written, a full disk: said in one
+        # line naming the path, instead of a traceback an agent running
+        # the CLI has to read to the bottom of to find the same thing.
+        _die(_os_error_message(exc, args))
+
+
+def _os_error_message(exc: OSError, args) -> str:
+    """One line for an OSError that ended a command, naming the file."""
+    where = exc.filename
+    vault = getattr(args, "vault", None)
+    if (isinstance(exc, FileNotFoundError) and where is not None and vault
+            and os.path.abspath(os.fsdecode(where)) == os.path.abspath(vault)):
+        return (f"no vault at {vault} (run `compartment init`, or pass "
+                "--vault PATH)")
+    if where is None:
+        return str(exc)
+    if exc.filename2 is not None:
+        where = f"{os.fsdecode(where)} -> {os.fsdecode(exc.filename2)}"
+    return f"{exc.strerror or exc}: {os.fsdecode(where)}"
 
 
 if __name__ == "__main__":
