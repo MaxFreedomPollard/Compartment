@@ -185,3 +185,84 @@ def test_the_goose_button_uses_a_command_goose_accepts():
     assert _caller(q["arg"]) == clients.CLIENTS["goose"].key
     page = (ROOT / "add/goose.html").read_text(encoding="utf-8")
     assert f"<pre>uvx {' '.join(q['arg'])}</pre>" in page
+
+
+# --------------------------------------------- Claude Desktop (MCP Bundle) --
+def _registered_tools() -> list[str]:
+    import asyncio
+    from compartment import server
+    return [t.name for t in asyncio.run(server.mcp.list_tools())]
+
+
+def _build_mcpb():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "build_mcpb", ROOT / "tools" / "build_mcpb.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_bundle_is_a_uv_bundle_claude_desktop_can_run():
+    """manifest_version 0.4 is the MCPB release that added the uv server
+    type, the only type that can carry compiled dependencies (onnxruntime,
+    PyNaCl, argon2-cffi, numpy) to every platform from one bundle."""
+    m = _json("packaging/mcpb/manifest.json")
+    assert m["manifest_version"] == "0.4"
+    assert m["name"] == "compartment" and m["author"]["name"]
+    server = m["server"]
+    assert server["type"] == "uv"
+    assert (ROOT / "packaging/mcpb" / server["entry_point"]).is_file()
+    cfg = server["mcp_config"]
+    assert cfg["command"] == "uv"
+    assert cfg["args"][:3] == ["run", "--directory", "${__dirname}"]
+    assert cfg["args"][-1] == server["entry_point"]
+
+
+def test_the_bundle_lists_exactly_the_tools_the_server_registers():
+    """Claude Desktop shows this list before the server ever runs."""
+    m = _json("packaging/mcpb/manifest.json")
+    assert [t["name"] for t in m["tools"]] == _registered_tools()
+    assert m["tools_generated"] is False
+
+
+def test_the_bundle_starts_the_server_as_claude_desktop():
+    """The same caller `integrate claude` writes into Claude Desktop's own
+    config, so the two routes are one client to the audit log and ACL."""
+    entry = (ROOT / "packaging/mcpb/server/main.py").read_text(encoding="utf-8")
+    assert 'main(["--caller", "claude-desktop", "serve"])' in entry
+    assert '"--caller", "claude-desktop", "serve"' in (
+        ROOT / "src/compartment/cli.py").read_text(encoding="utf-8")
+
+
+def test_the_bundle_pins_an_interpreter_its_dependencies_have_wheels_for():
+    """uv otherwise picks the newest Python it can get, and onnxruntime
+    trails Python releases: a bundle without a pin, installed the week a
+    new Python ships, cannot build its environment."""
+    pinned = (ROOT / "packaging/mcpb/.python-version").read_text().strip()
+    text = (ROOT / "packaging/mcpb/pyproject.toml").read_text(encoding="utf-8")
+    lo, hi = re.search(r'requires-python = ">=(\d+\.\d+),<(\d+\.\d+)"', text).groups()
+    as_tuple = lambda v: tuple(int(x) for x in v.split("."))   # noqa: E731
+    assert as_tuple(lo) <= as_tuple(pinned) < as_tuple(hi)
+
+
+def test_the_bundle_build_is_complete_and_reproducible(tmp_path):
+    import zipfile
+    mod = _build_mcpb()
+    a = mod.build(tmp_path / "a", with_lock=False)
+    b = mod.build(tmp_path / "b", with_lock=False)
+    assert a.name == f"compartment-{mod.package_version()}.mcpb"
+    assert a.read_bytes() == b.read_bytes()
+    with zipfile.ZipFile(a) as z:
+        names = set(z.namelist())
+        manifest = json.loads(z.read("manifest.json"))
+    assert names == set(mod.CONTENTS)
+    assert manifest == _json("packaging/mcpb/manifest.json")
+    assert {manifest["icon"], manifest["server"]["entry_point"]} <= names
+
+
+def test_the_bundle_build_refuses_a_bundle_for_another_release():
+    import pytest
+    mod = _build_mcpb()
+    with pytest.raises(SystemExit, match="not the package's"):
+        mod.check("0.0.1")
