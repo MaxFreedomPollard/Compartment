@@ -761,6 +761,24 @@ def _login_plist(app: pathlib.Path) -> dict:
     }
 
 
+def _app_arch(app: pathlib.Path) -> str:
+    """The architecture of the built app, read from its executable."""
+    slices = _macho_slices(app / "Contents" / "MacOS" / APP_NAME)
+    if not slices:
+        raise SystemExit(f"error: {app} has no executable to read")
+    return ",".join(sorted(slices))
+
+
+def artifact_name(version: str, arch: str, ext: str) -> str:
+    """build/<this>: Compartment-<version>.pkg for Apple silicon, the build
+    the README and every release so far have linked, and
+    Compartment-<version>-intel.pkg for an Intel build. The two cannot share
+    a name: a release carries both, and whichever was uploaded second would
+    replace the first."""
+    suffix = "" if arch == "arm64" else "-intel"
+    return f"{APP_NAME}-{version}{suffix}.{ext}"
+
+
 def _app_min_macos(app: pathlib.Path) -> str:
     """The minimum macOS the built app declares. The installers take it from
     the app rather than from a constant of their own, so a .pkg can never
@@ -774,6 +792,11 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
     """A .pkg whose second, optional component starts it at login."""
     version = _version()
     min_macos = _app_min_macos(app)
+    # The installer agrees to run only on the Macs this build can start on.
+    # It used to say arm64,x86_64 whatever was inside, so an Intel Mac
+    # installed the Apple silicon app - which could never launch, and being
+    # a menu bar app said nothing about it.
+    arch = _app_arch(app)
     staging = BUILD / "pkgroot"
     login_root = BUILD / "pkgroot-login"
     for d in (staging, login_root):
@@ -846,7 +869,7 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
     dist.write_text(f"""<?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
   <title>Compartment</title>
-  <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+  <options customize="always" require-scripts="false" hostArchitectures="{arch}"/>
   <volume-check><allowed-os-versions><os-version min="{min_macos}"/></allowed-os-versions></volume-check>
   <choices-outline>
     <line choice="core"/>
@@ -866,7 +889,7 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
 </installer-gui-script>
 """, encoding="utf-8")
 
-    out = BUILD / f"{APP_NAME}-{version}.pkg"
+    out = BUILD / artifact_name(version, arch, "pkg")
     _run("productbuild", "--distribution", dist, "--package-path", BUILD, out)
     print(f"built {out}")
     return out
@@ -874,6 +897,7 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
 
 def build_dmg(app: pathlib.Path) -> pathlib.Path:
     version = _version()
+    arch = _app_arch(app)
     stage = BUILD / "dmg"
     if stage.exists():
         shutil.rmtree(stage)
@@ -888,7 +912,8 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
     (stage / "READ ME FIRST.txt").write_text(
         "Compartment " + version + "\n"
         "=================\n\n"
-        "Easiest install: use Compartment-" + version + ".pkg from the release page\n"
+        "Easiest install: use " + artifact_name(version, arch, "pkg")
+        + " from the release page\n"
         "instead of this disk image. It sets everything up in one click and\n"
         "skips the warning below entirely.\n\n"
         "If you would rather drag the app across:\n\n"
@@ -903,7 +928,7 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
         "just open Compartment.app again: it will show its panel in a window.\n\n"
         "Source, and every other way to install:\n"
         "https://github.com/MaxFreedomPollard/Compartment\n", encoding="utf-8")
-    out = BUILD / f"{APP_NAME}-{version}.dmg"
+    out = BUILD / artifact_name(version, arch, "dmg")
     out.unlink(missing_ok=True)
     _run("hdiutil", "create", "-volname", f"{APP_NAME} {version}",
          "-srcfolder", stage, "-ov", "-format", "UDZO", out)

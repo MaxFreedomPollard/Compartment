@@ -357,8 +357,8 @@ def test_the_installer_accepts_only_the_macos_the_app_declares(tmp_path,
                                                               monkeypatch):
     import plistlib
     b = _builder()
-    app = tmp_path / "Compartment.app"
-    (app / "Contents").mkdir(parents=True)
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (14, 0))})
     with open(app / "Contents" / "Info.plist", "wb") as fh:
         plistlib.dump({"LSMinimumSystemVersion": "14.0"}, fh)
     monkeypatch.setattr(b, "BUILD", tmp_path / "build")
@@ -436,3 +436,39 @@ def test_the_build_makes_its_scripts_relocatable_and_checks_them():
     assert body.index("_relocate_scripts(runtime)") < body.index("compileall")
     assert body.index("_verify_console_scripts(app)") \
         < body.index('_run("codesign"')
+
+
+# ------------------------------- an Intel build is an installer of its own
+
+def test_release_names_keep_apple_silicon_where_it_was_and_mark_intel():
+    b = _builder()
+    assert b.artifact_name("4.13.0", "arm64", "pkg") == "Compartment-4.13.0.pkg"
+    assert b.artifact_name("4.13.0", "arm64", "dmg") == "Compartment-4.13.0.dmg"
+    assert b.artifact_name("4.13.0", "x86_64", "pkg") == \
+        "Compartment-4.13.0-intel.pkg"
+
+
+@pytest.mark.parametrize("arch,suffix", [("arm64", ""),
+                                         ("x86_64", "-intel")])
+def test_the_installer_runs_only_on_the_macs_the_app_can_start_on(
+        tmp_path, monkeypatch, arch, suffix):
+    """It said arm64,x86_64 whatever was inside, so an Intel Mac installed
+    the Apple silicon app, which could never launch."""
+    import plistlib
+    b = _builder()
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho(arch, (13, 0))})
+    with open(app / "Contents" / "Info.plist", "wb") as fh:
+        plistlib.dump({"LSMinimumSystemVersion": "13.0"}, fh)
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    ran = []
+    monkeypatch.setattr(b, "_run", lambda *a, **k: ran.append(a))
+    out = b.build_pkg(app)
+    dist = (tmp_path / "build" / "distribution.xml").read_text()
+    assert f'hostArchitectures="{arch}"' in dist
+    version = b._version()
+    assert out.name == f"Compartment-{version}{suffix}.pkg"
+    dmg = b.build_dmg(app)
+    assert dmg.name == f"Compartment-{version}{suffix}.dmg"
+    readme = (tmp_path / "build" / "dmg" / "READ ME FIRST.txt").read_text()
+    assert f"Compartment-{version}{suffix}.pkg" in readme
