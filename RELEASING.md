@@ -33,6 +33,8 @@ server without the app.
 #      server.json   version             = "2.1.0"  the SEMVER form
 #      plugin.json   version             = "2.1.0"  Agent Plugins manifest
 #      gemini-extension.json version       = "2.1.0"  Gemini CLI extension manifest
+#      .claude-plugin/plugin.json version  = "2.1.0"  Claude Code plugin (Codex,
+#                                                     OpenClaw read it too)
 #
 #    The two server.json fields are deliberately NOT the same value. Step 5
 #    explains why; setting them both to "2.1" is what published a registry
@@ -49,7 +51,10 @@ server without the app.
 #    plugin.yaml pair sat at 1.7.0 while the package shipped 4.9.2.
 #
 #    tests/test_version_lockstep.py now fails when any of them disagree, so
-#    this list is a gate rather than a thing to remember.
+#    this list is a gate rather than a thing to remember. It also fails when
+#    a file anywhere in the tree carries a version it does not check, so a
+#    new manifest cannot join the list silently. docs/PLUGINS.md says what
+#    each store needs after the bump.
 
 python -m pytest -q                          # must be green
 
