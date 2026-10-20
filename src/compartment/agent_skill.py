@@ -67,11 +67,14 @@ def _claude_dir() -> Path | None:
 #: Every agent known to read the Agent Skills layout, and what relocates
 #: its home: the environment variable naming it, or a function working it
 #: out. Claude Code's is CLAUDE_CONFIG_DIR, which moves its skills/ with
-#: everything else.
+#: everything else. The default home is a function too, called when it is
+#: needed: Path.home() raises where HOME is unset and the uid has no passwd
+#: entry, and evaluated here it killed every `compartment` command at
+#: import in such a container.
 SKILL_TARGETS = {
-    "claude": (_claude_dir, Path.home() / ".claude"),
-    "hermes": ("HERMES_HOME", Path.home() / ".hermes"),
-    "openclaw": (_openclaw_dir, Path.home() / ".openclaw"),
+    "claude": (_claude_dir, lambda: Path.home() / ".claude"),
+    "hermes": ("HERMES_HOME", lambda: Path.home() / ".hermes"),
+    "openclaw": (_openclaw_dir, lambda: Path.home() / ".openclaw"),
 }
 
 
@@ -87,10 +90,12 @@ def agent_home(target: str) -> Path | None:
         return None
     var, default = entry
     if callable(var):
-        return var() or default
-    if var and os.environ.get(var):
+        override = var()
+        if override:
+            return override
+    elif var and os.environ.get(var):
         return Path(os.environ[var]).expanduser()
-    return default
+    return default() if callable(default) else default
 
 
 def skill_path(target: str) -> Path | None:

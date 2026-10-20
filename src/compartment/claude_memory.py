@@ -51,8 +51,35 @@ def claude_config_dir() -> Path:
     return Path.home() / ".claude"
 
 
-# Claude Code's per-project memory lives under <root>/<project-slug>/memory.
-DEFAULT_ROOT = claude_config_dir() / "projects"
+# Claude Code's per-project memory lives under <root>/<project-slug>/memory,
+# and <root> is DEFAULT_ROOT. It is worked out when it is asked for, not at
+# import: in a container run as an arbitrary uid, with HOME unset and no
+# passwd entry, Path.home() raises, and computing it here killed every
+# `compartment` command at import, including the ones that never touch
+# Claude Code. A caller may still pin DEFAULT_ROOT by assigning it.
+
+
+def _projects() -> Path:
+    try:
+        return claude_config_dir() / "projects"
+    except RuntimeError:
+        # No home directory to be found, so no Claude Code memory either:
+        # a path that names nothing, for discovery to find nothing in and
+        # `import-claude --help` to show, rather than an error.
+        return Path("~") / ".claude" / "projects"
+
+
+def default_root() -> Path:
+    """Where Claude Code keeps per-project memory: DEFAULT_ROOT when it has
+    been assigned, otherwise <Claude Code's directory>/projects, now."""
+    pinned = globals().get("DEFAULT_ROOT")
+    return Path(pinned) if pinned is not None else _projects()
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_ROOT":
+        return _projects()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 INDEX_NAME = "MEMORY.md"          # a table of contents, not a fact
 
 # Frontmatter `type` -> Compartment importance. Mirrors the vault's own tiers:
@@ -82,7 +109,7 @@ def auto_memory_dir() -> Path | None:
     resolve it against."""
     try:
         from .clients import _read_json
-        value = _read_json(DEFAULT_ROOT.parent / "settings.json").get(
+        value = _read_json(default_root().parent / "settings.json").get(
             "autoMemoryDirectory")
     except (OSError, ValueError):
         return None
@@ -97,7 +124,7 @@ def discover(root: Path | str | None = None) -> list[Path]:
     `root`, or by default under DEFAULT_ROOT and in the directory
     autoMemoryDirectory names."""
     if root is None:
-        out = discover(DEFAULT_ROOT)
+        out = discover(default_root())
         extra = auto_memory_dir()
         if extra is not None and extra.is_dir():
             out += [p for p in sorted(extra.glob("*.md"))
@@ -255,9 +282,9 @@ def pending(vault, root: Path | str | None = None) -> int:
 
 
 def default_root_exists() -> bool:
-    return DEFAULT_ROOT.exists() and bool(discover())
+    return default_root().exists() and bool(discover())
 
 
-__all__ = ["DEFAULT_ROOT", "discover", "parse", "import_files", "pending",
+__all__ = ["DEFAULT_ROOT", "default_root", "discover", "parse", "import_files", "pending",
            "default_root_exists", "IMPORTANCE", "file_tag",
            "claude_config_dir", "auto_memory_dir"]

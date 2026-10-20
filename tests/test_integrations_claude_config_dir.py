@@ -2,8 +2,6 @@
 settings.json, the per-project memory under projects/, skills/. People set
 it to run a second account, or to keep the directory in a dotfiles tree
 under a name that is not .claude."""
-import importlib
-
 import pytest
 
 from compartment import agent_skill, claude_hooks, claude_memory
@@ -12,16 +10,16 @@ from compartment import agent_skill, claude_hooks, claude_memory
 @pytest.fixture()
 def config_dir(monkeypatch, tmp_path):
     """CLAUDE_CONFIG_DIR set, as it is in the environment Claude Code and
-    `compartment` are started with, and the modules that read it at import
-    imported again; put back afterwards."""
+    `compartment` are started with. SETTINGS and DEFAULT_ROOT are worked out
+    when used; a value an earlier test's monkeypatch left assigned on its
+    way out would pin them, so none is left in place for this one."""
     d = tmp_path / "dotfiles" / "claude-work"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(d))
-    importlib.reload(claude_memory)
-    importlib.reload(claude_hooks)
-    yield d
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
-    importlib.reload(claude_memory)
-    importlib.reload(claude_hooks)
+    for module, name in ((claude_memory, "DEFAULT_ROOT"),
+                         (claude_hooks, "SETTINGS")):
+        if name in vars(module):
+            monkeypatch.delattr(module, name)
+    return d
 
 
 def test_the_hook_goes_into_the_settings_claude_code_reads(config_dir):

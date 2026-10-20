@@ -25,8 +25,25 @@ from pathlib import Path
 
 from . import claude_memory, clients
 
-#: Claude Code's user settings, which move with CLAUDE_CONFIG_DIR.
-SETTINGS = claude_memory.claude_config_dir() / "settings.json"
+# Claude Code's user settings, which move with CLAUDE_CONFIG_DIR, are
+# SETTINGS: worked out when asked for rather than at import, since
+# Path.home() raises where HOME is unset and the uid has no passwd entry
+# (a container run as an arbitrary uid), and an import-time lookup killed
+# every `compartment` command there. Assigning SETTINGS still pins it.
+
+
+def settings_path() -> Path:
+    """Claude Code's user settings.json: SETTINGS when it has been
+    assigned, otherwise <Claude Code's directory>/settings.json, now."""
+    pinned = globals().get("SETTINGS")
+    return Path(pinned) if pinned is not None else (
+        claude_memory.claude_config_dir() / "settings.json")
+
+
+def __getattr__(name: str):
+    if name == "SETTINGS":
+        return claude_memory.claude_config_dir() / "settings.json"
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 # Identifies OUR entries. Both tokens, not one literal string: the command
 # carries `--vault ...` between them when a vault is pinned, so a single
 # substring would stop matching and re-installing would duplicate the hook.
@@ -99,7 +116,7 @@ def is_ours(command: object) -> bool:
 def is_installed(settings: Path | None = None) -> bool:
     """Whether compartment's capture hook is in settings.json. Raises
     ValueError when the file cannot be read as settings."""
-    path = Path(settings) if settings else SETTINGS
+    path = Path(settings) if settings else settings_path()
     for group in _groups(_read(path), path):
         for h in group.get("hooks") or []:
             if is_ours(h.get("command")):
@@ -150,7 +167,7 @@ def _groups(data: dict, path: Path) -> list:
 def install(compartment_bin: str | None = None, vault: str | None = None,
             settings: Path | None = None) -> dict:
     """Add (or refresh) compartment's capture hook. Never removes anyone else's."""
-    path = Path(settings) if settings else SETTINGS
+    path = Path(settings) if settings else settings_path()
     data = _read(path)                                  # raises on malformed
     groups = _groups(data, path)                        # and on a bad shape
 
@@ -177,7 +194,7 @@ def install(compartment_bin: str | None = None, vault: str | None = None,
 
 
 def uninstall(settings: Path | None = None) -> bool:
-    path = Path(settings) if settings else SETTINGS
+    path = Path(settings) if settings else settings_path()
     data = _read(path)
     groups = _groups(data, path)
     if not groups:
@@ -331,4 +348,5 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
 
 
 __all__ = ["install", "uninstall", "is_installed", "is_ours", "capture", "hook_command",
-           "is_memory_file", "SETTINGS", "MARKER", "EVENT", "MATCHER"]
+           "is_memory_file", "SETTINGS", "settings_path", "MARKER", "EVENT",
+           "MATCHER"]
