@@ -736,6 +736,32 @@ def _delete_run_value() -> None:
         pass
 
 
+#: Present at the root of every Flatpak sandbox.
+_FLATPAK_INFO = "/.flatpak-info"
+
+
+def _app_sandbox() -> str | None:
+    """The Flatpak or Snap this process is confined in, if any.
+
+    Inside one, XDG_CONFIG_HOME and XDG_DATA_HOME (Flatpak) or HOME itself
+    (Snap) point into the app's private directory, which the desktop never
+    reads, and the Python an entry would name is the sandbox's own, which
+    the desktop cannot run. `compartment init` typed into the terminal of a
+    Flatpak editor wrote its autostart entry there and reported start at
+    login as on."""
+    flatpak = os.environ.get("FLATPAK_ID")
+    if flatpak or os.path.isfile(_FLATPAK_INFO):
+        return f"a Flatpak sandbox ({flatpak or 'unknown app'})"
+    # Strict confinement only, which is what moves HOME to the snap's own
+    # SNAP_USER_DATA. A classic snap - VS Code's, among others - sets
+    # SNAP_NAME for every terminal it opens and confines nothing.
+    snap = os.environ.get("SNAP_NAME")
+    if (snap and os.environ.get("SNAP_USER_DATA")
+            and os.environ.get("HOME") == os.environ.get("SNAP_USER_DATA")):
+        return f"a Snap sandbox ({snap})"
+    return None
+
+
 def set_login(enabled: bool, vault: str | None = None) -> str:
     """Register or drop start at sign-in. Returns what actually happened.
 
@@ -750,6 +776,12 @@ def set_login(enabled: bool, vault: str | None = None) -> str:
             remove_systemd_unit()
             remove_autostart_entry()
             return "off" if remove_desktop_entry() else "error"
+        sandbox = _app_sandbox()
+        if sandbox:
+            return (f"error: this is running inside {sandbox}, where an "
+                    "entry would be written somewhere your desktop never "
+                    "reads. Run `compartment panel --login on` from a "
+                    "terminal outside it.")
         # Both, and they are not the same thing: the menu entry is how the
         # app is found, the autostart entry is how it comes up at login.
         out = install_desktop_entry(vault)
