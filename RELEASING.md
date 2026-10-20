@@ -35,6 +35,10 @@ server without the app.
 #      gemini-extension.json version       = "2.1.0"  Gemini CLI extension manifest
 #      .claude-plugin/plugin.json version  = "2.1.0"  Claude Code plugin (Codex,
 #                                                     OpenClaw read it too)
+#      packaging/mcpb/manifest.json version = "2.1.0" Claude Desktop extension
+#      packaging/mcpb/pyproject.toml version = "2.1"   and its pin,
+#                                    "compartment==2.1" which is what it installs
+#      packaging/continue/compartment.yaml  version: 2.1   Continue hub block
 #
 #    The two server.json fields are deliberately NOT the same value. Step 5
 #    explains why; setting them both to "2.1" is what published a registry

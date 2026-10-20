@@ -3,7 +3,7 @@
   "name": "compartment",
   "displayName": "Compartment",
   "version": "4.12.0",
-  "description": "Encrypted, fully offline memory for Claude Code: one vault on your machine, shared with Claude Desktop, Cursor, Hermes and any other MCP client. Adds 14 memory tools and the /compartmentalize skill. Requires `pip install compartment && compartment init` first (the vault passphrase is yours to choose).",
+  "description": "Encrypted, fully offline memory for Claude Code: one vault on your machine, shared with Claude Desktop, Cursor, Hermes and any other MCP client. Adds 14 memory tools and the compartmentalize skill (/compartment:compartmentalize). Requires `pip install compartment && compartment init` first (the vault passphrase is yours to choose).",
   "author": {
     "name": "Max Freedom Pollard",
     "url": "https://github.com/MaxFreedomPollard"
