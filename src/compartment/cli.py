@@ -213,9 +213,21 @@ def cmd_init(args) -> None:
         keychain_store(path, v._master)
         print("  keychain credential stored (persists across reboots)")
     elif not args.no_session:
-        session.store(path, v._master)
-        print("  unlocked: stays open until the next restart/power loss or "
-              "`compartment lock`")
+        try:
+            session.store(path, v._master)
+            print("  unlocked: stays open until the next restart/power loss "
+                  "or `compartment lock`")
+        except CryptoError as exc:
+            # No volatile holder for the per-boot secret here (no shared
+            # memory: Termux, OpenBSD, a container without /dev/shm). The
+            # vault is made and seeded; dying at this point left the rest of
+            # init undone (the save, the agent wiring, the app) over a
+            # credential the vault does not need to exist.
+            print(f"  the vault is created and stays locked: this machine "
+                  f"cannot hold an unlock credential ({exc}).")
+            print("  Give agents and commands the passphrase in "
+                  "COMPARTMENT_PASSPHRASE, or check it with "
+                  "`compartment unlock --once`.")
     st = v.status()
     v.save()
     # Before the app appears, so the first thing anyone sees is a panel whose
