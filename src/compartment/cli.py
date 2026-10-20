@@ -10,6 +10,7 @@ import argparse
 import datetime
 import getpass
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -1046,11 +1047,29 @@ def cmd_menubar(args) -> None:
     sys.exit(app.run(args.vault, show=args.show, render_to=args.render))
 
 
+def _hook_payload() -> io.StringIO:
+    """The hook's JSON from stdin, decoded as the UTF-8 Claude Code writes.
+
+    Python decodes a piped stdin with the locale's encoding, which on
+    Windows is the ANSI code page: JSON.stringify leaves non-ASCII as it
+    is, so the path of a memory note under C:\\Users\\José\\.claude arrived
+    as C:\\Users\\JosÃ©\\.claude, which does not exist, and every capture on
+    such a machine was dropped as "file no longer exists"."""
+    buf = getattr(sys.stdin, "buffer", None)
+    try:
+        raw = buf.read() if buf is not None else sys.stdin.read()
+    except (OSError, ValueError):
+        raw = b""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8-sig", errors="replace")
+    return io.StringIO(raw)
+
+
 def cmd_hook(args) -> None:
     """Deterministic capture, so remembering does not depend on the model
     choosing to call a tool."""
     if args.hook_cmd == "capture":
-        res = claude_hooks.capture(vault_path=args.vault)
+        res = claude_hooks.capture(_hook_payload(), vault_path=args.vault)
         if args.json:
             _print(res)
         sys.exit(0)          # never fail a user's edit over a memory write
