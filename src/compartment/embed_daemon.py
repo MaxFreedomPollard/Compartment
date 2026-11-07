@@ -507,6 +507,10 @@ class _Daemon:
             if op == "embed_query":
                 return {"ok": True,
                         "vec": _pack(self._embedder(model).embed_query(req["text"]))}
+            if op == "embed_queries":
+                emb = self._embedder(model)
+                return {"ok": True, "vecs": _pack(emb.embed_queries(
+                    list(req["texts"]), batch=int(req.get("batch", 64))))}
             if op == "embed_passages":
                 emb = self._embedder(model)
                 return {"ok": True, "vecs": _pack(emb.embed_passages(
@@ -942,6 +946,26 @@ class RemoteEmbedder:
             except Unavailable:
                 pass
         return self._fallback().embed_query(text)
+
+    def embed_queries(self, texts: list[str], batch: int = 64) -> np.ndarray:
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.dim), np.float32)
+        if self._local is None:
+            try:
+                return np.concatenate([
+                    _unpack(self._call("embed_queries",
+                                       texts=texts[i:i + _PASSAGES_PER_CALL],
+                                       batch=int(batch))["vecs"])
+                    for i in range(0, len(texts), _PASSAGES_PER_CALL)])
+            except ValueError:
+                try:
+                    return np.vstack([self.embed_query(t) for t in texts])
+                except Unavailable:
+                    pass
+            except Unavailable:
+                pass
+        return self._fallback().embed_queries(texts, batch=batch)
 
     def embed_passages(self, texts: list[str], batch: int = 64) -> np.ndarray:
         texts = list(texts)

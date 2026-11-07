@@ -37,9 +37,10 @@ from .home import env, home
 
 from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
                       RECENT_COUNT,
-                      acquire_instance_lock, auto_lock_label,
+                      acquire_instance_lock, auto_lock_label, backup_vault,
                       change_passphrase, claim_first_run, create_vault,
-                      default_vault, integrate, lock_holder_pid, lock_vault,
+                      default_backup_filename, default_vault, integrate,
+                      lock_holder_pid, lock_vault, merge_vault,
                       open_dashboard, stop_dashboard,
                       offers_settings, release_instance_lock,
                       run_in_background, self_check,
@@ -114,10 +115,15 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
         # other state, unknown included, since locking is always safe.
         rows.append(("unlock", "Unlock") if state["locked"] is True
                     else ("lock", "Lock"))
-        # Changing the passphrase re-wraps the master key, which only exists
-        # in hand while the vault is open - so it is offered only then.
+        # Encrypted .vault backup works whether the vault is locked or open.
+        rows.append(("backup", "Back up…"))
+        # Merging another backup or changing the passphrase needs the vault
+        # open in RAM, so both are offered only while unlocked.
         if state["locked"] is False:
+            rows.append(("merge", "Merge…"))
             rows.append(("change", "Change password"))
+    if state.get("backup_note"):
+        rows.append(("backup_note", str(state["backup_note"])))
     s = state["settings"]
     # Not before there is a vault: see offers_settings.
     if offers_settings(state):
@@ -1110,6 +1116,74 @@ def run(vault: str | None = None, show: bool = False,
         """
         run_in_background(work, lambda out: root.after(0, lambda: then(out)))
 
+    def do_backup() -> None:
+        if panel.get("backup_busy"):
+            return
+        from tkinter import filedialog
+        parent = panel["win"] if (panel["win"] is not None
+                                  and panel["win"].winfo_exists()) else root
+        dest = filedialog.asksaveasfilename(
+            parent=parent,
+            title="Save Encrypted Vault Backup",
+            initialfile=default_backup_filename(),
+            defaultextension=".vault",
+            filetypes=[("Encrypted Compartment Vault", "*.vault"),
+                       ("All files", "*.*")])
+        if not dest:
+            return
+        panel["backup_busy"] = True
+        panel["backup_note"] = "Saving encrypted backup…"
+        redraw()
+
+        def backed_up(out):
+            _ok, msg = ((False, f"could not back up: {out}")
+                        if isinstance(out, Exception) else out)
+            panel["backup_busy"] = False
+            panel["backup_note"] = msg
+            redraw()
+        off_ui(lambda: backup_vault(vault_path, dest), backed_up)
+
+    def _finish_merge(payload) -> None:
+        panel["backup_busy"] = False
+        if isinstance(payload, Exception):
+            panel["merging_src"] = None
+            panel["merge_note"] = None
+            panel["backup_note"] = f"could not merge: {payload}"
+            redraw()
+            return
+        src, (ok, msg, needs_pw) = payload
+        if needs_pw:
+            panel["merging_src"] = src
+            panel["merge_note"] = msg
+            panel["backup_note"] = None
+            show_panel()
+            return
+        panel["merging_src"] = None
+        panel["merge_note"] = None
+        panel["backup_note"] = msg
+        if ok:
+            refresh()
+        else:
+            redraw()
+
+    def do_merge() -> None:
+        if panel.get("backup_busy"):
+            return
+        from tkinter import filedialog
+        parent = panel["win"] if (panel["win"] is not None
+                                  and panel["win"].winfo_exists()) else root
+        src = filedialog.askopenfilename(
+            parent=parent,
+            title="Merge Encrypted Vault Backup",
+            filetypes=[("Encrypted Compartment Vault", "*.vault"),
+                       ("All files", "*.*")])
+        if not src:
+            return
+        panel["backup_busy"] = True
+        panel["backup_note"] = f"Merging {Path(src).name}…"
+        redraw()
+        off_ui(lambda: (src, merge_vault(vault_path, src)), _finish_merge)
+
     def _content(frame, state) -> None:
         """Everything the panel shows. Packs into `frame`, never sizes it -
         deciding how tall the window gets is build()'s job, below."""
@@ -1164,6 +1238,56 @@ def run(vault: str | None = None, show: bool = False,
                        command=lambda: (panel.update(changing=False,
                                                      change_note=None),
                                         refresh())).pack(side="left", padx=6)
+            return
+
+        if (state["exists"] and state["locked"] is False
+                and panel.get("merging_src")):
+            src_path = panel["merging_src"]
+            ttk.Label(frame, text=f"Merge {Path(src_path).name}",
+                      wraplength=WRAP,
+                      font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            ttk.Label(frame,
+                      text="This backup uses a different passphrase. Memories "
+                           "are decrypted in RAM only; the backup file is "
+                           "never modified.",
+                      wraplength=WRAP, foreground="#666",
+                      justify="left").pack(anchor="w", pady=(2, 0))
+            ttk.Separator(frame).pack(fill="x", pady=10)
+            mpw = ttk.Entry(frame, show="\u2022", width=34)
+            mpw.pack(anchor="w")
+            panel["entries"].append(mpw)
+            mpw.focus_set()
+
+            def submit_merge_pw(*_):
+                if panel.get("backup_busy"):
+                    return
+                pw = mpw.get()
+                mpw.delete(0, "end")
+                if not pw:
+                    panel["merge_note"] = "enter the backup vault's passphrase"
+                    redraw()
+                    return
+                panel["backup_busy"] = True
+                panel["merge_note"] = f"Merging {Path(src_path).name}…"
+                redraw()
+                off_ui(lambda: (src_path, merge_vault(vault_path, src_path, pw)),
+                       _finish_merge)
+
+            mpw.bind("<Return>", submit_merge_pw)
+            if panel.get("merge_note"):
+                ttk.Label(frame, text=panel["merge_note"], wraplength=WRAP,
+                          foreground="#b00020",
+                          justify="left").pack(anchor="w", pady=(8, 0))
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", pady=(10, 0))
+            ttk.Button(bar, text="Merge",
+                       state=("disabled" if panel.get("backup_busy")
+                              else "normal"),
+                       command=submit_merge_pw).pack(side="left")
+            ttk.Button(bar, text="Cancel",
+                       command=lambda: (panel.update(merging_src=None,
+                                                     merge_note=None),
+                                        redraw())).pack(side="left", padx=6)
             return
 
         ttk.Label(frame, text=summarise(state), wraplength=WRAP,
@@ -1371,6 +1495,20 @@ def run(vault: str | None = None, show: bool = False,
                       wraplength=WRAP).pack(anchor="w", pady=(8, 0))
 
         ttk.Separator(frame).pack(fill="x", pady=10)
+        if state["exists"]:
+            vault_bar = ttk.Frame(frame)
+            vault_bar.pack(fill="x", pady=(0, 6))
+            busy_state = "disabled" if panel.get("backup_busy") else "normal"
+            ttk.Button(vault_bar, text="Back up…", state=busy_state,
+                       command=do_backup).pack(side="left")
+            if state["locked"] is False:
+                ttk.Button(vault_bar, text="Merge…", state=busy_state,
+                           command=do_merge).pack(side="left", padx=6)
+            if panel.get("backup_note"):
+                ttk.Label(frame, text=panel["backup_note"], wraplength=WRAP,
+                          foreground="#666",
+                          justify="left").pack(anchor="w", pady=(0, 6))
+
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Refresh",
@@ -1384,7 +1522,8 @@ def run(vault: str | None = None, show: bool = False,
                        command=lambda: off_ui(
                            lambda: states.lock(lambda: lock_vault(vault_path)),
                            lambda _out: (panel.update(note=None,
-                                                      changing=False),
+                                                      changing=False,
+                                                      merging_src=None),
                                          refresh()))
                        ).pack(side="left", padx=6)
         if state["exists"] and state["locked"] is False:
@@ -1542,6 +1681,7 @@ def run(vault: str | None = None, show: bool = False,
             menu=pystray.Menu(
                 pystray.MenuItem("Open Compartment", from_tray(show_panel),
                                  default=True),
+                pystray.MenuItem("Back up vault…", from_tray(do_backup)),
                 pystray.MenuItem("Lock now",
                                  from_tray(lambda: off_ui(
                                      lambda: states.lock(

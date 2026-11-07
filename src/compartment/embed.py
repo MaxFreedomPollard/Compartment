@@ -459,6 +459,17 @@ class Embedder:
     def embed_query(self, text: str) -> np.ndarray:
         return self._run([self.prefix_query + text])[0]
 
+    def embed_queries(self, texts: list[str], batch: int = 64) -> np.ndarray:
+        texts = [self.prefix_query + t for t in texts]
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        ids = self._encode(texts)
+        order = sorted(range(len(ids)), key=lambda i: len(ids[i]))
+        out = np.empty((len(ids), self.dim), dtype=np.float32)
+        for group in self._batches(order, ids, batch):
+            out[group] = self._infer([ids[i] for i in group])
+        return out
+
     def chunk(self, text: str, window: int = CHUNK_WINDOW,
               stride: int = CHUNK_STRIDE, max_chunks: int = MAX_CHUNKS) -> list[str]:
         """Split text into overlapping windows measured in MODEL tokens.

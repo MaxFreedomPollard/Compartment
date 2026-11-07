@@ -68,10 +68,12 @@ def _flags(kw: dict) -> int:
     lambda v: menubar.lock_vault(v),
     lambda v: menubar.create_vault(v + ".new", "pw", "pw"),
     lambda v: menubar.change_passphrase(v, "pw", "pw"),
+    lambda v: menubar.backup_vault(v, v + ".bak"),
+    lambda v: menubar.merge_vault(v, v + ".bak", "pw"),
     lambda v: menubar.integrate(v, "claude"),
     lambda v: menubar.open_dashboard(v),
-], ids=["unlock", "lock", "create", "change-password", "connect",
-        "dashboard"])
+], ids=["unlock", "lock", "create", "change-password", "backup", "merge",
+        "connect", "dashboard"])
 def test_every_button_starts_its_cli_without_a_console(children, tmp_path,
                                                        click):
     click(str(tmp_path / "memory.vault"))

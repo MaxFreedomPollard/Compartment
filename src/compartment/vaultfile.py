@@ -606,3 +606,78 @@ def verify_manifest(loaded: LoadedVaultFile) -> dict:
             "Sealed vault has journal entries appended after signing"
         )
     return m
+
+
+def backup_vault_file(source_path: str, dest_path: str) -> dict:
+    """Write a verified, release-consistent encrypted `.vault` backup copy.
+
+    Works whether the source vault is locked or unlocked because it copies the
+    on-disk FORMAT.md v1 image (`NUCV`, Argon2id / keyfile / 2FA keyslots,
+    XChaCha20-Poly1305 payload and committed journal frames) without ever
+    decrypting to disk. Any unacknowledged torn journal tail from an earlier
+    crash is stripped cleanly, the destination is created at mode 0o600 and
+    fsynced via atomic rename, and the finished file is parsed back to prove
+    integrity before returning."""
+    src_abs = os.path.abspath(source_path)
+    dst_abs = os.path.abspath(dest_path)
+    if src_abs == dst_abs:
+        raise VaultFormatError(
+            "Backup destination cannot be the same file as the live vault")
+    if not os.path.isfile(src_abs):
+        raise VaultFormatError(f"No vault found at {source_path}")
+    if os.path.exists(dst_abs):
+        try:
+            if os.path.samefile(src_abs, dst_abs):
+                raise VaultFormatError(
+                    "Backup destination cannot be the same file as the live vault")
+        except OSError:
+            pass
+    with open(src_abs, "rb") as f:
+        raw = f.read()
+    loaded = parse_vault_bytes(raw, source_path)
+    if not loaded.header.keyslots:
+        raise VaultFormatError("Vault header contains no keyslots")
+    if loaded.header.manifest:
+        verify_manifest(loaded)
+    clean = raw[:loaded.journal_end]
+
+    parent = os.path.dirname(dst_abs)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = dst_abs + ".tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, VAULT_MODE)
+        with os.fdopen(fd, "wb") as out:
+            out.write(clean)
+            out.flush()
+            _sync(out.fileno())
+        os.chmod(tmp, VAULT_MODE)
+        _atomic_replace(tmp, dst_abs)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _sync_dir(dst_abs)
+
+    with open(dst_abs, "rb") as f:
+        written = f.read()
+    verified = parse_vault_bytes(written, dest_path)
+    if verified.header.manifest:
+        verify_manifest(verified)
+    digest = crypto.sha256(written)
+    if digest != crypto.sha256(clean):
+        raise TamperError("Backup read-back checksum mismatch")
+    return {
+        "source": src_abs,
+        "dest": dst_abs,
+        "vault_id": verified.header.vault_id,
+        "format_version": FORMAT_VERSION,
+        "size_bytes": len(written),
+        "sha256": digest,
+        "journal_entries": len(verified.journal_cts),
+        "keyslot_types": [ks.get("type") for ks in verified.header.keyslots],
+        "signed": bool(verified.header.manifest),
+        "stripped_torn_bytes": int(loaded.tail_bytes),
+    }

@@ -26,6 +26,7 @@ from . import (__version__, agent_skill, audit, claude_desktop, claude_hooks,
 from .acl import ConfigError, VaultConfig
 from .crypto import CryptoError
 from .embed import DEFAULT_MODEL, OPTIONAL_MODELS, Embedder, get_embedder, user_model_dir
+from .platforms import detect_project_slug
 from .vault import Vault, keychain_clear, keychain_get, keychain_store
 from .vaultfile import read_vault_file, verify_manifest
 
@@ -903,6 +904,7 @@ def _write_private(path: str, text: str) -> None:
 
 
 def cmd_store(args) -> None:
+    import platform as _plat
     v = _open_vault(args)
     supersedes = getattr(args, "supersedes", None)
     if getattr(args, "keep_both", False):
@@ -910,6 +912,11 @@ def cmd_store(args) -> None:
             _die("--keep-both and --supersedes contradict each other: "
                  "one keeps the old opinion, the other replaces it")
         supersedes = []
+    prov = {"host": _plat.node(), "agent": args.caller,
+            "session": env("SESSION", "-")}
+    slug = detect_project_slug()
+    if slug:
+        prov["project"] = slug
     out = v.store(args.text, caller=args.caller, namespace=args.namespace,
                   tags=args.tag or [], importance=args.importance,
                   quarantined=args.quarantined, source=args.source,
@@ -917,6 +924,7 @@ def cmd_store(args) -> None:
                   expires=getattr(args, "expires", None),
                   kind=getattr(args, "kind", "fact"),
                   supersedes=supersedes,
+                  prov=prov,
                   _gate=not getattr(args, "raw", False))
     _print(out)
     if isinstance(out, dict) and out.get("stored") is False:
@@ -1292,9 +1300,75 @@ def cmd_forget(args) -> None:
     _print(v.forget(args.id, caller=args.caller, shred=args.shred))
 
 
+def cmd_backup(args) -> None:
+    if not os.path.exists(args.vault):
+        _die(f"no vault at {args.vault} (run `compartment init`, or pass "
+             "--vault PATH)")
+    out = args.out or (f"compartment-backup-"
+                       f"{datetime.date.today().isoformat()}.vault")
+    out = os.path.expanduser(out)
+    info = Vault.backup(args.vault, out)
+    if getattr(args, "json", False):
+        _print(info)
+        return
+    kb = info["size_bytes"] / 1024.0
+    signed = ", signed" if info["signed"] else ""
+    stripped = (f", stripped {info['stripped_torn_bytes']}B torn tail"
+                if info["stripped_torn_bytes"] else "")
+    j_noun = "entry" if info["journal_entries"] == 1 else "entries"
+    print(f"encrypted backup verified → {info['dest']} "
+          f"({kb:,.1f} KB, {info['journal_entries']} journal {j_noun}"
+          f"{signed}{stripped}, sha256 {info['sha256'][:16]}…)")
+
+
+def cmd_merge(args) -> None:
+    src = os.path.expanduser(args.file)
+    if not os.path.isfile(src):
+        _die(f"backup file not found: {src}")
+    v = _open_vault(args)
+    src_pw = None
+    if getattr(args, "source_passphrase_stdin", False):
+        src_pw = _passphrase_from_stdin()
+        if not src_pw:
+            _die("no passphrase on stdin")
+    src_kf = None
+    if getattr(args, "source_keyfile", None):
+        kp = Path(args.source_keyfile).expanduser()
+        if not kp.is_file():
+            _die(f"source keyfile not found: {kp}")
+        src_kf = kp.read_bytes()
+    try:
+        info = v.merge(src, passphrase=src_pw, keyfile=src_kf,
+                       caller=args.caller)
+    except CryptoError as exc:
+        if ("different master key" in str(exc) and src_pw is None
+                and _can_prompt()):
+            src_pw = getpass.getpass(f"Passphrase for backup {src}: ")
+            info = v.merge(src, passphrase=src_pw, keyfile=src_kf,
+                           caller=args.caller)
+        else:
+            raise
+    if getattr(args, "json", False):
+        _print(info)
+        return
+    n = info["imported"]
+    rel_noun = "relation" if info["relations_added"] == 1 else "relations"
+    print(f"merged {n} {'memory' if n == 1 else 'memories'} from {src} "
+          f"({info['duplicates']} already present, "
+          f"{info['updated']} updated, "
+          f"{info['seeded_skipped']} starter skipped, "
+          f"{info['relations_added']} {rel_noun} added)")
+    if info["reembedded"]:
+        print("  note: backup used a different embedding model; imported "
+              "memories were re-embedded offline for this vault.")
+
+
 def cmd_export(args) -> None:
     v = _open_vault(args)
-    data = v.export_jsonl()
+    data = v.export_jsonl(
+        caller=args.caller,
+        include_seeded=not getattr(args, "organic_only", False),
+        include_relations=bool(getattr(args, "include_relations", False)))
     if args.plaintext:
         print("WARNING: exporting PLAINTEXT memories to disk", file=sys.stderr)
         _write_private(args.out, data)
@@ -1342,7 +1416,14 @@ def _check_jsonl(path: str, text: str) -> None:
         except ValueError as exc:
             _die(f"{path}, line {no}: not JSON ({exc.msg}). Each line must "
                  "be one record, as `compartment export` writes them")
-        if not isinstance(rec, dict) or not isinstance(rec.get("text"), str):
+        if not isinstance(rec, dict):
+            _die(f"{path}, line {no}: a record needs a \"text\" string")
+        if rec.get("type") == "relation":
+            if not all(isinstance(rec.get(k), str) and rec[k].strip()
+                       for k in ("subject", "predicate", "object")):
+                _die(f"{path}, line {no}: a relation record needs non-empty "
+                     "\"subject\", \"predicate\" and \"object\" strings")
+        elif not isinstance(rec.get("text"), str):
             _die(f"{path}, line {no}: a record needs a \"text\" string")
 
 
@@ -1350,7 +1431,7 @@ def cmd_import(args) -> None:
     text = _read_text_file(args.file)
     _check_jsonl(args.file, text)
     v = _open_vault(args)
-    n = v.import_jsonl(text, namespace=args.namespace)
+    n = v.import_jsonl(text, namespace=args.namespace, caller=args.caller)
     print(f"imported {n} {'record' if n == 1 else 'records'}")
 
 
@@ -2707,9 +2788,36 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--shred", action="store_true")
     p.set_defaults(fn=cmd_forget)
 
+    p = sub.add_parser("backup",
+                       help="verified encrypted .vault backup (works locked "
+                            "or unlocked, zero plaintext)")
+    p.add_argument("out", nargs="?", default=None,
+                   help="destination .vault path (default: "
+                        "compartment-backup-YYYY-MM-DD.vault)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_backup)
+
+    p = sub.add_parser("merge",
+                       help="losslessly merge another encrypted .vault backup "
+                            "into this vault in RAM (zero plaintext on disk)")
+    p.add_argument("file", help="path to the .vault backup to merge")
+    p.add_argument("--source-passphrase-stdin", action="store_true",
+                   help="read the backup vault's passphrase from stdin (only "
+                        "needed when the backup uses a different passphrase)")
+    p.add_argument("--source-keyfile", metavar="PATH",
+                   help="second-factor keyfile for the backup vault, if 2FA "
+                        "was enabled on it")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_merge)
+
     p = sub.add_parser("export", help="JSONL escape hatch (requires --plaintext)")
     p.add_argument("out")
     p.add_argument("--plaintext", action="store_true")
+    p.add_argument("--organic-only", action="store_true",
+                   help="exclude seeded starting memories so only memories "
+                        "stored during use are written")
+    p.add_argument("--include-relations", action="store_true",
+                   help="also export relation-graph edges")
     p.set_defaults(fn=cmd_export)
 
     p = sub.add_parser("import", help="import JSONL records")

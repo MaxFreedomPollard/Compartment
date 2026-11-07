@@ -534,3 +534,152 @@ def file_signature(path) -> tuple | None:
     except (OSError, ValueError):
         return None
     return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+# ---------------------------------------------------------------------------
+# Project identity - cross-OS repository slug without spawning git
+# ---------------------------------------------------------------------------
+
+def normalize_git_remote(url: str) -> str | None:
+    """Turn a git remote URL into a canonical lowercase project slug, or None.
+
+    SSH (`git@github.com:Owner/Repo.git`), HTTPS (`https://github.com/Owner/Repo`),
+    explicit-port (`ssh://git@host:2222/Owner/Repo.git`) and credentialled URLs
+    all collapse to the same `"owner/repo"` string so checkouts on macOS,
+    Windows and Linux share one project identity regardless of folder name or
+    clone transport."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    raw = raw.split("?", 1)[0].split("#", 1)[0].strip()
+    path_part: str | None = None
+    if "://" in raw:
+        scheme, rest = raw.split("://", 1)
+        scheme_l = scheme.lower()
+        if scheme_l == "file":
+            cleaned = rest.replace("\\", "/").rstrip("/")
+            if cleaned.lower().endswith(".git"):
+                cleaned = cleaned[:-4]
+            leaf = cleaned.rsplit("/", 1)[-1].strip().lower()
+            return leaf or None
+        if "/" not in rest:
+            return None
+        _, path_part = rest.split("/", 1)
+    elif (":" in raw and "\\" not in raw
+          and not (len(raw) >= 2 and raw[1] == ":" and raw[0].isalpha())):
+        prefix, rest = raw.split(":", 1)
+        if prefix and "/" not in prefix:
+            path_part = rest
+    if path_part is None:
+        cleaned = raw.replace("\\", "/").rstrip("/")
+        if cleaned.lower().endswith(".git"):
+            cleaned = cleaned[:-4]
+        leaf = cleaned.rsplit("/", 1)[-1].strip().lower()
+        return leaf or None
+    path_part = path_part.replace("\\", "/").strip("/")
+    if path_part.lower().endswith(".git"):
+        path_part = path_part[:-4].rstrip("/")
+    segs = [s.strip().lower() for s in path_part.split("/")
+            if s.strip() and s.strip() not in (".", "..")]
+    if not segs:
+        return None
+    return "/".join(segs)
+
+
+def _git_config_remote_slug(config_path: Path) -> str | None:
+    """Read `[remote "origin"]` (or first remote) from `.git/config`."""
+    try:
+        text = config_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    section_remote: str | None = None
+    remotes: dict[str, str] = {}
+    order: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            inner = line[1:-1].strip()
+            section_remote = None
+            if inner.lower().startswith("remote "):
+                rem = inner[7:].strip()
+                if len(rem) >= 2 and rem[0] == '"' and rem[-1] == '"':
+                    rem = rem[1:-1]
+                if rem:
+                    section_remote = rem
+            continue
+        if section_remote is not None and "=" in line:
+            k, v = line.split("=", 1)
+            if k.strip().lower() == "url":
+                val = v.strip()
+                if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+                    val = val[1:-1]
+                if val and section_remote not in remotes:
+                    remotes[section_remote] = val
+                    order.append(section_remote)
+    candidates = (["origin"] if "origin" in remotes else []) + [
+        r for r in order if r != "origin"]
+    for name in candidates:
+        slug = normalize_git_remote(remotes[name])
+        if slug:
+            return slug
+    return None
+
+
+def detect_project_slug(start: str | os.PathLike | None = None) -> str | None:
+    """Canonical project slug for `start` (or cwd), with zero subprocesses.
+
+    Walks upward for `.git` (directory, submodule file, or worktree gitdir +
+    `commondir`), normalizes `remote.origin.url`, and falls back to the
+    repository directory name when a local git repo has no remote yet. Returns
+    `None` outside a git repository."""
+    try:
+        cur = Path(os.path.abspath(os.fspath(start))) if start is not None \
+            else Path(os.getcwd()).resolve()
+    except OSError:
+        return None
+    try:
+        if cur.exists() and not cur.is_dir():
+            cur = cur.parent
+    except OSError:
+        cur = cur.parent
+    visited: set[Path] = set()
+    while cur not in visited:
+        visited.add(cur)
+        dot_git = cur / ".git"
+        git_dir: Path | None = None
+        try:
+            if dot_git.is_dir():
+                git_dir = dot_git
+            elif dot_git.is_file():
+                first = dot_git.read_text(
+                    encoding="utf-8", errors="replace").splitlines()
+                if first and first[0].lower().startswith("gitdir:"):
+                    target = first[0].split(":", 1)[1].strip()
+                    git_dir = (cur / target).resolve()
+        except OSError:
+            git_dir = None
+        if git_dir is not None:
+            common_dir = git_dir
+            try:
+                cd_file = git_dir / "commondir"
+                if cd_file.is_file():
+                    rel = cd_file.read_text(
+                        encoding="utf-8", errors="replace").strip()
+                    if rel:
+                        common_dir = (git_dir / rel).resolve()
+            except OSError:
+                common_dir = git_dir
+            slug = (_git_config_remote_slug(common_dir / "config")
+                    or _git_config_remote_slug(git_dir / "config"))
+            if slug:
+                return slug
+            fallback = cur.name.strip().lower()
+            return fallback or None
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return None
+

@@ -18,6 +18,7 @@ import numpy as np
 
 from . import crypto, wire
 from .crypto import CryptoError
+from .ranking import camel_subtokens
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS relations (
 CREATE INDEX IF NOT EXISTS rel_subject ON relations(subject_n);
 CREATE INDEX IF NOT EXISTS rel_object ON relations(object_n);
 CREATE INDEX IF NOT EXISTS rel_predicate ON relations(predicate_n);
+CREATE INDEX IF NOT EXISTS rel_src ON relations(src_id);
 CREATE TABLE IF NOT EXISTS audit (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -176,6 +178,8 @@ class Store:
         # GROUP BY over every record. Dropped by whatever adds a record,
         # removes one or moves one to another namespace.
         self._ns_cache: list[dict] | None = None
+        self._relation_n: int | None = None
+        self._rel_ns_cache: set[str] | None = None
         try:
             if image is not None:
                 self.conn.deserialize(image)
@@ -314,7 +318,7 @@ class Store:
         # searchable surface: no FTS row, exactly as tombstone() leaves one.
         if superseded_by is None:
             cur = self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
-                                    (rid, text))
+                                    (rid, self._fts_text(text)))
             self._fts_added(rid, cur.lastrowid)
         elif self._superseded_n is not None:
             self._superseded_n += 1
@@ -322,6 +326,13 @@ class Store:
         self._recency_add(rid)
         self._invalidate_namespaces()
         return rid
+
+    @staticmethod
+    def _fts_text(text: str) -> str:
+        """Append camelCase sub-tokens for FTS5 indexing when `text` contains
+        mixed-case identifiers; returns `text` unchanged on ordinary prose."""
+        extra = camel_subtokens(text)
+        return f"{text}\n{' '.join(extra)}" if extra else text
 
     def tombstone(self, record_id: str, by: str) -> bool:
         """Mark a record superseded by another. The row, its ciphertext and
@@ -380,8 +391,9 @@ class Store:
             self.conn.execute(
                 "UPDATE records SET superseded_by = NULL WHERE id = ?", (rid,))
             row = self.get_row(rid)
-            cur = self.conn.execute("INSERT INTO fts (id, text) VALUES (?, ?)",
-                                    (rid, self.decrypt_text(row, master_key)))
+            cur = self.conn.execute(
+                "INSERT INTO fts (id, text) VALUES (?, ?)",
+                (rid, self._fts_text(self.decrypt_text(row, master_key))))
             self._fts_added(rid, cur.lastrowid)
             restored.append(rid)
         if restored:
@@ -587,7 +599,7 @@ class Store:
     #: candidates, so SELECT * costs megabytes of copying to reach eleven
     #: small columns. The full row is fetched only for the results returned.
     RANK_COLUMNS = ("id, ns, pack, tags, importance, created, affirmed, "
-                    "kind, superseded_by, expires, discovered")
+                    "kind, superseded_by, expires, discovered, prov")
 
     def rank_row(self, record_id: str) -> sqlite3.Row | None:
         """One candidate's ranking and filtering columns, without its body."""
@@ -667,7 +679,7 @@ class Store:
     # hook's "claude-file:<project>/<file>" tag is the same kind: it names the
     # memory file a record came from, so it must not spread to a neighbour as
     # if it were a subject, nor be pruned off the record it names.
-    PROTECTED_TAG_PREFIXES = ("id:", "claude-file:")
+    PROTECTED_TAG_PREFIXES = ("id:", "claude-file:", "project:")
 
     def protected_tags(self, record_id: str) -> list[str]:
         row = self.conn.execute(
@@ -829,6 +841,29 @@ class Store:
         self._df_cache[key] = n
         return n
 
+    def _expanded_terms(self, query: str) -> list[str]:
+        """Query terms, expanding a camelCase identifier into its sub-parts
+        only when the compound spelling itself never occurs in the vault."""
+        base = self._terms(query)
+        seen = {t.lower() for t in base}
+        out: list[str] = []
+        for t in base:
+            extra = camel_subtokens(t)
+            if extra and self.doc_frequency(t) == 0:
+                added = False
+                for p in extra:
+                    if p not in seen:
+                        seen.add(p)
+                        out.append(p)
+                        added = True
+                    elif p in out:
+                        added = True
+                if not added:
+                    out.append(t)
+            else:
+                out.append(t)
+        return out
+
     def fts_search(self, query: str, limit: int,
                    common_fraction: float = 0.10) -> list[tuple[str, float]]:
         """BM25 keyword search, best-first. Returns (id, rank); rank is -bm25.
@@ -846,7 +881,7 @@ class Store:
         vault rather than taken from an English stopword list, so it behaves
         the same for a vault full of code, names, or another language.
         """
-        terms = self._terms(query)
+        terms = self._expanded_terms(query)
         if not terms:
             return []
         hits = self._match(" ".join(f'"{t}"' for t in terms), limit)
@@ -865,7 +900,7 @@ class Store:
         """
         total = max(1, self.count())
         info = {}
-        for t in self._terms(query):
+        for t in self._expanded_terms(query):
             df = self.doc_frequency(t)
             if df > 0:
                 info[t] = math.log(total / (1.0 + df))
@@ -890,6 +925,9 @@ class Store:
              predicate.strip(), self._norm_entity(predicate),
              obj.strip(), self._norm_entity(obj), ns, src_id,
              valid_from, valid_to, json.dumps(prov), created or time.time()))
+        if self._relation_n is not None:
+            self._relation_n += 1
+        self._rel_ns_cache = None
         return rid
 
     def find_relation(self, subject: str, predicate: str, obj: str,
@@ -906,7 +944,12 @@ class Store:
 
     def delete_relation(self, rel_id: str) -> bool:
         cur = self.conn.execute("DELETE FROM relations WHERE id = ?", (rel_id,))
-        return cur.rowcount > 0
+        if cur.rowcount > 0:
+            if self._relation_n is not None:
+                self._relation_n = max(0, self._relation_n - 1)
+            self._rel_ns_cache = None
+            return True
+        return False
 
     def query_relations(self, *, entity: str | None = None,
                         subject: str | None = None, predicate: str | None = None,
@@ -948,8 +991,62 @@ class Store:
         return self.conn.execute(sql, params).fetchall()
 
     def relation_count(self) -> int:
-        return self.conn.execute(
-            "SELECT COUNT(*) c FROM relations").fetchone()["c"]
+        if self._relation_n is None:
+            self._relation_n = int(self.conn.execute(
+                "SELECT COUNT(*) c FROM relations").fetchone()["c"])
+        return self._relation_n
+
+    def relation_namespaces(self) -> set[str]:
+        if self.relation_count() == 0:
+            return set()
+        if self._rel_ns_cache is None:
+            self._rel_ns_cache = {
+                r["ns"] for r in self.conn.execute(
+                    "SELECT DISTINCT ns FROM relations")}
+        return set(self._rel_ns_cache)
+
+    def graph_neighbors(self, entity_norms: set[str], seed_rids: list[str], *,
+                        as_of: float | None = None,
+                        ns_in: set[str] | None = None,
+                        limit: int = 64) -> list[sqlite3.Row]:
+        """Indexed 1-hop relation lookup by normalized entity names and seed
+        record ids. Probes `rel_subject`, `rel_object` and `rel_src` directly
+        so `relations` is never scanned."""
+        if self.relation_count() == 0:
+            return []
+        if ns_in is not None and not ns_in:
+            return []
+        by_id: dict[str, sqlite3.Row] = {}
+        norms = sorted(e for e in entity_norms if e)
+        if norms:
+            ph = ",".join("?" * len(norms))
+            for col in ("subject_n", "object_n"):
+                for r in self.conn.execute(
+                        f"SELECT * FROM relations WHERE {col} IN ({ph}) LIMIT ?",
+                        (*norms, limit * 2)):
+                    by_id[r["id"]] = r
+        rids = sorted({rid for rid in seed_rids if rid})
+        if rids:
+            ph = ",".join("?" * len(rids))
+            for r in self.conn.execute(
+                    f"SELECT * FROM relations WHERE src_id IN ({ph}) LIMIT ?",
+                    (*rids, limit * 2)):
+                by_id[r["id"]] = r
+        out: list[sqlite3.Row] = []
+        for r in sorted(by_id.values(),
+                        key=lambda x: (-float(x["created"]), x["id"])):
+            if ns_in is not None and r["ns"] not in ns_in:
+                continue
+            if as_of is not None:
+                vf, vt = r["valid_from"], r["valid_to"]
+                if vf is not None and vf > as_of:
+                    continue
+                if vt is not None and vt < as_of:
+                    continue
+            out.append(r)
+            if len(out) >= limit:
+                break
+        return out
 
     def entity_degrees(self, ns_in: set[str] | None = None,
                        limit: int = 200) -> list[dict]:

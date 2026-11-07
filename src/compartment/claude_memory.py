@@ -239,8 +239,16 @@ def import_files(vault, files: list[Path], caller: str = "import-claude",
                           "tags": tags, "chars": len(rec["text"])})
             continue
         try:
+            from .platforms import detect_project_slug, env
+            import platform as _plat
+            prov = {"host": _plat.node(), "agent": caller,
+                    "session": env("SESSION", "-")}
+            slug = detect_project_slug(f)
+            if slug:
+                prov["project"] = slug
             out = vault.store(rec["text"], caller=caller, namespace=namespace,
                               tags=tags, importance=rec["importance"],
+                              prov=prov,
                               # Read off disk, not learned in conversation: the
                               # method has to say which of the two it was.
                               source=f"read from {f.name}",

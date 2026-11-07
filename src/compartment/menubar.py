@@ -1190,6 +1190,116 @@ def change_passphrase(vault: str, new: str, repeat: str) -> tuple[bool, str]:
     return False, (out[:120] or "could not change the passphrase")
 
 
+def default_backup_filename() -> str:
+    """Default filename suggested in the Back up save dialog."""
+    return f"compartment-backup-{datetime.date.today().isoformat()}.vault"
+
+
+def backup_vault(vault: str, dest: str) -> tuple[bool, str]:
+    """Write a verified encrypted .vault backup from the panel.
+
+    Works whether the vault is locked or unlocked without asking for a
+    passphrase: the encrypted v1 container is verified, stripped of any
+    crashed torn journal tail, written atomically at mode 0600, and
+    re-parsed + SHA-256 checked on disk.
+    """
+    if not dest:
+        return False, "choose where to save the encrypted backup"
+    try:
+        p = subprocess.run(
+            [*_cli_argv(), "--vault", vault, "backup", dest, "--json"],
+            capture_output=True, text=True, timeout=180,
+            encoding="utf-8", errors="replace", **_no_console())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    raw_out = (p.stdout or "").strip()
+    out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
+    if p.returncode == 0:
+        name = Path(dest).name
+        try:
+            doc = json.loads(raw_out)
+            if isinstance(doc, dict) and doc.get("dest"):
+                name = Path(doc["dest"]).name
+        except ValueError:
+            pass
+        return True, f"Encrypted backup verified and saved to {name}."
+    low = out.lower()
+    if "unrecognized arguments" in low or low.startswith("usage:"):
+        return False, "internal error: could not run the CLI"
+    if "same file" in low:
+        return False, "pick a backup file different from the live vault"
+    return False, (out[:160] or "could not back up the vault")
+
+
+def merge_vault(vault: str, source: str,
+                passphrase: str | None = None) -> tuple[bool, str, bool]:
+    """Merge another encrypted .vault backup into `vault` from the panel.
+
+    Returns `(ok, message, needs_passphrase)`. When `source` shares the
+    same master key (same vault backed up on another machine), no
+    passphrase is needed at all. When `source` was created independently
+    with a different passphrase, `needs_passphrase=True` tells the UI to
+    open a single secure passphrase field and retry with `passphrase`,
+    which is piped over stdin and never placed in `argv`.
+    """
+    if not source:
+        return False, "choose a .vault backup file to merge", False
+    argv = [*_cli_argv(), "--vault", vault, "merge", source, "--json"]
+    stdin_data = None
+    if passphrase is not None:
+        if not passphrase:
+            return False, "enter the backup vault's passphrase", True
+        argv.append("--source-passphrase-stdin")
+        stdin_data = passphrase + "\n"
+    try:
+        p = subprocess.run(
+            argv, input=stdin_data, capture_output=True, text=True,
+            timeout=600, encoding="utf-8", errors="replace", **_no_console())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc), False
+    raw_out = (p.stdout or "").strip()
+    out = " ".join(((p.stdout or "") + (p.stderr or "")).split())
+    if p.returncode == 0:
+        try:
+            doc = json.loads(raw_out)
+            if isinstance(doc, dict) and "imported" in doc:
+                n = int(doc.get("imported", 0))
+                dups = int(doc.get("duplicates", 0))
+                upd = int(doc.get("updated", 0))
+                rels = int(doc.get("relations_added", 0))
+                noun = "memory" if n == 1 else "memories"
+                extra = []
+                if upd:
+                    extra.append(f"{upd} updated")
+                if dups:
+                    extra.append(f"{dups} already here")
+                if rels:
+                    extra.append(
+                        f"{rels} {'relation' if rels == 1 else 'relations'}")
+                tail = f" ({', '.join(extra)})" if extra else ""
+                return True, f"Merged {n} {noun}{tail}.", False
+        except ValueError:
+            pass
+        return True, f"Merged {Path(source).name}.", False
+    low = out.lower()
+    if "unrecognized arguments" in low or low.startswith("usage:"):
+        return False, "internal error: could not run the CLI", False
+    if "different master key" in low:
+        return (False,
+                f"Enter the passphrase for {Path(source).name} to merge it.",
+                True)
+    if "wrong passphrase" in low or "no keyslot" in low:
+        return False, "wrong passphrase for that backup", True
+    if "vault is locked" in low:
+        return False, "unlock your vault first", False
+    if "keyfile" in low:
+        return (False,
+                "that backup needs its 2FA keyfile (use `compartment merge "
+                "--source-keyfile`)",
+                False)
+    return False, (out[:160] or "could not merge that backup"), False
+
+
 #: The agents `compartment integrate` can wire, in the order they are offered.
 #: Kept here rather than in the UI so the menu bar and the tray cannot drift
 #: apart, and so adding a target is one edit.
@@ -2091,7 +2201,8 @@ def run(vault: str | None = None, show: bool = False,
                             NSBackingStoreBuffered, NSBox, NSColor,
                             NSRunningApplication,
                             NSFont, NSImage, NSMakeRect, NSMenu, NSMenuItem,
-                            NSPanel, NSPopover, NSScreen, NSSegmentedControl,
+                            NSOpenPanel, NSPanel, NSPopover, NSSavePanel,
+                            NSScreen, NSSegmentedControl,
                             NSClipView, NSScrollView,
                             NSBitmapImageRep, NSGraphicsContext,
                             NSSecureTextField, NSStackView, NSStatusBar,
@@ -2240,6 +2351,11 @@ def run(vault: str | None = None, show: bool = False,
             self.new_repeat = None
             self.create_note = None   # "the two entries do not match", etc
             self.creating = False     # the vault is being made right now
+            self.backup_note = None   # what Back up… or Merge… reported
+            self.backup_busy = False  # Back up… or Merge… running right now
+            self.merging_src = None   # .vault awaiting its passphrase
+            self.merge_pw = None      # secure field while merging_src is set
+            self.merge_note = None    # prompt or error on merge-passphrase view
             return self
 
         # ---- building the popover contents -----------------------------
@@ -2311,10 +2427,40 @@ def run(vault: str | None = None, show: bool = False,
             views.append(row(save_b, cancel_b, _spacer()))
             return self._finish(views)
 
+        @objc.python_method
+        def buildMergePwBody(self, st):
+            f = NSSecureTextField.alloc().initWithFrame_(
+                NSMakeRect(0, 0, CONTENT_WIDTH, 24))
+            f.setPlaceholderString_("Backup passphrase")
+            f.setTarget_(self)
+            f.setAction_("confirmMergePw:")
+            self.merge_pw = f
+            name = Path(self.merging_src).name
+            views = [row(label(f"Merge {name}", 15, bold=True), _spacer()),
+                     label("This backup uses a different passphrase. Memories "
+                           "are decrypted in RAM only; the backup file is "
+                           "never modified.", 11, secondary=True, wrap=True),
+                     divider(),
+                     row(self.merge_pw)]
+            if self.merge_note:
+                views.append(label(self.merge_note, 11, secondary=True,
+                                   wrap=True))
+            merge_b = NSButton.buttonWithTitle_target_action_(
+                "Merge", self, "confirmMergePw:")
+            merge_b.setKeyEquivalent_("\r")
+            merge_b.setEnabled_(not self.backup_busy)
+            cancel_b = NSButton.buttonWithTitle_target_action_(
+                "Cancel", self, "cancelMergePw:")
+            views.append(row(merge_b, cancel_b, _spacer()))
+            return self._finish(views)
+
         def buildBody(self):
             st = self.state
             if self.changing_pw and st["exists"] and st["locked"] is False:
                 return self.buildChangeBody(st)
+            if self.merging_src and st["exists"] and st["locked"] is False:
+                return self.buildMergePwBody(st)
+            self.merge_pw = None
             views = []
             # "locked" over an empty disk describes a vault that is not
             # there, and sends the user looking for the Unlock control that
@@ -2492,6 +2638,27 @@ def run(vault: str | None = None, show: bool = False,
                     views.append(label(meta, 9, secondary=True, truncate=True))
             views.append(divider())
 
+            if st["exists"]:
+                backup_b = NSButton.buttonWithTitle_target_action_(
+                    "Back up…", self, "backupNow:")
+                backup_b.setEnabled_(not self.backup_busy)
+                backup_b.setToolTip_(
+                    "Save a verified encrypted .vault backup (safe to store "
+                    "anywhere; works locked or unlocked)")
+                vault_ops = [backup_b]
+                if st["locked"] is False:
+                    merge_b = NSButton.buttonWithTitle_target_action_(
+                        "Merge…", self, "mergeNow:")
+                    merge_b.setEnabled_(not self.backup_busy)
+                    merge_b.setToolTip_(
+                        "Merge memories from another encrypted .vault backup "
+                        "in RAM without writing plaintext")
+                    vault_ops.append(merge_b)
+                views.append(row(*vault_ops, _spacer(), spacing=6))
+                if self.backup_note:
+                    views.append(label(self.backup_note, 11, secondary=True,
+                                       wrap=True))
+
             refresh = NSButton.buttonWithTitle_target_action_("Refresh", self,
                                                              "refresh:")
             quit_b = NSButton.buttonWithTitle_target_action_("Quit", self,
@@ -2591,7 +2758,7 @@ def run(vault: str | None = None, show: bool = False,
         @objc.python_method
         def _typing(self):
             for f in (self.pw_field, self.pw_new, self.pw_repeat,
-                      self.new_pw, self.new_repeat):
+                      self.new_pw, self.new_repeat, self.merge_pw):
                 try:
                     if f is not None and str(f.stringValue() or ""):
                         return True
@@ -2848,6 +3015,110 @@ def run(vault: str | None = None, show: bool = False,
             self.rebuild()
             self.panel.refresh_async()      # the new passphrase rewrote the file
 
+        def backupNow_(self, sender):
+            if self.backup_busy:
+                return
+            dlg = NSSavePanel.savePanel()
+            dlg.setTitle_("Save Encrypted Vault Backup")
+            dlg.setNameFieldStringValue_(default_backup_filename())
+            dlg.setCanCreateDirectories_(True)
+            NSApp.activateIgnoringOtherApps_(True)
+            if int(dlg.runModal()) != 1:
+                return
+            url = dlg.URL()
+            dest = str(url.path() or "") if url is not None else ""
+            if not dest:
+                return
+            self.backup_busy = True
+            self.backup_note = "Saving encrypted backup…"
+            if not self._onScreen():
+                self.showWindow()
+            else:
+                self.rebuild()
+            self._inBackground(lambda: backup_vault(vault_path, dest),
+                               "backupDone:")
+
+        def backupDone_(self, out):
+            _ok, msg = ((False, f"could not back up: {out}")
+                        if isinstance(out, Exception) else out)
+            self.backup_busy = False
+            self.backup_note = msg
+            self.rebuild()
+
+        def mergeNow_(self, sender):
+            if self.backup_busy:
+                return
+            dlg = NSOpenPanel.openPanel()
+            dlg.setTitle_("Merge Encrypted Vault Backup")
+            dlg.setCanChooseFiles_(True)
+            dlg.setCanChooseDirectories_(False)
+            dlg.setAllowsMultipleSelection_(False)
+            NSApp.activateIgnoringOtherApps_(True)
+            if int(dlg.runModal()) != 1:
+                return
+            url = dlg.URL()
+            src = str(url.path() or "") if url is not None else ""
+            if not src:
+                return
+            self.backup_busy = True
+            self.backup_note = f"Merging {Path(src).name}…"
+            if not self._onScreen():
+                self.showWindow()
+            else:
+                self.rebuild()
+            self._inBackground(lambda: (src, merge_vault(vault_path, src)),
+                               "mergeDone:")
+
+        def confirmMergePw_(self, sender):
+            if (self.backup_busy or not self.merging_src
+                    or self.merge_pw is None):
+                return
+            src = self.merging_src
+            pw = str(self.merge_pw.stringValue() or "")
+            self.merge_pw.setStringValue_("")
+            if not pw:
+                self.merge_note = "enter the backup vault's passphrase"
+                self.rebuild()
+                return
+            self.backup_busy = True
+            self.merge_note = f"Merging {Path(src).name}…"
+            self.rebuild()
+            self._inBackground(
+                lambda: (src, merge_vault(vault_path, src, pw)),
+                "mergeDone:")
+
+        def cancelMergePw_(self, sender):
+            if self.merge_pw is not None:
+                self.merge_pw.setStringValue_("")
+            self.merging_src = None
+            self.merge_note = None
+            self.rebuild()
+
+        def mergeDone_(self, payload):
+            self.backup_busy = False
+            if isinstance(payload, Exception):
+                self.merging_src = None
+                self.merge_note = None
+                self.backup_note = f"could not merge: {payload}"
+                self.rebuild()
+                return
+            src, (ok, msg, needs_pw) = payload
+            if needs_pw:
+                self.merging_src = src
+                self.merge_note = msg
+                self.backup_note = None
+                if not self._onScreen():
+                    self.showWindow()
+                else:
+                    self.rebuild()
+                return
+            self.merging_src = None
+            self.merge_note = None
+            self.backup_note = msg
+            self.rebuild()
+            if ok:
+                self.panel.refresh_async(force=True)
+
         def quitApp_(self, sender):
             self.panel.close()
             stop_dashboard()
@@ -3019,4 +3290,5 @@ def run(vault: str | None = None, show: bool = False,
 
 __all__ = ["run", "self_check", "fetch_state", "read_settings", "set_setting",
            "summarise", "lock_badge", "auto_lock_label", "default_vault",
+           "default_backup_filename", "backup_vault", "merge_vault",
            "compartment_bin", "PanelState", "ViewProcess", "AUTO_LOCK_CHOICES"]

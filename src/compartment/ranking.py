@@ -149,9 +149,16 @@ import unicodedata
 COS_FLOOR = 0.25
 COS_CEIL = 0.85
 
-# --- combining the two channels ----------------------------------------------
+# --- combining the channels --------------------------------------------------
 W_VEC = 0.75
 W_LEX = 0.25
+# Explicit 1-hop associations from the relation graph (subject -predicate->
+# object, and memories linked via src_id). Bounded strictly below both the
+# literal cap (1.727) and the semantic cap (1.590) so direct matches always
+# outrank 1-hop neighbors, while clearing RESULT_RELATIVE_FLOOR (0.5 * best)
+# alongside a literal+semantic seed hit (0.55 * -log(1 - 0.94) = 1.547).
+W_GRAPH = 0.55
+GRAPH_CERTAINTY_CAP = 0.94
 # A small rank-agreement residue: the one thing reciprocal-rank fusion is
 # genuinely good at is noticing that two incomparable channels agree. Sized to
 # break ties, never to decide them.
@@ -160,6 +167,9 @@ RRF_RESIDUE_K = 20
 
 # --- priors -------------------------------------------------------------------
 W_IMPORTANCE = 0.15
+# Ordering nudge on `fused` (never `static`, so membership floors are untouched)
+# when a memory's recorded project matches the caller's active git repository.
+W_PROJECT = 0.08
 # How much of the vault has to be newer than a memory before its semantic
 # evidence is worth half the odds. 0.5 says the median memory, the one with
 # half the vault written after it, is the half-way point: the newest memory
@@ -242,6 +252,7 @@ MAX_RESULTS = 100
 
 SECONDS_PER_DAY = 86400.0
 _CERTAINTY_CAP = 0.999          # keeps -log(1 - p) finite
+SUBTOKEN_CREDIT = 0.95          # exact spelling slightly beats cross-case split
 
 # A cosine is a similarity, never an identity. An encoder can say "this is
 # about the same thing"; it cannot say "this is the record you named". A
@@ -277,15 +288,54 @@ def p_from_cosine(cos: float | None) -> float:
 # folds accents away too, so "Zurich" counts the memory about "Zürich" in
 # the denominator, and coverage has to credit it in the numerator.
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_CAMEL_UPPER_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_LOWER_RE = re.compile(r"([a-z0-9])([A-Z])")
+
+
+def _fold_accents(s: str) -> str:
+    if not s.isascii():
+        return "".join(c for c in unicodedata.normalize("NFKD", s)
+                       if not unicodedata.combining(c))
+    return s
 
 
 def _tokens(s: str) -> list[str]:
     """Alphanumeric runs, accents folded, lowercased: how FTS5's unicode61
     tokenizer splits."""
-    if not s.isascii():
-        s = "".join(c for c in unicodedata.normalize("NFKD", s)
-                    if not unicodedata.combining(c))
-    return _TOKEN_RE.findall(s.lower())
+    return _TOKEN_RE.findall(_fold_accents(s).lower())
+
+
+def camel_subtokens(s: str) -> list[str]:
+    """Lowercase sub-parts of mixed-case identifiers in `s` (`parseVaultBytes`
+    -> `['parse', 'vault', 'bytes']`), or `[]` when `s` has no camelCase.
+
+    Never splits plain lowercase words (`keyboard`, `keychain`, `sshd`), single
+    capitalized words (`Max`, `Airtable`), or all-caps acronyms (`COMMIT`), so
+    ordinary prose produces nothing and never matches substrings."""
+    if not s:
+        return []
+    folded = _fold_accents(s)
+    out: list[str] = []
+    for raw_tok in _TOKEN_RE.findall(folded):
+        split = _CAMEL_LOWER_RE.sub(
+            r"\1 \2", _CAMEL_UPPER_RE.sub(r"\1 \2", raw_tok))
+        if " " in split:
+            out.extend(p.lower() for p in split.split(" ") if p)
+    return out
+
+
+def identifier_parts(s: str) -> list[str]:
+    """Split an identifier on both non-alphanumeric separators (`_`, `-`, `.`,
+    `/`) and camelCase transitions."""
+    if not s:
+        return []
+    folded = _fold_accents(s)
+    out: list[str] = []
+    for raw_tok in _TOKEN_RE.findall(folded):
+        split = _CAMEL_LOWER_RE.sub(
+            r"\1 \2", _CAMEL_UPPER_RE.sub(r"\1 \2", raw_tok))
+        out.extend(p.lower() for p in split.split(" ") if p)
+    return out
 
 
 def information_coverage(term_info: dict[str, float], text: str) -> float:
@@ -293,12 +343,39 @@ def information_coverage(term_info: dict[str, float], text: str) -> float:
     total = sum(term_info.values())
     if total <= 0:
         return 0.0
-    present = set(_tokens(text))
+    doc_seq = _tokens(text)
+    present = set(doc_seq)
+    text_camel: set[str] | None = None
+    compound_spans: set[str] | None = None
     got = 0.0
     for t, w in term_info.items():
         toks = _tokens(t)
         if toks and all(tok in present for tok in toks):
             got += w
+            continue
+        if not toks:
+            continue
+        q_camel = camel_subtokens(t)
+        if text_camel is None:
+            text_camel = set(camel_subtokens(text))
+        if q_camel or text_camel:
+            parts = identifier_parts(t)
+            pool = present | text_camel
+            if parts and all(p in pool for p in parts):
+                got += SUBTOKEN_CREDIT * w
+                continue
+        if any(len(tok) >= 4 for tok in toks) and len(doc_seq) >= 2:
+            if compound_spans is None:
+                compound_spans = set()
+                n_doc = len(doc_seq)
+                for k in (2, 3, 4, 5):
+                    for i in range(n_doc - k + 1):
+                        window = doc_seq[i:i + k]
+                        if all(len(part) >= 2 or part.isdigit()
+                               for part in window):
+                            compound_spans.add("".join(window))
+            if all(tok in present or tok in compound_spans for tok in toks):
+                got += SUBTOKEN_CREDIT * w
     return min(_CERTAINTY_CAP, max(0.0, got / total))
 
 
@@ -310,6 +387,12 @@ def _vec_term(p_vec: float) -> float:
 
 def _lex_term(p_lex: float) -> float:
     return -W_LEX * math.log(1.0 - min(_CERTAINTY_CAP, max(0.0, p_lex)))
+
+
+def _graph_term(p_graph: float) -> float:
+    if p_graph <= 0.0:
+        return 0.0
+    return -W_GRAPH * math.log(1.0 - min(GRAPH_CERTAINTY_CAP, max(0.0, p_graph)))
 
 
 def _rrf_residue(vec_rank: int | None, lex_rank: int | None) -> float:
@@ -324,9 +407,10 @@ def _rrf_residue(vec_rank: int | None, lex_rank: int | None) -> float:
 
 
 def evidence(p_vec: float, p_lex: float,
-             vec_rank: int | None = None, lex_rank: int | None = None) -> float:
-    """Combine two independent channels as a soft OR, in log space."""
-    return (_vec_term(p_vec) + _lex_term(p_lex)
+             vec_rank: int | None = None, lex_rank: int | None = None,
+             p_graph: float = 0.0) -> float:
+    """Combine independent evidence channels as a soft OR, in log space."""
+    return (_vec_term(p_vec) + _lex_term(p_lex) + _graph_term(p_graph)
             + _rrf_residue(vec_rank, lex_rank))
 
 
@@ -359,14 +443,18 @@ def aged_term(term: float, newer_share: float | None,
 
 def aged_evidence(p_vec: float, p_lex: float, newer_share: float | None = None,
                   vec_rank: int | None = None, lex_rank: int | None = None,
-                  half_life_share: float = RECENCY_HALF_LIFE_SHARE) -> float:
-    """Evidence with the semantic channel aged and the literal one left alone.
+                  half_life_share: float = RECENCY_HALF_LIFE_SHARE,
+                  p_graph: float = 0.0) -> float:
+    """Evidence with semantic and associative channels aged and the literal
+    channel left alone.
 
     What a question MEANS is a guess that the vault having moved on can
     weaken. What a question NAMES it cannot: an identifier that occurs in one
     memory names that memory whatever year it was written."""
     return (aged_term(_vec_term(p_vec), newer_share, half_life_share)
-            + _lex_term(p_lex) + _rrf_residue(vec_rank, lex_rank))
+            + _lex_term(p_lex)
+            + aged_term(_graph_term(p_graph), newer_share, half_life_share)
+            + _rrf_residue(vec_rank, lex_rank))
 
 
 def prior(importance: float, created: float, now: float | None = None,
@@ -398,7 +486,8 @@ def final_score(p_vec: float, p_lex: float, importance: float, created: float,
                 now: float | None = None, kind: str = "fact",
                 affirmed: float | None = None,
                 newer_share: float | None = None,
-                half_life_share: float = RECENCY_HALF_LIFE_SHARE) -> float:
+                half_life_share: float = RECENCY_HALF_LIFE_SHARE,
+                p_graph: float = 0.0) -> float:
     return aged_evidence(p_vec, p_lex, newer_share, vec_rank, lex_rank,
-                         half_life_share) * (
+                         half_life_share, p_graph=p_graph) * (
         1.0 + prior(importance, created, now, kind=kind, affirmed=affirmed))

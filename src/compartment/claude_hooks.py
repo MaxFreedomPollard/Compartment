@@ -329,8 +329,18 @@ def capture(stream=None, vault_path: str | None = None) -> dict:
         # duplicate it always was.
         replaces = _earlier_versions(v, tag, v.config.default_namespace(caller),
                                      rec["text"])
+        from .platforms import detect_project_slug
+        import platform as _plat
+        prov = {"host": _plat.node(), "agent": caller,
+                "session": env("SESSION", "-")}
+        slug = (detect_project_slug(payload.get("cwd"))
+                if isinstance(payload.get("cwd"), str) and payload.get("cwd")
+                else None) or detect_project_slug(p) or detect_project_slug()
+        if slug:
+            prov["project"] = slug
         out = v.store(rec["text"], caller=caller,
                       tags=rec["tags"] + [tag], importance=rec["importance"],
+                      prov=prov,
                       # Captured from the conversation as it happened, which is
                       # the truthful method for anything the user said.
                       source="from chat",
