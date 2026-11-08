@@ -50,4 +50,5 @@ exclude:
   - mcp.json
   - gemini-extension.json
   - GEMINI.md
+  - AGENTS.md
   - Dockerfile
