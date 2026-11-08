@@ -20,6 +20,19 @@ GitHub adds "Source code (zip/tar.gz)" on its own. The notes should also carry
 the `pip install compartment` line for people who want the CLI and MCP
 server without the app.
 
+## Language in release notes and copy
+
+Use language that demonstrates what Compartment **provides**, and not what its
+specialization prevents.
+
+- **Say:** *"100% offline, with zero network calls of any kind"* and *"a
+  portable, encrypted `.vault` file you own and can back up or copy anywhere —
+  local disk, USB, NAS, or any cloud drive — like any other file."*
+- **Never say:** *"zero cloud uploads"* or phrasing that makes it sound as if
+  Compartment prevents cloud uploads. Compartment itself makes zero network
+  calls of any kind; users can still easily upload, sync, or back up their
+  `.vault` file to the cloud like any other file.
+
 ## Steps
 
 ```bash
