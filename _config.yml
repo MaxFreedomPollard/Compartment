@@ -42,3 +42,4 @@ exclude:
   - server.json
   - glama.json
   - RELEASING.md
+  - AGENTS.md

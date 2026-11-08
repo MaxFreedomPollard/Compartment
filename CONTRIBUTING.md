@@ -59,7 +59,11 @@ Security problems go to [SECURITY.md](SECURITY.md), not the tracker.
 3. Commit messages say what changed and why, in a sentence
    (`git log` is the changelog).
 4. If you touch a user-facing string, check that the README still tells the
-   truth. If you touch storage, [FORMAT.md](FORMAT.md) has to change with it.
+   truth. Use language that demonstrates what Compartment **provides**, and not
+   what its specialization prevents — say *"with zero network calls of any
+   kind"*, never *"with zero cloud uploads"* (people can easily upload their
+   encrypted `.vault` to the cloud like any other file). If you touch storage,
+   [FORMAT.md](FORMAT.md) has to change with it.
 5. Version numbers are edited only in a release commit; see
    [RELEASING.md](RELEASING.md). `tests/test_version_lockstep.py` fails if the
    copies drift.
