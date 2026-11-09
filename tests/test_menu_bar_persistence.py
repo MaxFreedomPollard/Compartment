@@ -189,9 +189,10 @@ def test_a_pid_left_by_a_copy_that_has_quit_is_not_signalled(tmp_path,
 
 
 def test_running_pids_never_counts_this_process(monkeypatch):
+    other = 77 if os.getpid() != 77 else 78
     monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: type(
-        "R", (), {"stdout": f"{os.getpid()}\n77\n"})())
-    assert menubar.running_pids() == [77]
+        "R", (), {"stdout": f"{os.getpid()}\n{other}\n"})())
+    assert menubar.running_pids() == [other]
 
 
 #: Stands in for the status bar app: takes the vault's lock, as the app
@@ -683,17 +684,34 @@ def test_windows_a_run_entry_naming_a_program_that_is_gone_is_not_on(
     assert systray.login_status() != "on"
 
 
+def _synthetic_pids(count, start=4100):
+    """Synthetic PIDs disjoint from this process and its parent.
+
+    Windows assigns process IDs in multiples of four starting in the low
+    thousands, so a fixed constant like 4100 collides whenever the pytest
+    worker or its shell happens to be given that PID by the kernel.
+    """
+    mine = {os.getpid(), os.getppid()}
+    pids, candidate = [], start
+    while len(pids) < count:
+        if candidate not in mine:
+            pids.append(candidate)
+        candidate += 4
+    return pids
+
+
 def test_windows_can_see_a_running_panel(monkeypatch):
     """It used to answer "nothing is running" on Windows whatever was
     running, which is worse than not asking: the install waited fifteen
     seconds for an app that was already up, then started a second one."""
     _as_windows(monkeypatch)
+    (panel_pid,) = _synthetic_pids(1, start=8412)
     rows = _windows_process_table([
-        (8412, 900, "compartment.exe", f'"{WINDOWS_EXE}" tray'),
+        (panel_pid, 900, "compartment.exe", f'"{WINDOWS_EXE}" tray'),
         (os.getpid(), 900, "python.exe", f'"{WINDOWS_EXE}" tray')])
     monkeypatch.setattr(systray.subprocess, "run",
                         lambda *a, **k: type("R", (), {"stdout": rows})())
-    assert systray.running_pids() == [8412], "and never this process"
+    assert systray.running_pids() == [panel_pid], "and never this process"
 
 
 def test_windows_reads_no_pid_out_of_tasklists_no_match_line(monkeypatch):
@@ -1003,14 +1021,16 @@ def test_windows_stops_only_the_tray_app(monkeypatch, tmp_path):
     python = "C:\\Program Files\\Python312\\python.exe"
     vault_arg = '--vault "C:\\Users\\u\\.compartment\\memory.vault"'
     me, parent = os.getpid(), os.getppid()
-    tray = [(4100, 900, "compartment.exe", f'"{exe}" {vault_arg} tray'),
-            (4104, 4100, "python.exe", f'"{python}" "{exe}" {vault_arg} tray')]
+    tray_launcher, tray_py, srv1, srv1_py, srv2 = _synthetic_pids(5)
+    tray = [(tray_launcher, 900, "compartment.exe", f'"{exe}" {vault_arg} tray'),
+            (tray_py, tray_launcher, "python.exe",
+             f'"{python}" "{exe}" {vault_arg} tray')]
     others = [
-        (5200, 7000, "compartment.exe",
+        (srv1, 7000, "compartment.exe",
          f'"{exe}" {vault_arg} --caller claude-desktop serve'),
-        (5204, 5200, "python.exe",
+        (srv1_py, srv1, "python.exe",
          f'"{python}" "{exe}" {vault_arg} --caller claude-desktop serve'),
-        (5300, 7100, "compartment.exe",
+        (srv2, 7100, "compartment.exe",
          f'"{exe}" {vault_arg} --caller claude-code serve'),
         (parent, 300, "compartment.exe", f'"{exe}" update'),
         (me, parent, "python.exe", f'"{python}" "{exe}" update'),
@@ -1025,29 +1045,29 @@ def test_windows_stops_only_the_tray_app(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(argv, 0, out, "")
     monkeypatch.setattr(systray.subprocess, "run", fake_run)
 
-    assert systray.running_pids() == [4100, 4104], \
+    assert systray.running_pids() == [tray_launcher, tray_py], \
         "only the tray app: not the servers, the update, or this process"
     table = others
     assert systray.running_pids() == [], "no app is running, and it says so"
 
-    # The tray app, pid 4104, leaves its pid where another process can read
-    # it back. (msvcrt's lock itself cannot be taken off Windows.)
+    # The tray app leaves its pid where another process can read it back.
+    # (msvcrt's lock itself cannot be taken off Windows.)
     vault = str(tmp_path / "memory.vault")
     with monkeypatch.context() as m:
-        m.setattr(menubar.os, "getpid", lambda: 4104)
+        m.setattr(menubar.os, "getpid", lambda: tray_py)
         with open(menubar._instance_lock_path(vault), "a+b") as fh:
             menubar._record_lock_holder(fh)
-    assert menubar.lock_holder_pid(vault) == 4104
+    assert menubar.lock_holder_pid(vault) == tray_py
 
     table = tray + others
     ran.clear()
     assert systray.quit_running(vault) is True
     assert [c for c in ran if c[0] == "taskkill"] == [
-        ["taskkill", "/F", "/PID", "4104"]]
+        ["taskkill", "/F", "/PID", str(tray_py)]]
 
     # The tray app has gone, and Windows has given its pid to another
     # program: the pid left in the file is not the app any more.
-    table = others + [(4104, 999, "notepad.exe", "C:\\Windows\\notepad.exe")]
+    table = others + [(tray_py, 999, "notepad.exe", "C:\\Windows\\notepad.exe")]
     ran.clear()
     assert systray.quit_running(vault) is False
     assert not [c for c in ran if c[0] == "taskkill"]
@@ -1060,11 +1080,12 @@ def test_windows_counts_only_the_tray_app_of_this_session(monkeypatch):
     an update counted it as the copy to wait for."""
     _as_windows(monkeypatch)
     exe = WINDOWS_EXE
+    my_pid, their_pid = _synthetic_pids(2)
     mine = f'"{exe}" --vault "C:\\Users\\ana\\.compartment\\memory.vault" tray'
     theirs = f'"{exe}" --vault "C:\\Users\\bo\\.compartment\\memory.vault" tray'
     table = ('"ProcessId","ParentProcessId","CommandLine","SessionId"\r\n'
-             + f'"4100","900","{mine.replace(chr(34), chr(34) * 2)}","1"\r\n'
-             + f'"6100","950","{theirs.replace(chr(34), chr(34) * 2)}","2"\r\n')
+             + f'"{my_pid}","900","{mine.replace(chr(34), chr(34) * 2)}","1"\r\n'
+             + f'"{their_pid}","950","{theirs.replace(chr(34), chr(34) * 2)}","2"\r\n')
     asked = []
 
     def fake_run(argv, *a, **k):
@@ -1073,11 +1094,19 @@ def test_windows_counts_only_the_tray_app_of_this_session(monkeypatch):
     monkeypatch.setattr(systray.subprocess, "run", fake_run)
     monkeypatch.setattr(systray, "_windows_session", lambda: "1",
                         raising=False)
-    assert systray.running_pids() == [4100]
+    assert systray.running_pids() == [my_pid]
     assert "SessionId" in asked[-1], "the session has to be asked for"
     # Where the session cannot be told, nothing is left out.
     monkeypatch.setattr(systray, "_windows_session", lambda: None)
-    assert systray.running_pids() == [4100, 6100]
+    assert systray.running_pids() == [my_pid, their_pid]
+
+
+def test_windows_synthetic_pids_skip_colliding_worker_pids(monkeypatch, tmp_path):
+    """Regression for Windows CI where the pytest worker itself had PID 4100."""
+    monkeypatch.setattr(os, "getpid", lambda: 4100)
+    monkeypatch.setattr(os, "getppid", lambda: 4104)
+    test_windows_stops_only_the_tray_app(monkeypatch, tmp_path)
+    test_windows_counts_only_the_tray_app_of_this_session(monkeypatch)
 
 
 def test_the_task_restarts_a_panel_that_failed(monkeypatch):

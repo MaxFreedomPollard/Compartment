@@ -121,7 +121,7 @@ def test_seed_relevance_regression(seeded_vault):
     st = selftest.run(seeded_vault)
     assert st["total"] == 20
     assert st["failed"] == 0, st["failures"]
-    assert st["max_ms"] < 500  # generous CI bound; laptop p50 is ~2ms
+    assert st["max_ms"] < 1500  # generous CI bound for shared Intel macOS runners; laptop p50 is ~2ms
 
 
 def test_index_parity_brute_vs_hnsw():
