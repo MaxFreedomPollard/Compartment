@@ -11,13 +11,14 @@ This is that ask, packaged. `compartmentalize` is a skill file written into the
 agent's own skills directory, so the user types `/compartmentalize` and the
 whole conversation is swept into the vault before the summary eats it.
 
-Claude Code, Hermes and OpenClaw all read the same Agent Skills layout -
-`<agent home>/skills/<name>/SKILL.md`, YAML frontmatter, markdown body - so one
-packaged file serves all three and the only thing that differs is the root:
+Claude Code, Hermes, OpenClaw and AntiGravity all read the same Agent Skills
+layout - `<agent home>/skills/<name>/SKILL.md`, YAML frontmatter, markdown body -
+so one packaged file serves all four and the only thing that differs is the root:
 
-    claude    $CLAUDE_CONFIG_DIR or ~/.claude/skills/compartmentalize/SKILL.md
-    hermes    $HERMES_HOME or ~/.hermes/skills/compartmentalize/SKILL.md
-    openclaw  <OpenClaw's config dir>/skills/compartmentalize/SKILL.md
+    claude       $CLAUDE_CONFIG_DIR or ~/.claude/skills/compartmentalize/SKILL.md
+    hermes       $HERMES_HOME or ~/.hermes/skills/compartmentalize/SKILL.md
+    openclaw     <OpenClaw's config dir>/skills/compartmentalize/SKILL.md
+    antigravity  ~/.gemini/config/skills/compartmentalize/SKILL.md
 
 Writing into somebody's skills directory is a larger claim on their machine
 than registering an MCP server, so this module never does it silently and never
@@ -75,6 +76,7 @@ SKILL_TARGETS = {
     "claude": (_claude_dir, lambda: Path.home() / ".claude"),
     "hermes": ("HERMES_HOME", lambda: Path.home() / ".hermes"),
     "openclaw": (_openclaw_dir, lambda: Path.home() / ".openclaw"),
+    "antigravity": (None, lambda: Path.home() / ".gemini" / "config"),
 }
 
 

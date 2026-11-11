@@ -17,13 +17,14 @@ def homes(tmp_path, monkeypatch):
         "claude": (None, tmp_path / ".claude"),
         "hermes": ("HERMES_HOME", tmp_path / ".hermes"),
         "openclaw": ("OPENCLAW_HOME", tmp_path / ".openclaw"),
+        "antigravity": (None, tmp_path / ".gemini" / "config"),
     })
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
     return tmp_path
 
 
-ALL = ("claude", "hermes", "openclaw")
+ALL = ("claude", "hermes", "openclaw", "antigravity")
 
 
 # ---------------------------------------------------------------- packaging --
@@ -173,3 +174,14 @@ def test_a_broken_package_fails_loudly_rather_than_writing_nothing(homes,
     monkeypatch.setattr(A, "source", lambda: homes / "does-not-exist.md")
     with pytest.raises(OSError):
         A.install("claude")
+
+
+def test_integrate_antigravity_wires_mcp_and_installs_skill(homes, monkeypatch):
+    import json
+    from compartment import cli
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: homes))
+    cli.main(["--vault", str(homes / "v.vault"), "integrate", "antigravity"])
+    mcp_cfg = homes / ".gemini" / "config" / "mcp_config.json"
+    assert "compartment" in json.loads(
+        mcp_cfg.read_text(encoding="utf-8"))["mcpServers"]
+    assert A.is_current("antigravity")

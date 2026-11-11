@@ -41,7 +41,7 @@ from .acl import VaultConfig
 from .platforms import file_signature
 
 AUTO_LOCK_CHOICES = [15, 30, 60, 0]          # 0 = never
-POPOVER_WIDTH = 360
+POPOVER_WIDTH = 440
 POPOVER_MAX_HEIGHT = 640
 CONTENT_INSET = 16
 CONTENT_WIDTH = POPOVER_WIDTH - CONTENT_INSET * 2
@@ -1305,7 +1305,9 @@ def merge_vault(vault: str, source: str,
 #: apart, and so adding a target is one edit.
 INTEGRATION_TARGETS = (("claude", "Claude"),
                        ("hermes", "Hermes"),
-                       ("openclaw", "OpenClaw"))
+                       ("openclaw", "OpenClaw"),
+                       ("antigravity", "AntiGravity"),
+                       ("codex", "Codex"))
 
 
 def integration_status(vault: str) -> dict:
@@ -1347,6 +1349,17 @@ def integration_status(vault: str) -> dict:
             cfg = json.loads(p.read_text(encoding="utf-8"))
             out["openclaw"] = "compartment" in openclaw_servers(cfg)
     except (OSError, ValueError):
+        pass
+    try:                                                # AntiGravity
+        from . import clients
+        out["antigravity"] = clients.is_registered(
+            clients.CLIENTS["antigravity"])
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:                                                # Codex
+        from . import clients
+        out["codex"] = clients.is_registered(clients.CLIENTS["codex"])
+    except Exception:                                   # noqa: BLE001
         pass
     return out
 
@@ -1417,9 +1430,19 @@ def integration_paths() -> list[Path]:
 
     Every one of them used to be read twice on every click, whether or not
     anything in it had changed."""
-    from . import claude_desktop
+    from . import claude_desktop, clients
     return [_claude_code_config(), claude_desktop.config_path(),
-            _hermes_plugin_manifest(), _openclaw_config()]
+            _hermes_plugin_manifest(), _openclaw_config(),
+            clients.CLIENTS["antigravity"].config_path(),
+            clients.CLIENTS["codex"].config_path()]
+
+
+def antigravity_app_present() -> bool:
+    """Whether Antigravity.app is installed on macOS before its first run."""
+    if sys.platform != "darwin":
+        return False
+    return (Path("/Applications/Antigravity.app").exists()
+            or (Path.home() / "Applications" / "Antigravity.app").exists())
 
 
 def agent_present(target: str, path: str | None = None) -> bool:
@@ -1450,7 +1473,7 @@ def agent_present(target: str, path: str | None = None) -> bool:
     if path is None:
         path = user_path()
     try:
-        from . import claude_desktop
+        from . import claude_desktop, clients
         if target == "claude":
             return (bool(shutil.which("claude", path=path))
                     or claude_desktop.present())
@@ -1460,6 +1483,14 @@ def agent_present(target: str, path: str | None = None) -> bool:
         if target == "openclaw":
             return (bool(shutil.which("openclaw", path=path))
                     or openclaw_dir().is_dir())
+        if target == "antigravity":
+            return (bool(shutil.which("agy", path=path))
+                    or bool(shutil.which("antigravity", path=path))
+                    or clients.CLIENTS["antigravity"].present()
+                    or antigravity_app_present())
+        if target == "codex":
+            return (bool(shutil.which("codex", path=path))
+                    or clients.CLIENTS["codex"].present())
     except Exception:                                   # noqa: BLE001
         return False
     return False
@@ -2588,10 +2619,11 @@ def run(vault: str | None = None, show: bool = False,
                 b = NSButton.buttonWithTitle_target_action_(
                     f"{name} ✓" if wired.get(target) else name,
                     self, "connectAgent:")
+                b.setControlSize_(1)                    # NSControlSizeSmall
                 b.setTag_(i)
                 b.setEnabled_(self.connect_busy is None)
                 connect_buttons.append(b)
-            views.append(row(*connect_buttons, _spacer()))
+            views.append(row(*connect_buttons, _spacer(), spacing=5))
             # Only ever the result of a click. The heading and the buttons
             # already say what this does, and a standing explanation here
             # cost three lines the popover does not have: past the height

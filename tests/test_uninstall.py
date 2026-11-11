@@ -31,6 +31,7 @@ def machine(tmp_path, monkeypatch):
         "claude": (None, home / ".claude"),
         "hermes": ("HERMES_HOME", home / ".hermes"),
         "openclaw": ("OPENCLAW_HOME", home / ".openclaw"),
+        "antigravity": (None, home / ".gemini" / "config"),
     })
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
     # OPENCLAW_HOME stands in for the home directory, as OpenClaw reads it:
@@ -66,7 +67,7 @@ def test_an_edited_skill_is_kept_and_named(machine, capsys):
     assert edited.read_text(encoding="utf-8").startswith("my own sweep")
     assert "/compartmentalize skill kept in claude" in out, out
     assert str(edited) in out, out
-    for target in ("hermes", "openclaw"):
+    for target in ("hermes", "openclaw", "antigravity"):
         assert not agent_skill.is_installed(target)
         assert f"/compartmentalize skill removed from {target}" in out, out
 
@@ -79,11 +80,12 @@ def _wire_everything(machine):
     claude_desktop.register(exe, ["--vault", vp, "--caller",
                                   "claude-desktop", "serve"])
     cursor, codex = clients.CLIENTS["cursor"], clients.CLIENTS["codex"]
+    antigravity = clients.CLIENTS["antigravity"]
     cursor.config_path().parent.mkdir(parents=True)
     cursor.config_path().write_text(
         json.dumps({"mcpServers": {"theirs": {"command": "x"}}}) + "\n",
         encoding="utf-8")
-    for client in (cursor, codex):
+    for client in (cursor, codex, antigravity):
         assert clients.register(client, vp)["written"]
     openclaw = machine.home / ".openclaw" / "openclaw.json"
     openclaw.parent.mkdir(parents=True)
@@ -101,6 +103,7 @@ def _wire_everything(machine):
     (plugin / "__pycache__").mkdir()        # Hermes importing it leaves one
     (plugin / "__pycache__" / "__init__.cpython-311.pyc").write_bytes(b"\0")
     return types.SimpleNamespace(cursor=cursor, codex=codex,
+                                 antigravity=antigravity,
                                  openclaw=openclaw, md=md, plugin=plugin)
 
 
@@ -117,6 +120,7 @@ def test_uninstall_takes_back_every_registration_integrate_wrote(machine,
     assert not claude_desktop.is_registered()
     assert not clients.is_registered(w.cursor)
     assert not clients.is_registered(w.codex)
+    assert not clients.is_registered(w.antigravity)
     assert json.loads(w.cursor.config_path().read_text(encoding="utf-8")) == {
         "mcpServers": {"theirs": {"command": "x"}}}
     assert json.loads(w.openclaw.read_text(encoding="utf-8")) == {
@@ -125,6 +129,7 @@ def test_uninstall_takes_back_every_registration_integrate_wrote(machine,
     assert not w.plugin.exists()
     for said in ("Claude Desktop registration removed",
                  "removed from Cursor", "removed from Codex CLI",
+                 "removed from AntiGravity",
                  "OpenClaw registration removed",
                  f"compartment block removed from {w.md}",
                  "Hermes provider plugin removed"):

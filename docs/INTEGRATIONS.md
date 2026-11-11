@@ -255,6 +255,7 @@ or as UTF-16 (Notepad, PowerShell 5) are read and written back as UTF-8.
 
 | `integrate …` | File it writes (macOS / Linux; Windows where it differs) | Notes |
 |---|---|---|
+| `antigravity` | `~/.gemini/config/mcp_config.json` | also installs `/compartmentalize` skill |
 | `cursor` | `~/.cursor/mcp.json` | |
 | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | |
 | `vscode`, `vscode-insiders` | `<User dir>/mcp.json`, key `servers` | comments kept |

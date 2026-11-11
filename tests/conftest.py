@@ -255,6 +255,7 @@ def no_real_agent_tools(monkeypatch, tmp_path):
             [own_bin, "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "agents" / "hermes"))
     monkeypatch.setenv("OPENCLAW_HOME", str(tmp_path / "agents" / "openclaw"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(menubar, "_USER_PATH", None)   # the per-process cache
 
 

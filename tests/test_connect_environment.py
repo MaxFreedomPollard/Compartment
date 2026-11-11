@@ -207,6 +207,7 @@ def fake_home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(menubar, "integration_status",
                         menubar.integration_status)
     return tmp_path
@@ -216,7 +217,26 @@ def test_a_clean_machine_is_connected_to_nothing(fake_home, monkeypatch):
     from compartment import claude_hooks
     monkeypatch.setattr(claude_hooks, "is_installed", lambda *a, **k: False)
     assert menubar.integration_status("/v") == {
-        "claude": False, "hermes": False, "openclaw": False}
+        "claude": False, "hermes": False, "openclaw": False,
+        "antigravity": False, "codex": False}
+
+
+def test_antigravity_and_codex_count_as_connected_once_registered(fake_home):
+    agy = fake_home / ".gemini" / "config" / "mcp_config.json"
+    agy.parent.mkdir(parents=True)
+    agy.write_text(
+        json.dumps({"mcpServers": {"compartment": {"command": "compartment"}}}),
+        encoding="utf-8")
+    codex = fake_home / ".codex" / "config.toml"
+    codex.parent.mkdir(parents=True)
+    codex.write_text(
+        '[mcp_servers.compartment]\ncommand = "compartment"\nargs = ["serve"]\n',
+        encoding="utf-8")
+    st = menubar.integration_status("/v")
+    assert st["antigravity"] is True
+    assert st["codex"] is True
+    watched = set(menubar.integration_paths())
+    assert agy in watched and codex in watched
 
 
 def test_claude_counts_as_connected_once_it_is_registered(fake_home):

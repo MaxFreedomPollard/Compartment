@@ -143,6 +143,8 @@ OWN_VERSION = {
     # skill's text does, not when the package does.
     "skills/compartmentalize/SKILL.md",
     "src/compartment/data/agent-skill/SKILL.md",
+    # Dependabot's configuration schema version (always 2), not the package's.
+    ".github/dependabot.yml",
 }
 
 #: Known drift in a file this test does not own the fix for. Strict, so the

@@ -329,6 +329,26 @@ def test_junie_is_present_before_its_first_server(home):
     assert clients.resolve("amazonq").key == "amazon-q"
 
 
+def test_antigravity_is_detected_and_wired_without_matching_bare_gemini_home(home):
+    agy = clients.CLIENTS["antigravity"]
+    assert clients.resolve("agy") is agy
+    assert agy.config_path() == home / ".gemini" / "config" / "mcp_config.json"
+    assert agy.present() is False
+    # Bare ~/.gemini belongs to Gemini CLI too, so it alone does not count.
+    (home / ".gemini").mkdir()
+    assert agy.present() is False
+    (home / ".gemini" / "antigravity").mkdir()
+    assert agy.present() is True
+
+    assert clients.register(agy, VAULT)["written"] is True
+    assert clients.is_registered(agy) is True
+    entry = _servers(agy.config_path())["compartment"]
+    assert entry["args"] == ["--vault", VAULT, "--caller", "antigravity",
+                             "serve"]
+    assert clients.unregister(agy) is True
+    assert clients.is_registered(agy) is False
+
+
 def test_flathub_vs_code_on_linux_is_found_and_written(home, monkeypatch):
     """The Flathub VS Code keeps its User directory in its sandbox,
     ~/.var/app/com.visualstudio.code/config/Code/User; only the native

@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from compartment import cli
+from compartment import cli, menubar
 
 
 # ------------------------------------------------------------------ detection
@@ -23,13 +23,16 @@ def nothing_installed(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr("shutil.which", lambda *a, **k: None)
     monkeypatch.setattr(cli.claude_desktop, "present", lambda *a, **k: False)
+    monkeypatch.setattr(menubar, "antigravity_app_present",
+                        lambda *a, **k: False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     return tmp_path
 
 
 def test_nothing_installed_means_nothing_detected(nothing_installed):
-    assert [t for t in ("claude", "hermes", "openclaw")
+    assert [t for t, _ in menubar.INTEGRATION_TARGETS
             if cli.agent_present(t)] == []
 
 
@@ -57,6 +60,20 @@ def test_hermes_home_env_is_honoured(nothing_installed, monkeypatch, tmp_path):
     elsewhere.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(elsewhere))
     assert cli.agent_present("hermes") is True
+
+
+def test_antigravity_and_codex_detection(nothing_installed, monkeypatch):
+    # Bare ~/.gemini is Gemini CLI's home, not AntiGravity's.
+    (nothing_installed / ".gemini").mkdir()
+    assert cli.agent_present("antigravity") is False
+    (nothing_installed / ".gemini" / "antigravity").mkdir()
+    assert cli.agent_present("antigravity") is True
+
+    assert cli.agent_present("codex") is False
+    codex_home = nothing_installed / "custom-codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert cli.agent_present("codex") is True
 
 
 # ---------------------------------------------------------------- connecting
@@ -103,7 +120,7 @@ def test_one_agent_failing_does_not_stop_the_others(nothing_installed,
     monkeypatch.setattr(cli, "cmd_integrate", flaky)
     done = cli.connect_present_agents("/v")
 
-    assert done == ["Claude", "OpenClaw"]
+    assert done == ["Claude", "OpenClaw", "AntiGravity", "Codex"]
     assert "could not connect Hermes" in capsys.readouterr().out
 
 

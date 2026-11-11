@@ -40,10 +40,9 @@ def test_the_cli_accepts_every_button_and_every_known_client(monkeypatch,
     work, and a client `--list` advertises that the CLI rejects is a lie.
     argparse names every choice it accepts when it rejects one, so ask it.
 
-    Containment is one-way now. The panel offers the three agents that get
-    the deep treatment - a skill file, a hook, an import - while the CLI
-    accepts every MCP client as well. Thirty buttons would not fit in a
-    popover, so the panel is a subset on purpose.
+    Containment is one-way now. The panel offers the five one-click agents,
+    while the CLI accepts every MCP client as well. Thirty buttons would not
+    fit in a popover, so the panel is a subset on purpose.
     """
     monkeypatch.setattr(cli, "cmd_integrate", lambda args: None)
     with pytest.raises(SystemExit):
@@ -59,7 +58,7 @@ def test_the_cli_accepts_every_button_and_every_known_client(monkeypatch,
 
 def test_the_agents_are_offered_in_a_fixed_order():
     assert [t for t, _ in menubar.INTEGRATION_TARGETS] == \
-        ["claude", "hermes", "openclaw"]
+        ["claude", "hermes", "openclaw", "antigravity", "codex"]
 
 
 def test_every_agent_has_a_display_name():
@@ -177,7 +176,7 @@ def test_the_tray_panel_offers_the_first_run_step(monkeypatch):
 def test_the_tray_panel_has_a_button_per_agent():
     rows = systray.panel_rows(_state())
     connects = [text for kind, text in rows if kind.startswith("connect:")]
-    assert connects == ["Claude", "Hermes", "OpenClaw"]
+    assert connects == ["Claude", "Hermes", "OpenClaw", "AntiGravity", "Codex"]
 
 
 def test_the_tray_panel_heads_the_section():
@@ -204,10 +203,103 @@ def test_the_buttons_are_offered_even_while_the_vault_is_locked():
     vault is no reason to hide it."""
     rows = systray.panel_rows(_state(locked=True))
     assert [t for k, t in rows if k.startswith("connect:")] == \
-        ["Claude", "Hermes", "OpenClaw"]
+        ["Claude", "Hermes", "OpenClaw", "AntiGravity", "Codex"]
 
 
 @pytest.mark.parametrize("target,name", menubar.INTEGRATION_TARGETS)
 def test_each_row_carries_the_target_the_action_needs(target, name):
     rows = systray.panel_rows(_state())
     assert (f"connect:{target}", name) in rows
+
+
+def test_all_connect_buttons_fit_on_one_line_on_macos():
+    """All five Connect buttons must fit on one horizontal line inside
+    CONTENT_WIDTH without compression, both plain and with checkmarks."""
+    import subprocess
+    import sys
+    if sys.platform != "darwin":
+        pytest.skip("macOS AppKit layout check")
+    pytest.importorskip("AppKit")
+    code = (
+        "import AppKit\n"
+        "from compartment import menubar\n"
+        "AppKit.NSApplication.sharedApplication()\n"
+        "for checked in (False, True):\n"
+        "    buttons = []\n"
+        "    for _t, name in menubar.INTEGRATION_TARGETS:\n"
+        "        b = AppKit.NSButton.buttonWithTitle_target_action_(\n"
+        "            f'{name} \\u2713' if checked else name, None, None)\n"
+        "        b.setControlSize_(1)\n"
+        "        buttons.append(b)\n"
+        "    spacer = AppKit.NSView.alloc().init()\n"
+        "    spacer.setContentHuggingPriority_forOrientation_(1, 0)\n"
+        "    row = AppKit.NSStackView.stackViewWithViews_([*buttons, spacer])\n"
+        "    row.setOrientation_(0)\n"
+        "    row.setSpacing_(5)\n"
+        "    row.setAlignment_(10)\n"
+        "    assert row.fittingSize().width <= menubar.CONTENT_WIDTH\n"
+        "    row.widthAnchor().constraintEqualToConstant_(\n"
+        "        menubar.CONTENT_WIDTH).setActive_(True)\n"
+        "    row.layoutSubtreeIfNeeded()\n"
+        "    assert len({round(b.frame().origin.y, 1) for b in buttons}) == 1\n"
+        "    for b in buttons:\n"
+        "        assert round(b.frame().size.width, 1) == round(\n"
+        "            b.fittingSize().width, 1)\n"
+        "    last = buttons[-1].frame()\n"
+        "    assert last.origin.x + last.size.width <= menubar.CONTENT_WIDTH\n"
+    )
+    ran = subprocess.run([sys.executable, "-c", code],
+                         capture_output=True, text=True, timeout=60)
+    assert ran.returncode == 0, ran.stderr
+
+
+def test_all_connect_buttons_fit_on_one_line_in_tk():
+    """The tray/panel row fits all five buttons inside PANEL_WIDTH."""
+    import subprocess
+    import sys
+    pytest.importorskip("tkinter")
+    code = (
+        "import sys, tkinter as tk\n"
+        "from tkinter import font as tkfont, ttk\n"
+        "from compartment import menubar, systray\n"
+        "try:\n"
+        "    root = tk.Tk()\n"
+        "except tk.TclError:\n"
+        "    sys.exit(77)\n"
+        "try:\n"
+        "    root.withdraw()\n"
+        "    style = ttk.Style()\n"
+        "    usable = systray.PANEL_WIDTH - 28\n"
+        "    themes = list(dict.fromkeys([\n"
+        "        *([style.theme_use()] if style.theme_use() != 'aqua' else []),\n"
+        "        *(t for t in ('clam', 'alt', 'default') if t in style.theme_names()),\n"
+        "    ]))\n"
+        "    for checked in (False, True):\n"
+        "        for theme in themes:\n"
+        "            style.theme_use(theme)\n"
+        "            frame = ttk.Frame(root, padding=14)\n"
+        "            row = ttk.Frame(frame)\n"
+        "            row.pack(fill='x', pady=(6, 0))\n"
+        "            df = tkfont.nametofont('TkDefaultFont').actual()\n"
+        "            cfont = (('Segoe UI', 8) if sys.platform == 'win32'\n"
+        "                     else (df['family'], max(9, abs(int(df['size'])) - 1)))\n"
+        "            style.configure('Connect.TButton', padding=(3, 2), font=cfont)\n"
+        "            for i, (_t, name) in enumerate(menubar.INTEGRATION_TARGETS):\n"
+        "                ttk.Button(\n"
+        "                    row, text=f'{name} \\u2713' if checked else name,\n"
+        "                    width=0, style='Connect.TButton'\n"
+        "                ).pack(side='left',\n"
+        "                       padx=(0, 3 if i < len(menubar.INTEGRATION_TARGETS) - 1\n"
+        "                             else 0))\n"
+        "            frame.update_idletasks()\n"
+        "            assert row.winfo_reqwidth() <= usable, (theme, row.winfo_reqwidth())\n"
+        "            assert frame.winfo_reqwidth() <= systray.PANEL_WIDTH\n"
+        "            frame.destroy()\n"
+        "finally:\n"
+        "    root.destroy()\n"
+    )
+    ran = subprocess.run([sys.executable, "-c", code],
+                         capture_output=True, text=True, timeout=60)
+    if ran.returncode == 77:
+        pytest.skip("no display for Tk layout check")
+    assert ran.returncode == 0, ran.stderr

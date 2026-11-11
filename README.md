@@ -2,7 +2,7 @@
 
 **Encrypted, fully offline memory for AI agents.** One vault on your own
 computer, read and written by Claude Code, Claude Desktop, Hermes Agent,
-OpenClaw, Cursor, Codex and any other MCP client. No API key, no account, no
+OpenClaw, AntiGravity, Cursor, Codex and any other MCP client. No API key, no account, no
 network, no telemetry.
 
 [![PyPI](https://img.shields.io/pypi/v/compartment)](https://pypi.org/project/compartment/)
@@ -28,8 +28,9 @@ network, no telemetry.
 <a href="https://kiro.dev/launch/mcp/add?name=compartment&config=%7B%22command%22%3A%22compartment%22%2C%22args%22%3A%5B%22--caller%22%2C%22kiro%22%2C%22serve%22%5D%7D"><img src="https://kiro.dev/images/add-to-kiro.svg" alt="Add to Kiro" height="32"></a>
 </p>
 
-Claude Code, Claude Desktop, Hermes Agent and OpenClaw are wired by one
-command instead: `compartment integrate claude`, `hermes` or `openclaw`.
+Claude Code, Claude Desktop, Hermes Agent, OpenClaw, AntiGravity and Codex are
+wired by one command (or the app's **Connect an agent** buttons) instead:
+`compartment integrate claude`, `hermes`, `openclaw`, `antigravity` or `codex`.
 
 Compartment is persistent memory for AI agents, stored on your own computer.
 What an agent learns in one session is available in every later session, in
@@ -192,7 +193,7 @@ must not fail silently.
 The panel shows whether the vault is open, how many memories it holds and how
 many you stored, the three settings worth changing (capture hook, whether
 reference facts appear in search, auto-lock), which agents are connected with
-buttons to connect Claude, Hermes Agent or OpenClaw, and the last five
+buttons to connect Claude, Hermes Agent, OpenClaw, AntiGravity or Codex, and the last five
 memories. You can unlock, lock and change your passphrase there without a
 terminal. The panel opens instantly with what it last read and refreshes in
 the background, only when something actually changed. While you use it, one
@@ -443,8 +444,8 @@ it puts the passphrase in the model's context.
 ### Without the command line
 
 Every agent on the machine uses the same vault, and none of that needs
-setting up: the app's **Connect an agent** buttons wire Claude, Hermes Agent
-and OpenClaw, and what one agent stores the others recall. Claude, Hermes
+setting up: the app's **Connect an agent** buttons wire Claude, Hermes Agent,
+OpenClaw, AntiGravity and Codex, and what one agent stores the others recall. Claude, Hermes
 Agent, Cursor and the CLI can use the vault at the same time: writes are
 serialised by a file lock, every process notices writes by others and
 reloads, and each agent has its own identity and namespace. Their servers
@@ -577,21 +578,23 @@ been idle clears the unlock credential, so the vault relocks between
 sessions.
 
 `init` asks you to choose a passphrase, creates the vault, loads the
-reference facts, connects Claude Code, Hermes Agent or OpenClaw if they are
+reference facts, connects Claude, Hermes Agent, OpenClaw, AntiGravity or Codex if they are
 installed, and starts the app: a menu bar item on macOS, a tray icon on
 Windows, a window on Linux. Restart your agent and it has a memory.
 
 To connect an agent later, or any other client:
 
 ```bash
-compartment integrate claude      # Claude Code + Claude Desktop
-compartment integrate hermes      # Hermes Agent
-compartment integrate openclaw    # OpenClaw
-compartment integrate --list      # the 33 MCP clients it can wire: Cursor, VS Code, Windsurf, Cline, Roo Code, Kilo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Kiro, Amazon Q, Junie, Goose, LM Studio, Continue ...
-compartment integrate --all       # every one of them that is installed here
+compartment integrate claude       # Claude Code + Claude Desktop
+compartment integrate hermes       # Hermes Agent
+compartment integrate openclaw     # OpenClaw
+compartment integrate antigravity  # AntiGravity
+compartment integrate codex        # Codex CLI
+compartment integrate --list       # the 34 MCP clients it can wire: AntiGravity, Cursor, VS Code, Windsurf, Cline, Roo Code, Kilo Code, Zed, OpenCode, Codex CLI, Gemini CLI, Kiro, Amazon Q, Junie, Goose, LM Studio, Continue ...
+compartment integrate --all        # every one of them that is installed here
 ```
 
-`claude`, `hermes` and `openclaw` also get the **`/compartmentalize`** skill
+`claude`, `hermes`, `openclaw` and `antigravity` also get the **`/compartmentalize`** skill
 installed in their skills directories. Any other MCP client uses this block
 (stdio transport, no environment variables):
 
@@ -607,7 +610,7 @@ Windows) prints; `integrate` always writes that full path.
 ## Wiring each agent
 
 None of this needs a terminal: the **Connect an agent** buttons in the app
-run the same steps for Claude, Hermes Agent and OpenClaw. The commands below
+run the same steps for Claude, Hermes Agent, OpenClaw, AntiGravity and Codex. The commands below
 are for people who prefer them, and for wiring a client the app does not
 list. On Windows, run them in PowerShell with `py -m pip install compartment`
 in place of `pip install compartment`.
@@ -665,7 +668,7 @@ backup. Then run `openclaw gateway restart` and check with
 
 **Any MCP client**
 
-`compartment integrate <client>` wires any of the 33 clients in `--list`.
+`compartment integrate <client>` wires any of the 34 clients in `--list`.
 Each config write takes a byte-exact backup first, merges rather than
 replaces, writes atomically, and refuses to touch a file it cannot parse (it
 prints the block to paste instead). To do it by hand, use the block in
@@ -702,7 +705,7 @@ surface if you want to change something.
 The panel behind the icon: **Unlock** and **Lock**, **Change password**,
 **Create memories automatically** (the capture hook), **Search starter
 facts**, **Auto-lock** (15, 30, 60 minutes or never), the **CONNECT AN
-AGENT** buttons for Claude, Hermes Agent and OpenClaw, **Refresh** and
+AGENT** buttons for Claude, Hermes Agent, OpenClaw, AntiGravity and Codex, **Refresh** and
 **Quit**.
 
 ### Commands
@@ -760,8 +763,9 @@ directory, and `compartment uninstall` takes it back:
 | Claude Code | `~/.claude/skills/compartmentalize/SKILL.md` |
 | Hermes Agent | `$HERMES_HOME` or `~/.hermes/skills/compartmentalize/SKILL.md` |
 | OpenClaw | `$OPENCLAW_HOME` or `~/.openclaw/skills/compartmentalize/SKILL.md` |
+| AntiGravity | `~/.gemini/config/skills/compartmentalize/SKILL.md` |
 
-All three use the same Agent Skills layout, so it is one file. Only the user
+All four use the same Agent Skills layout, so it is one file. Only the user
 runs it. Type it before compacting, or at any time, and the agent stores the
 whole conversation in the vault: people and contacts, credentials and where
 they live, URLs and hosts, decisions and the reasons for them, and a record

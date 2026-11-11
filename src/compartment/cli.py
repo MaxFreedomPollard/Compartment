@@ -2155,6 +2155,8 @@ def _integrate_client(client, args, brief: bool = False) -> None:
         for line in (res["snippet"] or "").splitlines():
             print(f"   {line}")
 
+    if not brief:
+        _install_agent_skill(client.key)
     if not brief and not os.path.exists(args.vault):
         print(f"\n! no vault at {args.vault} - run `compartment init` to "
               "create one")

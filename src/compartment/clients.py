@@ -220,6 +220,15 @@ def _home_from(var: str, *default: str) -> Path:
     return _env_dir(var) or Path.home().joinpath(*default)
 
 
+def _antigravity_installed() -> bool:
+    """Whether AntiGravity is installed when ~/.gemini/config has not been
+    created yet: one of its own directories under ~/.gemini (never ~/.gemini
+    itself, which Gemini CLI shares)."""
+    g = Path.home() / ".gemini"
+    return any((g / d).is_dir() for d in ("antigravity", "antigravity-ide",
+                                          "antigravity-cli"))
+
+
 def _zed_settings() -> Path:
     """Zed's settings.json (crates/paths/src/paths.rs): %APPDATA%\\Zed on
     Windows, the XDG config directory on Linux, and ~/.config/zed on macOS
@@ -386,6 +395,9 @@ class Client:
 CLIENTS: dict[str, Client] = {c.key: c for c in [
 
     # -- coding agents, plain `mcpServers` ---------------------------------
+    Client("antigravity", "AntiGravity",
+           _home(".gemini", "config", "mcp_config.json"),
+           aliases=("agy",), installed=_antigravity_installed),
     Client("cursor", "Cursor", _home(".cursor", "mcp.json")),
     Client("windsurf", "Windsurf",
            _home(".codeium", "windsurf", "mcp_config.json")),

@@ -48,7 +48,7 @@ from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
                       PanelState)
 from .menubar import quit_running as _stop_lock_holder
 
-PANEL_WIDTH = 360
+PANEL_WIDTH = 440
 PANEL_MAX_HEIGHT = 640
 TASKBAR_MARGIN = 56          # room for the taskbar the panel sits above
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1456,13 +1456,30 @@ def run(vault: str | None = None, show: bool = False,
         wired = state.get("integrations") or {}
         connect_row = ttk.Frame(frame)
         connect_row.pack(fill="x", pady=(6, 0))
-        for _target, _name in INTEGRATION_TARGETS:
+        _pad_x = max(1, int(3 * S))
+        _pad_y = max(1, int(2 * S))
+        try:
+            from tkinter import font as _tkfont
+            _cstyle = ttk.Style()
+            if _cstyle.theme_use() != "aqua":
+                _df = _tkfont.nametofont("TkDefaultFont").actual()
+                _cfont = (("Segoe UI", 8) if sys.platform == "win32"
+                          else (_df["family"], max(9, abs(int(_df["size"])) - 1)))
+                _cstyle.configure("Connect.TButton", padding=(_pad_x, _pad_y),
+                                  font=_cfont)
+            _ckw = {"width": 0, "style": "Connect.TButton"}
+        except Exception:                             # noqa: BLE001
+            _ckw = {"width": 0}
+        for _i, (_target, _name) in enumerate(INTEGRATION_TARGETS):
             ttk.Button(connect_row,
                        text=f"{_name} ✓" if wired.get(_target) else _name,
                        state=("disabled" if panel.get("connect_busy")
                               else "normal"),
-                       command=lambda t=_target, n=_name: connect(t, n)
-                       ).pack(side="left", padx=(0, 6))
+                       command=lambda t=_target, n=_name: connect(t, n),
+                       **_ckw
+                       ).pack(side="left",
+                              padx=(0, _pad_x if _i < len(INTEGRATION_TARGETS) - 1
+                                    else 0))
         if panel.get("connect_note"):        # only the result of a click
             ttk.Label(frame, text=panel["connect_note"], wraplength=WRAP,
                       justify="left").pack(anchor="w", pady=(4, 0))
