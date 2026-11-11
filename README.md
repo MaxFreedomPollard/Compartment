@@ -594,7 +594,7 @@ compartment integrate --list       # the 34 MCP clients it can wire: AntiGravity
 compartment integrate --all        # every one of them that is installed here
 ```
 
-`claude`, `hermes`, `openclaw` and `antigravity` also get the **`/compartmentalize`** skill
+`claude`, `hermes`, `openclaw`, `antigravity` and `codex` also get the **`/compartmentalize`** skill
 installed in their skills directories. Any other MCP client uses this block
 (stdio transport, no environment variables):
 
@@ -764,8 +764,9 @@ directory, and `compartment uninstall` takes it back:
 | Hermes Agent | `$HERMES_HOME` or `~/.hermes/skills/compartmentalize/SKILL.md` |
 | OpenClaw | `$OPENCLAW_HOME` or `~/.openclaw/skills/compartmentalize/SKILL.md` |
 | AntiGravity | `~/.gemini/config/skills/compartmentalize/SKILL.md` |
+| Codex | `$CODEX_HOME` or `~/.codex/skills/compartmentalize/SKILL.md` |
 
-All four use the same Agent Skills layout, so it is one file. Only the user
+All five use the Agent Skills layout (`SKILL.md` inside `skills/compartmentalize/`). Only the user
 runs it. Type it before compacting, or at any time, and the agent stores the
 whole conversation in the vault: people and contacts, credentials and where
 they live, URLs and hosts, decisions and the reasons for them, and a record

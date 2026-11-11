@@ -181,6 +181,7 @@ def test_antigravity_rule_declares_always_on_trigger_and_preserves_edits(
     txt = rule_path.read_text(encoding="utf-8")
     assert txt.startswith("---\ntrigger: always_on\n---\n")
     assert "call_mcp_tool" in txt and 'ServerName: "compartment"' in txt
+    assert "/learn" in txt and "learning_proposal.md" in txt
     assert cli._install_antigravity_rule()["action"] == "unchanged"
 
     rule_path.write_text("my custom antigravity rule\n", encoding="utf-8")
