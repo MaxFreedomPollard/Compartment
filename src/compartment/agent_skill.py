@@ -11,14 +11,15 @@ This is that ask, packaged. `compartmentalize` is a skill file written into the
 agent's own skills directory, so the user types `/compartmentalize` and the
 whole conversation is swept into the vault before the summary eats it.
 
-Claude Code, Hermes, OpenClaw and AntiGravity all read the same Agent Skills
-layout - `<agent home>/skills/<name>/SKILL.md`, YAML frontmatter, markdown body -
-so one packaged file serves all four and the only thing that differs is the root:
+Claude Code, Hermes, OpenClaw, AntiGravity and Codex all read the same Agent
+Skills layout - `<agent home>/skills/<name>/SKILL.md`, YAML frontmatter,
+markdown body - with Codex requiring strict Agent Skills frontmatter:
 
     claude       $CLAUDE_CONFIG_DIR or ~/.claude/skills/compartmentalize/SKILL.md
     hermes       $HERMES_HOME or ~/.hermes/skills/compartmentalize/SKILL.md
     openclaw     <OpenClaw's config dir>/skills/compartmentalize/SKILL.md
     antigravity  ~/.gemini/config/skills/compartmentalize/SKILL.md
+    codex        $CODEX_HOME or ~/.codex/skills/compartmentalize/SKILL.md
 
 Writing into somebody's skills directory is a larger claim on their machine
 than registering an MCP server, so this module never does it silently and never
@@ -77,12 +78,18 @@ SKILL_TARGETS = {
     "hermes": ("HERMES_HOME", lambda: Path.home() / ".hermes"),
     "openclaw": (_openclaw_dir, lambda: Path.home() / ".openclaw"),
     "antigravity": (None, lambda: Path.home() / ".gemini" / "config"),
+    "codex": ("CODEX_HOME", lambda: Path.home() / ".codex"),
 }
 
 
-def source() -> Path:
-    """The packaged SKILL.md that ships inside the wheel."""
-    return Path(__file__).resolve().parent / "data" / "agent-skill" / "SKILL.md"
+def source(target: str | None = None) -> Path:
+    """The packaged SKILL.md that ships inside the wheel.
+
+    Codex validates frontmatter against the strict Agent Skills specification
+    and skips skills with extra top-level keys, so it gets SKILL-codex.md.
+    """
+    name = "SKILL-codex.md" if target == "codex" else "SKILL.md"
+    return Path(__file__).resolve().parent / "data" / "agent-skill" / name
 
 
 def agent_home(target: str) -> Path | None:
@@ -95,8 +102,8 @@ def agent_home(target: str) -> Path | None:
         override = var()
         if override:
             return override
-    elif var and os.environ.get(var):
-        return Path(os.environ[var]).expanduser()
+    elif var and os.environ.get(var, "").strip():
+        return Path(os.environ[var].strip()).expanduser()
     return default() if callable(default) else default
 
 
@@ -117,7 +124,7 @@ def is_current(target: str) -> bool:
     if not (p and p.is_file()):
         return False
     try:
-        return p.read_bytes() == source().read_bytes()
+        return p.read_bytes() == source(target).read_bytes()
     except OSError:
         return False
 
@@ -132,7 +139,7 @@ def install(target: str) -> dict:
     failure - callers decide whether that is fatal, and at install time it
     never is.
     """
-    src = source()
+    src = source(target)
     if not src.is_file():                       # a broken wheel, not a no-op
         raise OSError(f"packaged skill missing at {src}")
     dst = skill_path(target)
@@ -165,7 +172,7 @@ def remove(target: str) -> bool:
         return False
     try:
         # An edited copy is the user's writing: it stays where it is.
-        if dst.read_bytes() != source().read_bytes():
+        if dst.read_bytes() != source(target).read_bytes():
             return False
         dst.unlink()
     except OSError:

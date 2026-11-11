@@ -32,8 +32,10 @@ def machine(tmp_path, monkeypatch):
         "hermes": ("HERMES_HOME", home / ".hermes"),
         "openclaw": ("OPENCLAW_HOME", home / ".openclaw"),
         "antigravity": (None, home / ".gemini" / "config"),
+        "codex": ("CODEX_HOME", home / ".codex"),
     })
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     # OPENCLAW_HOME stands in for the home directory, as OpenClaw reads it:
     # its config is .openclaw/openclaw.json under it.
     monkeypatch.setenv("OPENCLAW_HOME", str(home))
@@ -67,7 +69,7 @@ def test_an_edited_skill_is_kept_and_named(machine, capsys):
     assert edited.read_text(encoding="utf-8").startswith("my own sweep")
     assert "/compartmentalize skill kept in claude" in out, out
     assert str(edited) in out, out
-    for target in ("hermes", "openclaw", "antigravity"):
+    for target in ("hermes", "openclaw", "antigravity", "codex"):
         assert not agent_skill.is_installed(target)
         assert f"/compartmentalize skill removed from {target}" in out, out
 
@@ -96,6 +98,11 @@ def _wire_everything(machine):
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("# My notes\nkeep me\n", encoding="utf-8")
     cli._write_managed_claude_md()
+    codex_md = machine.home / ".codex" / "AGENTS.md"
+    codex_md.write_text("# Codex notes\nkeep codex\n", encoding="utf-8")
+    cli._write_managed_codex_agents_md()
+    cli._install_antigravity_rule()
+    agy_rule = cli._antigravity_rule_path()
     plugin = machine.home / ".hermes" / "plugins" / "compartment"
     plugin.mkdir(parents=True)
     for f in ("__init__.py", "plugin.yaml"):
@@ -104,7 +111,9 @@ def _wire_everything(machine):
     (plugin / "__pycache__" / "__init__.cpython-311.pyc").write_bytes(b"\0")
     return types.SimpleNamespace(cursor=cursor, codex=codex,
                                  antigravity=antigravity,
-                                 openclaw=openclaw, md=md, plugin=plugin)
+                                 openclaw=openclaw, md=md,
+                                 codex_md=codex_md, agy_rule=agy_rule,
+                                 plugin=plugin)
 
 
 def test_uninstall_takes_back_every_registration_integrate_wrote(machine,
@@ -126,12 +135,17 @@ def test_uninstall_takes_back_every_registration_integrate_wrote(machine,
     assert json.loads(w.openclaw.read_text(encoding="utf-8")) == {
         "gateway": {"port": 18789}, "mcp": {"servers": {}}}
     assert w.md.read_text(encoding="utf-8") == "# My notes\nkeep me\n"
+    assert w.codex_md.read_text(encoding="utf-8") == (
+        "# Codex notes\nkeep codex\n")
+    assert not w.agy_rule.exists()
     assert not w.plugin.exists()
     for said in ("Claude Desktop registration removed",
                  "removed from Cursor", "removed from Codex CLI",
                  "removed from AntiGravity",
                  "OpenClaw registration removed",
                  f"compartment block removed from {w.md}",
+                 f"compartment block removed from {w.codex_md}",
+                 f"AntiGravity rule removed from {w.agy_rule}",
                  "Hermes provider plugin removed"):
         assert said in out, out
     assert ["claude", "mcp", "remove", "compartment"] in machine.ran
@@ -144,6 +158,7 @@ def test_a_step_that_cannot_finish_says_why_and_the_rest_still_run(machine,
     desktop.write_text("{ not json", encoding="utf-8")
     (w.plugin / "__init__.py").write_text("# my own provider tweaks\n",
                                           encoding="utf-8")
+    w.agy_rule.write_text("# my own antigravity rule\n", encoding="utf-8")
     vault = Path(machine.vault)
     vault.parent.mkdir(parents=True)
     vault.write_bytes(b"every memory")
@@ -155,8 +170,11 @@ def test_a_step_that_cannot_finish_says_why_and_the_rest_still_run(machine,
     assert (w.plugin / "__init__.py").read_text(
         encoding="utf-8").startswith("# my own")
     assert "Hermes provider plugin kept" in out, out
+    assert w.agy_rule.read_text(encoding="utf-8").startswith("# my own")
+    assert "AntiGravity rule kept" in out, out
     assert not clients.is_registered(w.cursor)
     assert cli._CLAUDE_MD_BEGIN not in w.md.read_text(encoding="utf-8")
+    assert cli._CLAUDE_MD_BEGIN not in w.codex_md.read_text(encoding="utf-8")
     assert vault.read_bytes() == b"every memory"
 
 

@@ -480,6 +480,10 @@ def test_every_shared_skill_meets_the_agent_skills_specification():
                "allowed-tools"}
     skills = sorted((ROOT / "skills").glob("*/SKILL.md"))
     assert skills
+    codex_pkg = (ROOT / "src" / "compartment" / "data" / "agent-skill"
+                 / "SKILL-codex.md")
+    assert codex_pkg.read_bytes() == (
+        ROOT / "skills" / "compartmentalize" / "SKILL.md").read_bytes()
     for path in skills:
         text = path.read_text(encoding="utf-8")
         assert text.startswith("---\n")

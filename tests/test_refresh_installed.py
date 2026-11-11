@@ -28,9 +28,12 @@ def homes(tmp_path, monkeypatch):
         "claude": (None, tmp_path / ".claude"),
         "hermes": ("HERMES_HOME", tmp_path / ".hermes"),
         "openclaw": ("OPENCLAW_HOME", tmp_path / ".openclaw"),
+        "antigravity": (None, tmp_path / ".gemini" / "config"),
+        "codex": ("CODEX_HOME", tmp_path / ".codex"),
     })
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("CLAUDE_MD", str(tmp_path / ".claude" / "CLAUDE.md"))
     return tmp_path
 
@@ -171,3 +174,35 @@ def test_a_claude_md_that_is_not_utf8_is_left_alone_and_the_rest_refreshed(
     src = cli._data_dir() / "hermes-plugin"
     for f in ("__init__.py", "plugin.yaml"):
         assert (plug / f).read_bytes() == (src / f).read_bytes()
+
+
+def test_codex_agents_md_and_antigravity_rule_refresh_only_where_present(homes):
+    assert cli._refresh_installed() == []
+    assert not (homes / ".codex").exists()
+    assert not (homes / ".gemini").exists()
+
+    codex_md = homes / ".codex" / "AGENTS.md"
+    codex_md.parent.mkdir(parents=True)
+    codex_md.write_text("# Codex rules\n" + OLD_BLOCK + "\n", encoding="utf-8")
+
+    agy_rule = homes / ".gemini" / "config" / "rules" / "compartment.md"
+    agy_rule.parent.mkdir(parents=True)
+    agy_rule.write_text("---\ntrigger: always_on\n---\nold rule\n",
+                        encoding="utf-8")
+
+    codex_skill = homes / ".codex" / "skills" / "compartmentalize" / "SKILL.md"
+    codex_skill.parent.mkdir(parents=True)
+    codex_skill.write_text("stale codex skill\n", encoding="utf-8")
+
+    done = cli._refresh_installed()
+    assert any(str(codex_md) in d for d in done)
+    assert any(str(agy_rule) in d for d in done)
+    assert any(str(codex_skill) in d for d in done)
+    assert " ".join(gate.STORE_RULE.split()) in " ".join(
+        codex_md.read_text(encoding="utf-8").split())
+    assert agy_rule.read_bytes() == cli._ANTIGRAVITY_RULE.encode("utf-8")
+    assert agy_rule.with_name(
+        "compartment.md" + agent_skill.BACKUP_SUFFIX).read_text(
+            encoding="utf-8").endswith("old rule\n")
+    assert codex_skill.read_bytes() == agent_skill.source("codex").read_bytes()
+    assert cli._refresh_installed() == []

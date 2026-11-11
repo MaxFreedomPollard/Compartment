@@ -69,6 +69,8 @@ def test_every_surface_ships_the_same_store_rule():
     assert rule in _flat(server.COMPARTMENT_INSTRUCTIONS)
     assert rule in _flat(server.memory_store.__doc__ or "")
     assert rule in _flat(cli._CLAUDE_MD_BODY)
+    assert rule in _flat(cli._CODEX_AGENTS_MD_BODY)
+    assert rule in _flat(cli._ANTIGRAVITY_RULE)
 
     for copy in (ROOT / "src" / "compartment" / "data" / "hermes-plugin"
                  / "__init__.py",
@@ -82,6 +84,8 @@ def test_every_surface_ships_the_same_store_rule():
                 ROOT / "skills" / "compartmentalize" / "SKILL.md",
                 ROOT / "src" / "compartment" / "data" / "agent-skill"
                 / "SKILL.md",
+                ROOT / "src" / "compartment" / "data" / "agent-skill"
+                / "SKILL-codex.md",
                 ROOT / "integrations" / "omp" / "extension.ts"):
         assert rule in _flat(doc.read_text(encoding="utf-8")), doc
 
@@ -138,3 +142,55 @@ def test_managed_block_created_when_no_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_MD", str(md))
     cli._write_managed_claude_md()
     assert md.exists() and cli._CLAUDE_MD_BEGIN in md.read_text(encoding="utf-8")
+
+
+def test_managed_codex_agents_md_is_idempotent_and_preserves_user_text(
+        tmp_path, monkeypatch):
+    from compartment import cli
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    md = tmp_path / "codex" / "AGENTS.md"
+    md.parent.mkdir(parents=True)
+    md.write_text("# Working agreements\nRun pytest before committing.\n",
+                  encoding="utf-8")
+
+    assert cli._write_managed_codex_agents_md() == md
+    t1 = md.read_text(encoding="utf-8")
+    assert "Run pytest before committing." in t1
+    assert cli._CLAUDE_MD_BEGIN in t1 and cli._CLAUDE_MD_END in t1
+    assert "memory_store" in t1 and "memory_search" in t1 and "API keys" in t1
+
+    cli._write_managed_codex_agents_md()
+    t2 = md.read_text(encoding="utf-8")
+    assert t2.count(cli._CLAUDE_MD_BEGIN) == 1
+    assert t2.count(cli._CLAUDE_MD_END) == 1
+    assert "Run pytest before committing." in t2
+
+    assert cli._remove_managed_codex_agents_md() == md
+    assert md.read_text(encoding="utf-8") == (
+        "# Working agreements\nRun pytest before committing.\n")
+
+
+def test_antigravity_rule_declares_always_on_trigger_and_preserves_edits(
+        tmp_path, monkeypatch):
+    from compartment import cli
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+
+    r1 = cli._install_antigravity_rule()
+    assert r1["action"] == "written" and r1["backup"] is None
+    rule_path = tmp_path / ".gemini" / "config" / "rules" / "compartment.md"
+    txt = rule_path.read_text(encoding="utf-8")
+    assert txt.startswith("---\ntrigger: always_on\n---\n")
+    assert "call_mcp_tool" in txt and 'ServerName: "compartment"' in txt
+    assert cli._install_antigravity_rule()["action"] == "unchanged"
+
+    rule_path.write_text("my custom antigravity rule\n", encoding="utf-8")
+    assert cli._remove_antigravity_rule() == "kept"
+    assert rule_path.read_text(encoding="utf-8") == "my custom antigravity rule\n"
+
+    r2 = cli._install_antigravity_rule()
+    assert r2["action"] == "replaced" and r2["backup"]
+    assert pathlib.Path(r2["backup"]).read_text(encoding="utf-8") == (
+        "my custom antigravity rule\n")
+    assert cli._antigravity_rule_is_current()
+    assert cli._remove_antigravity_rule() == "removed"
+    assert not rule_path.exists()

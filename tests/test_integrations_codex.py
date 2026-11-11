@@ -132,3 +132,43 @@ def test_a_stale_codex_entry_that_cannot_be_taken_out_is_left_for_the_user(
     assert "left as it is" in res["reason"]
     assert "[mcp_servers.compartment]" in res["snippet"]
     assert p.read_text(encoding="utf-8") == text
+
+
+def test_integrate_codex_wires_config_agents_md_and_strict_skill(
+        tmp_path, monkeypatch, capsys):
+    from compartment import agent_skill, cli, gate
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text('model = "o3"\n', encoding="utf-8")
+    (codex_dir / "AGENTS.md").write_text("# My agreements\nKeep me.\n",
+                                         encoding="utf-8")
+    (codex_dir / "AGENTS.override.md").write_text("# temporary override\n",
+                                                  encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+
+    cli.main(["--vault", str(tmp_path / "v.vault"), "integrate", "codex"])
+    out = capsys.readouterr().out
+
+    doc = tomllib.loads((codex_dir / "config.toml").read_text(encoding="utf-8"))
+    assert doc["model"] == "o3"
+    assert "compartment" in doc["mcp_servers"]
+
+    agents_txt = (codex_dir / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Keep me." in agents_txt
+    assert cli._CLAUDE_MD_BEGIN in agents_txt and cli._CLAUDE_MD_END in agents_txt
+    assert " ".join(gate.STORE_RULE.split()) in " ".join(agents_txt.split())
+    assert "AGENTS.override.md" in out and "shadows AGENTS.md" in out
+
+    assert agent_skill.is_current("codex")
+    skill_txt = agent_skill.skill_path("codex").read_text(encoding="utf-8")
+    assert "disable-model-invocation" not in skill_txt
+
+    cli.main(["--vault", str(tmp_path / "v.vault"),
+              "integrate", "codex", "--remove"])
+    doc_after = tomllib.loads(
+        (codex_dir / "config.toml").read_text(encoding="utf-8"))
+    assert "compartment" not in doc_after.get("mcp_servers", {})
+    assert (codex_dir / "AGENTS.md").read_text(encoding="utf-8") == (
+        "# My agreements\nKeep me.\n")
+    assert not agent_skill.is_installed("codex")

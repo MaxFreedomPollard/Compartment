@@ -34,7 +34,8 @@ def _homeless_env():
     env = {k: v for k, v in os.environ.items()
            if k not in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
                         "CLAUDE_CONFIG_DIR", "HERMES_HOME", "OPENCLAW_HOME",
-                        "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH")}
+                        "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH",
+                        "CODEX_HOME")}
     src = os.path.join(os.path.dirname(__file__), os.pardir, "src")
     env["PYTHONPATH"] = os.pathsep.join(
         [os.path.abspath(src), env.get("PYTHONPATH", "")])
@@ -69,6 +70,7 @@ def test_the_env_overrides_still_win_when_asked_for(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "c"))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
     monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / "o"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "x"))
     for module, name in ((claude_memory, "DEFAULT_ROOT"),
                          (claude_hooks, "SETTINGS")):
         if name in vars(module):
@@ -79,3 +81,4 @@ def test_the_env_overrides_still_win_when_asked_for(monkeypatch, tmp_path):
     assert agent_skill.agent_home("claude") == tmp_path / "c"
     assert agent_skill.agent_home("hermes") == tmp_path / "h"
     assert agent_skill.agent_home("openclaw") == tmp_path / "o"
+    assert agent_skill.agent_home("codex") == tmp_path / "x"

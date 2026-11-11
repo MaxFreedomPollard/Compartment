@@ -255,7 +255,7 @@ or as UTF-16 (Notepad, PowerShell 5) are read and written back as UTF-8.
 
 | `integrate …` | File it writes (macOS / Linux; Windows where it differs) | Notes |
 |---|---|---|
-| `antigravity` | `~/.gemini/config/mcp_config.json` | also installs `/compartmentalize` skill |
+| `antigravity` | `~/.gemini/config/mcp_config.json` | also installs always-on `~/.gemini/config/rules/compartment.md` rule and `/compartmentalize` skill |
 | `cursor` | `~/.cursor/mcp.json` | |
 | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | |
 | `vscode`, `vscode-insiders` | `<User dir>/mcp.json`, key `servers` | comments kept |
@@ -264,7 +264,7 @@ or as UTF-16 (Notepad, PowerShell 5) are read and written back as UTF-8.
 | `roo` | `<editor>/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | |
 | `kilo` | `~/.config/kilo/kilo.jsonc` (or the kilo/opencode file already there), key `mcp` | comments kept |
 | `continue` | `~/.continue/mcpServers/compartment.json` (`CONTINUE_GLOBAL_DIR`) | a file of its own; config.yaml untouched |
-| `codex` | `~/.codex/config.toml` (`CODEX_HOME`), `[mcp_servers.compartment]` | re-running refreshes a stale entry |
+| `codex` | `~/.codex/config.toml` (`CODEX_HOME`), `[mcp_servers.compartment]` | also writes managed fenced block in `AGENTS.md`, installs `/compartmentalize` skill, and refreshes stale entries |
 | `gemini` | `~/.gemini/settings.json` (`$GEMINI_CLI_HOME/.gemini`) | comments kept |
 | `qwen` | `~/.qwen/settings.json` (`QWEN_HOME`) | comments kept |
 | `copilot-cli` | `~/.copilot/mcp-config.json` (`COPILOT_HOME`) | |

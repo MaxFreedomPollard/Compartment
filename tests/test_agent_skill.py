@@ -18,13 +18,15 @@ def homes(tmp_path, monkeypatch):
         "hermes": ("HERMES_HOME", tmp_path / ".hermes"),
         "openclaw": ("OPENCLAW_HOME", tmp_path / ".openclaw"),
         "antigravity": (None, tmp_path / ".gemini" / "config"),
+        "codex": ("CODEX_HOME", tmp_path / ".codex"),
     })
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     return tmp_path
 
 
-ALL = ("claude", "hermes", "openclaw", "antigravity")
+ALL = ("claude", "hermes", "openclaw", "antigravity", "codex")
 
 
 # ---------------------------------------------------------------- packaging --
@@ -72,6 +74,9 @@ def test_an_unknown_target_has_no_path(homes):
 def test_the_home_environment_variables_are_honoured(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "elsewhere"))
     assert str(A.skill_path("hermes")).startswith(str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-profile"))
+    assert str(A.skill_path("codex")).startswith(
+        str(tmp_path / "codex-profile"))
 
 
 # ------------------------------------------------------------------ install --
@@ -81,7 +86,7 @@ def test_installing_writes_the_packaged_copy(homes, target):
     assert r["action"] == "written"
     assert r["backup"] is None
     assert A.is_installed(target) and A.is_current(target)
-    assert A.skill_path(target).read_bytes() == A.source().read_bytes()
+    assert A.skill_path(target).read_bytes() == A.source(target).read_bytes()
 
 
 @pytest.mark.parametrize("target", ALL)
@@ -147,7 +152,7 @@ def test_removal_keeps_a_copy_the_user_edited(homes, target):
                  encoding="utf-8")
     assert A.remove(target) is False
     assert p.read_text(encoding="utf-8").startswith("my own sweep")
-    p.write_bytes(A.source().read_bytes())       # the packaged copy again
+    p.write_bytes(A.source(target).read_bytes())  # the packaged copy again
     assert A.remove(target) is True
     assert not p.parent.exists(), "an empty skill directory goes with it"
 
@@ -171,17 +176,29 @@ def test_status_notices_an_edited_copy_is_not_current(homes):
 # --------------------------------------------------------------- failure -----
 def test_a_broken_package_fails_loudly_rather_than_writing_nothing(homes,
                                                                    monkeypatch):
-    monkeypatch.setattr(A, "source", lambda: homes / "does-not-exist.md")
+    monkeypatch.setattr(A, "source",
+                        lambda target=None: homes / "does-not-exist.md")
     with pytest.raises(OSError):
         A.install("claude")
 
 
-def test_integrate_antigravity_wires_mcp_and_installs_skill(homes, monkeypatch):
+def test_integrate_antigravity_wires_mcp_rule_and_skill(homes, monkeypatch):
     import json
     from compartment import cli
     monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: homes))
     cli.main(["--vault", str(homes / "v.vault"), "integrate", "antigravity"])
     mcp_cfg = homes / ".gemini" / "config" / "mcp_config.json"
+    rule_md = homes / ".gemini" / "config" / "rules" / "compartment.md"
     assert "compartment" in json.loads(
         mcp_cfg.read_text(encoding="utf-8"))["mcpServers"]
     assert A.is_current("antigravity")
+    assert rule_md.is_file() and cli._antigravity_rule_is_current()
+    assert rule_md.read_text(encoding="utf-8").startswith(
+        "---\ntrigger: always_on\n---\n")
+
+    cli.main(["--vault", str(homes / "v.vault"),
+              "integrate", "antigravity", "--remove"])
+    assert "compartment" not in json.loads(
+        mcp_cfg.read_text(encoding="utf-8"))["mcpServers"]
+    assert not A.is_installed("antigravity")
+    assert not rule_md.exists()

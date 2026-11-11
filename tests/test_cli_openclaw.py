@@ -81,8 +81,12 @@ def test_uninstall_takes_it_out_of_both_places(openclaw_home, monkeypatch,
         monkeypatch.setattr(cli.clients, name, lambda *a, **k: False)
     monkeypatch.setattr(cli.claude_desktop, "unregister", lambda: False)
     monkeypatch.setattr(cli.claude_hooks, "is_installed", lambda: False)
+    monkeypatch.setattr(cli.Path, "home",
+                        classmethod(lambda cls: openclaw_home.parents[1]))
     monkeypatch.setattr(cli.agent_skill, "SKILL_TARGETS", {})
     monkeypatch.setattr(cli, "_remove_managed_claude_md", lambda: None)
+    monkeypatch.setattr(cli, "_remove_managed_codex_agents_md", lambda: None)
+    monkeypatch.setattr(cli, "_remove_antigravity_rule", lambda: "absent")
     cli.cmd_uninstall(types.SimpleNamespace(purge=False, vault=VAULT))
     cfg = json.loads(openclaw_home.read_text(encoding="utf-8"))
     assert cfg == {"mcp": {"servers": {"theirs": {}}},

@@ -72,8 +72,12 @@ def test_uninstall_names_the_pipx_command_for_a_pipx_install(env_root,
         monkeypatch.setattr(cli.clients, name, lambda *a, **k: False)
     monkeypatch.setattr(cli.claude_desktop, "unregister", lambda: False)
     monkeypatch.setattr(cli.claude_hooks, "is_installed", lambda: False)
+    monkeypatch.setattr(cli.Path, "home",
+                        classmethod(lambda cls: env_root / "home"))
     monkeypatch.setattr(cli.agent_skill, "SKILL_TARGETS", {})
     monkeypatch.setattr(cli, "_remove_managed_claude_md", lambda: None)
+    monkeypatch.setattr(cli, "_remove_managed_codex_agents_md", lambda: None)
+    monkeypatch.setattr(cli, "_remove_antigravity_rule", lambda: "absent")
     from compartment import menubar
     monkeypatch.setattr(menubar, "_is_generated", lambda path: False)
     monkeypatch.setenv("OPENCLAW_HOME", str(env_root / "openclaw"))
