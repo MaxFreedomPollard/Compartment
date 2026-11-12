@@ -9,7 +9,7 @@ DATA = pathlib.Path(__file__).resolve().parents[1] / "src" / "compartment" / "da
 def test_starter_pack_ships_and_verifies():
     blob = (DATA / "starter.mpack").read_bytes()
     header, records, vectors = packs.read_pack(blob)  # verifies sig+hash
-    assert len(records) == vectors.shape[0] == header["records"] == 6664
+    assert len(records) == vectors.shape[0] == header["records"] == 6864
     assert vectors.shape[1] == 384
 
 
@@ -17,6 +17,9 @@ def test_starter_sections_all_present():
     _, records, _ = packs.read_pack((DATA / "starter.mpack").read_bytes())
     prefixes = {r["id"].split("-")[0] for r in records}
     assert {"core", "akc", "macos", "windows", "linux"} <= prefixes
+    full_prefixes = {r["id"].rsplit("-", 1)[0] for r in records}
+    assert {"ai-mcp", "ai-harness", "ai-agent", "ai-llm",
+            "dev-git", "dev-python", "dev-ops"} <= full_prefixes
     core = [r for r in records if r["id"].startswith("core-")]
     assert len(core) == 260  # frozen selftest corpus intact
 
@@ -40,6 +43,12 @@ def test_os_facts_recallable(vault):
     hit = vault.search("command to sign code on mac", caller="t",
                        top_k=3)["results"]
     assert any("codesign" in h["text"] for h in hit)
+    hit = vault.search("MCP stdio stdout print corrupts JSON-RPC stream",
+                       caller="t", top_k=3)["results"]
+    assert any("stderr" in h["text"] and "JSON-RPC" in h["text"] for h in hit)
+    hit = vault.search("parallel coding agents isolated git checkout",
+                       caller="t", top_k=3)["results"]
+    assert any("git worktree" in h["text"] for h in hit)
 
 
 def test_seed_lands_in_main_fully_editable(vault):
@@ -49,7 +58,7 @@ def test_seed_lands_in_main_fully_editable(vault):
                              caller="t")
     assert out["namespace"] == "main"
     assert out["used_precomputed_vectors"] is True
-    assert vault.db.count("main") == 6664
+    assert vault.db.count("main") == 6864
     assert vault.db.count("packs/starter") == 0
     assert vault.pack_list() == []          # no separate section registered
     row = vault.db.conn.execute(
@@ -57,10 +66,10 @@ def test_seed_lands_in_main_fully_editable(vault):
     assert row["pack"] is None
     # editable: forget one starting memory like any other memory
     vault.forget(row["id"], caller="t")
-    assert vault.db.count("main") == 6663
+    assert vault.db.count("main") == 6863
     # new memories land in the very same namespace
     vault.store("organic memory next to the starters", caller="t")
-    assert vault.db.count("main") == 6664
+    assert vault.db.count("main") == 6864
 
 
 def test_legacy_starter_vault_merges_on_unlock(tmp_path):
@@ -76,12 +85,12 @@ def test_legacy_starter_vault_merges_on_unlock(tmp_path):
     before = {
         r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])
         for r in v.db.conn.execute("SELECT * FROM records")}
-    assert v.db.count("packs/starter") == 6664
+    assert v.db.count("packs/starter") == 6864
     v.lock()
 
     v2 = Vault.unlock(p, passphrase=PASS)
     assert v2.db.count("packs/starter") == 0
-    assert v2.db.count("main") == 6664
+    assert v2.db.count("main") == 6864
     assert v2.pack_list() == []
     after = {
         r["id"]: (r["tags"], r["importance"], r["created"], r["prov"], r["vec"])
@@ -90,14 +99,14 @@ def test_legacy_starter_vault_merges_on_unlock(tmp_path):
     # merged memories are freely editable now
     rid = next(iter(after))
     v2.forget(rid, caller="legacy")
-    assert v2.db.count("main") == 6663
+    assert v2.db.count("main") == 6863
     # audit trail records the reorganization
     ops = [r["op"] for r in v2.db.conn.execute("SELECT op FROM audit")]
     assert "merge" in ops
     # and the merge is durable: reopen shows the merged layout
     v2.lock()
     v3 = Vault.unlock(p, passphrase=PASS)
-    assert v3.db.count("main") == 6663 and v3.db.count("packs/starter") == 0
+    assert v3.db.count("main") == 6863 and v3.db.count("packs/starter") == 0
 
 
 def test_pack_export_roundtrip(tmp_path):

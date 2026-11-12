@@ -197,3 +197,51 @@ def test_antigravity_rule_declares_always_on_trigger_and_preserves_edits(
     assert cli._antigravity_rule_is_current()
     assert cli._remove_antigravity_rule() == "removed"
     assert not rule_path.exists()
+
+
+def test_every_agent_surface_keeps_learn_and_equivalents_strictly_additive():
+    """Every major agent wired by Compartment must perform its own default
+    rule/instruction/skill update FIRST on /learn (or /memory, /init,
+    $skill-creator, skill_manage) and update Compartment IN ADDITION (add,
+    supersede, or forget) rather than diverting rules or skills into
+    Compartment alone."""
+    from compartment import cli, server
+
+    mcp_flat = _flat(server.COMPARTMENT_INSTRUCTIONS)
+    assert "ADDITIVE TO /learn, RULES, AND SKILLS." in mcp_flat
+    assert "default instruction, rule, or skill update FIRST" in mcp_flat
+    assert "IN ADDITION" in mcp_flat
+    assert "memory_forget" in mcp_flat
+
+    gemini_flat = _flat((ROOT / "GEMINI.md").read_text(encoding="utf-8"))
+    assert "ADDITIVE TO /learn, RULES, AND SKILLS." in gemini_flat
+    assert "memory_forget" in gemini_flat
+
+    claude_flat = _flat(cli._CLAUDE_MD_BODY)
+    assert "strictly ADDITIVE to Claude Code's trusted instructions, rules, and skills" in claude_flat
+    assert "`/memory`, `/init`, `/learn`" in claude_flat
+    assert "update FIRST" in claude_flat
+    assert "IN ADDITION" in claude_flat
+    assert "`memory_forget`" in claude_flat
+
+    codex_flat = _flat(cli._CODEX_AGENTS_MD_BODY)
+    assert "strictly ADDITIVE to Codex's trusted instruction and skill files" in codex_flat
+    assert "`/init`, `$skill-creator`, `/learn`" in codex_flat
+    assert "update FIRST" in codex_flat
+    assert "IN ADDITION" in codex_flat
+    assert "`memory_forget`" in codex_flat
+
+    agy_flat = _flat(cli._ANTIGRAVITY_RULE)
+    assert "strictly additive to `/learn`, never a replacement for Rules or Skills" in agy_flat
+    assert "IN ADDITION" in agy_flat
+    assert "`memory_forget`" in agy_flat
+
+    hermes_flat = _flat(
+        (ROOT / "integrations" / "hermes" / "compartment" / "__init__.py")
+        .read_text(encoding="utf-8"))
+    assert "strictly ADDITIVE to Hermes's `/learn` command" in hermes_flat
+    assert "`skill_manage`" in hermes_flat
+    assert "update FIRST" in hermes_flat
+    assert "IN ADDITION" in hermes_flat
+    assert "`compartment_forget`" in hermes_flat
+

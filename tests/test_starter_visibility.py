@@ -94,7 +94,7 @@ def test_the_recent_feed_hides_seeded_memories(sv):
     licence to bury real memories under thousands of starting ones."""
     out = sv.recent(caller="test", limit=5)
     assert not any(r["seeded"] for r in out["results"])
-    assert out["counts"]["seeded"] == 6664
+    assert out["counts"]["seeded"] == 6864
 
 
 def test_the_panel_says_the_starting_memories_are_there():

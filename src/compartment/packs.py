@@ -48,7 +48,7 @@ class PackError(CryptoError):
 #: bundled starter pack verifiable without trusting the file it arrived in.
 #: The private half lives in tools/pack_identity.json, which is gitignored and
 #: never leaves the maintainer's machine.
-PROJECT_PACK_KEY = "2577018190ac8d39185854306ffbce84fd86feb6e2b20ab256c3bdcbff60d91e"
+PROJECT_PACK_KEY = "dfd68d95137918b34370e748a0ce0eabfcafc5808d3b346ae74d3f01aaf67689"
 
 #: Trusted by default, with no way for a pack to add itself.
 TRUSTED_PACK_KEYS: frozenset[str] = frozenset({PROJECT_PACK_KEY})

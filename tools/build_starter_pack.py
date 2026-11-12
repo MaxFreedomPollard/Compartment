@@ -23,7 +23,7 @@ IDENTITY_FILE = ROOT / "tools" / "pack_identity.json"
 SRC = ROOT / "tools" / "starter" / "starter_facts.jsonl"
 OUT = ROOT / "src" / "compartment" / "data" / "starter.mpack"
 
-VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.0.0"
+VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.6.0"
 
 records = [json.loads(l) for l in SRC.read_text(encoding="utf-8").splitlines() if l.strip()]
 ids = [r["id"] for r in records]
@@ -46,10 +46,13 @@ blob = packs.build_pack(
                 "Collection 6.0 (compilation CC BY-SA 4.0), OS reference facts "
                 "for macOS, Windows, and Linux, a hardware map of computers "
                 "(Apple/PC/single-board/console/mobile devices, CPUs/GPUs, and "
-                "I/O standards), and offline developer & practical reference "
-                "(networking, HTTP, character encodings, file signatures, "
-                "shell/OS internals, standards & time, physical constants & "
-                "units, and emergency/first-aid).",
+                "I/O standards), agentic AI operational reference (MCP, agent "
+                "harnesses, rules, skills, hooks, context engineering, agent "
+                "security, and LLM inference), and offline developer & "
+                "practical reference (Python, Git worktrees, SQLite WAL, "
+                "containers, networking, HTTP, encodings, file signatures, "
+                "shell/OS internals, standards & time, physical constants, "
+                "and emergency/first-aid).",
     records=records, vectors=vectors,
     model={"name": DEFAULT_MODEL, "sha256": emb.model_sha256, "dim": emb.dim},
     identity=identity)
