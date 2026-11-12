@@ -4,6 +4,9 @@
     python tools/build_macos_app.py --dmg      # …and a drag-to-install .dmg
     python tools/build_macos_app.py --pkg      # …and a .pkg with an optional
                                                #   "start at login" component
+    python tools/build_macos_app.py --pkg --dmg --sign-auto --notarize
+                                               # Developer ID + Hardened Runtime
+                                               # + notarytool + stapler
 
 From CI, on a GitHub macOS runner (arm64, or macos-15-intel for x86_64),
 with uv's standalone Python and nothing else installed:
@@ -56,6 +59,8 @@ enforces both at build time.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import json
 import os
 import pathlib
 import plistlib
@@ -517,6 +522,21 @@ def _unseal_hazards(contents: pathlib.Path) -> None:
         if p.exists():
             p.unlink()
             print(f"removed Contents/{junk} (would break the signature)")
+    root = contents.resolve()
+    root_prefix = str(root) + os.sep
+    for p in sorted(contents.rglob("*")):
+        if not p.is_symlink():
+            continue
+        if not p.exists():
+            rel = p.relative_to(contents)
+            p.unlink()
+            print(f"removed broken symlink Contents/{rel} (would break the signature)")
+            continue
+        target = p.resolve()
+        if target != root and not str(target).startswith(root_prefix):
+            rel = p.relative_to(contents)
+            p.unlink()
+            print(f"removed external symlink Contents/{rel} (would break portability)")
 
 
 def _verify_signature(app: pathlib.Path) -> None:
@@ -606,9 +626,119 @@ def _verify_self_contained(app: pathlib.Path) -> None:
           f"{len(info['path'])} sys.path entries, all inside the bundle")
 
 
+_ENTITLEMENTS = {
+    # PyObjC and ctypes/cffi allocate libffi closures at runtime, which needs
+    # unsigned executable memory under Hardened Runtime. macOS Library
+    # Validation stays enabled because every Mach-O inside the bundle is
+    # signed with the same Developer ID identity.
+    "com.apple.security.cs.allow-unsigned-executable-memory": True,
+}
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def _find_keychain_identity(prefix: str) -> str | None:
+    """Return the first valid keychain identity whose common name starts with
+    `prefix` (e.g. 'Developer ID Application:' or 'Developer ID Installer:'),
+    or None if no matching identity is installed."""
+    try:
+        out = subprocess.run(["security", "find-identity", "-v"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pattern = re.compile(r'"(' + re.escape(prefix) + r'[^"]+)"')
+    for line in out.stdout.splitlines():
+        m = pattern.search(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _resolve_signing_identities(
+    sign_app: str | None = None,
+    sign_pkg: str | None = None,
+    sign_auto: bool = False,
+) -> tuple[str, str | None]:
+    """Resolve (app_identity, pkg_identity) from CLI flags, environment
+    variables, or automatic keychain discovery, falling back cleanly to
+    ad-hoc ('-') and None when no Developer ID certificates are available."""
+    auto = sign_auto or _truthy_env("COMPARTMENT_SIGN_AUTO")
+
+    raw_app = (sign_app if sign_app is not None
+               else os.environ.get("COMPARTMENT_CODESIGN_IDENTITY", "").strip())
+    if raw_app == "auto" or (not raw_app and auto):
+        app_id = _find_keychain_identity("Developer ID Application:") or "-"
+    elif raw_app:
+        app_id = raw_app
+    else:
+        app_id = "-"
+
+    raw_pkg = (sign_pkg if sign_pkg is not None
+               else os.environ.get("COMPARTMENT_INSTALLER_IDENTITY", "").strip())
+    if raw_pkg == "auto" or (not raw_pkg and auto):
+        pkg_id = _find_keychain_identity("Developer ID Installer:")
+    elif raw_pkg and raw_pkg != "-":
+        pkg_id = raw_pkg
+    else:
+        pkg_id = None
+
+    return app_id, pkg_id
+
+
+def _sign_app_developer_id(app: pathlib.Path, identity: str) -> None:
+    """Sign every nested Mach-O inside `app` deepest-path-first under Hardened
+    Runtime with a secure timestamp, then sign the outer bundle without
+    `--deep`."""
+    contents = app / "Contents"
+    main_exe = contents / "MacOS" / APP_NAME
+    nested_libs: list[pathlib.Path] = []
+    nested_exes: list[pathlib.Path] = []
+    for p in contents.rglob("*"):
+        if p.is_symlink() or not p.is_file() or p == main_exe:
+            continue
+        if not _macho_slices(p):
+            continue
+        if p.suffix in (".dylib", ".so"):
+            nested_libs.append(p)
+        else:
+            nested_exes.append(p)
+
+    depth_order = lambda p: (-len(p.parts), str(p))
+    nested_libs.sort(key=depth_order)
+    nested_exes.sort(key=depth_order)
+
+    def _ensure_writable(target: pathlib.Path) -> None:
+        mode = target.stat().st_mode
+        if not (mode & 0o200):
+            target.chmod(mode | 0o200)
+
+    print(f"signing {len(nested_libs)} nested libraries and "
+          f"{len(nested_exes)} nested executables under Hardened Runtime…")
+    with tempfile.TemporaryDirectory(prefix="compartment-entitlements-") as td:
+        ent_plist = pathlib.Path(td) / "entitlements.plist"
+        with open(ent_plist, "wb") as fh:
+            plistlib.dump(_ENTITLEMENTS, fh)
+        for lib in nested_libs:
+            _ensure_writable(lib)
+            _run("codesign", "--force", "--sign", identity,
+                 "--timestamp", "--options", "runtime", lib)
+        for exe in nested_exes:
+            _ensure_writable(exe)
+            _run("codesign", "--force", "--sign", identity,
+                 "--timestamp", "--options", "runtime",
+                 "--entitlements", ent_plist, exe)
+        _ensure_writable(main_exe)
+        _run("codesign", "--force", "--sign", identity,
+             "--timestamp", "--options", "runtime",
+             "--entitlements", ent_plist, app)
+
+
 def build_app(spec: str | None = None, out: pathlib.Path | None = None,
               python: str | None = None,
-              min_macos: str = MIN_MACOS) -> pathlib.Path:
+              min_macos: str = MIN_MACOS,
+              sign_identity: str | None = None) -> pathlib.Path:
     """spec: what to pip-install (default: this checkout, so the build always
     matches the source it came from)."""
     version = _version()
@@ -729,8 +859,16 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     _verify_console_scripts(app)
     _verify_deployment_target(app, arch, min_macos)
 
-    _run("codesign", "--force", "--deep", "--sign", "-",
-         "--identifier", BUNDLE_ID, app)
+    resolved_app_id = (
+        sign_identity if sign_identity is not None
+        else (os.environ.get("COMPARTMENT_CODESIGN_IDENTITY", "").strip()
+              or "-")
+    )
+    if resolved_app_id == "-":
+        _run("codesign", "--force", "--deep", "--sign", "-",
+             "--identifier", BUNDLE_ID, app)
+    else:
+        _sign_app_developer_id(app, resolved_app_id)
     _verify_signature(app)
     _no_xattr_signatures(app)
     _verify_survives_running(app)
@@ -757,16 +895,26 @@ def _verify_survives_running(app: pathlib.Path) -> None:
     """
     with tempfile.TemporaryDirectory(prefix="compartment-buildprobe-") as tmp:
         probe = pathlib.Path(tmp)
+        probe_env = {**os.environ,
+                     "HOME": str(probe),
+                     "COMPARTMENT_VAULT": str(probe / "probe.vault"),
+                     "COMPARTMENT_SESSION_DIR": str(probe / "session")}
         out = subprocess.run(
             [str(app / "Contents" / "MacOS" / APP_NAME), "--self-check"],
-            capture_output=True, text=True,
-            env={**os.environ,
-                 "HOME": str(probe),
-                 "COMPARTMENT_VAULT": str(probe / "probe.vault"),
-                 "COMPARTMENT_SESSION_DIR": str(probe / "session")})
-    if out.returncode != 0:
-        raise SystemExit("error: the built app cannot run\n"
-                         + (out.stderr or out.stdout).strip()[:2000])
+            capture_output=True, text=True, env=probe_env)
+        if out.returncode != 0:
+            raise SystemExit("error: the built app cannot run\n"
+                             + (out.stderr or out.stdout).strip()[:2000])
+        cli = (app / "Contents" / "Resources" / "runtime" / "bin"
+               / "compartment")
+        if cli.is_file():
+            cli_out = subprocess.run(
+                [str(cli), "--version"],
+                capture_output=True, text=True, env=probe_env)
+            if cli_out.returncode != 0:
+                raise SystemExit(
+                    "error: the signed CLI inside the bundle cannot run\n"
+                    + (cli_out.stderr or cli_out.stdout).strip()[:2000])
     _verify_signature(app)
     print("signature survives running the app")
 
@@ -828,7 +976,8 @@ def _app_min_macos(app: pathlib.Path) -> str:
                    or MIN_MACOS)
 
 
-def build_pkg(app: pathlib.Path) -> pathlib.Path:
+def build_pkg(app: pathlib.Path,
+              sign_identity: str | None = None) -> pathlib.Path:
     """A .pkg whose second, optional component starts it at login."""
     version = _version()
     min_macos = _app_min_macos(app)
@@ -930,30 +1079,61 @@ def build_pkg(app: pathlib.Path) -> pathlib.Path:
 """, encoding="utf-8")
 
     out = BUILD / artifact_name(version, arch, "pkg")
-    _run("productbuild", "--distribution", dist, "--package-path", BUILD, out)
+    pkg_id = (
+        sign_identity if sign_identity is not None
+        else (os.environ.get("COMPARTMENT_INSTALLER_IDENTITY", "").strip()
+              or None)
+    )
+    if pkg_id == "-":
+        pkg_id = None
+    if pkg_id:
+        _run("productbuild", "--distribution", dist, "--package-path", BUILD,
+             "--sign", pkg_id, "--timestamp", out)
+    else:
+        _run("productbuild", "--distribution", dist, "--package-path", BUILD,
+             out)
     print(f"built {out}")
     return out
 
 
-def build_dmg(app: pathlib.Path) -> pathlib.Path:
-    version = _version()
-    arch = _app_arch(app)
-    stage = BUILD / "dmg"
-    if stage.exists():
-        shutil.rmtree(stage)
-    stage.mkdir(parents=True)
-    _run("ditto", app, stage / app.name)
-    os.symlink("/Applications", stage / "Applications")
-    # Compartment is signed ad-hoc, not with a paid Developer ID, so it cannot be
-    # notarised. Anything dragged out of a downloaded .dmg carries the
-    # quarantine flag, and macOS refuses to launch a quarantined app it cannot
-    # attribute - silently, because Compartment has no dock icon to bounce. The
-    # .pkg does not have this problem: installer payloads are not quarantined.
-    (stage / "READ ME FIRST.txt").write_text(
+def _detected_app_signer(app: pathlib.Path) -> str | None:
+    """Return the `Developer ID Application: ...` authority recorded on `app`,
+    or None if `app` is ad-hoc signed or unsigned."""
+    try:
+        out = subprocess.run(["codesign", "-dvv", str(app)],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    for line in (out.stderr + "\n" + out.stdout).splitlines():
+        if line.startswith("Authority=Developer ID Application:"):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def _dmg_readme(version: str, arch: str, *, developer_id: bool) -> str:
+    pkg_name = artifact_name(version, arch, "pkg")
+    if developer_id:
+        return (
+            "Compartment " + version + "\n"
+            "=================\n\n"
+            "To install from this disk image:\n\n"
+            "  1. Drag Compartment.app onto the Applications folder here.\n"
+            "  2. Open Compartment from Applications.\n\n"
+            "One-click alternative: " + pkg_name + " on the\n"
+            "release page installs Compartment and can set it to start\n"
+            "automatically when you log in.\n\n"
+            "Compartment has no dock icon - it lives in the menu bar. If you cannot\n"
+            "find its icon there (a full menu bar hides items behind the notch),\n"
+            "just open Compartment.app again: it will show its panel in a window.\n\n"
+            "Source, and every other way to install:\n"
+            "https://github.com/MaxFreedomPollard/Compartment\n"
+        )
+    return (
         "Compartment " + version + "\n"
         "=================\n\n"
-        "Easiest install: use " + artifact_name(version, arch, "pkg")
-        + " from the release page\n"
+        "Easiest install: use " + pkg_name + " from the release page\n"
         "instead of this disk image. It sets everything up in one click and\n"
         "skips the warning below entirely.\n\n"
         "If you would rather drag the app across:\n\n"
@@ -967,7 +1147,30 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
         "find its icon there (a full menu bar hides items behind the notch),\n"
         "just open Compartment.app again: it will show its panel in a window.\n\n"
         "Source, and every other way to install:\n"
-        "https://github.com/MaxFreedomPollard/Compartment\n", encoding="utf-8")
+        "https://github.com/MaxFreedomPollard/Compartment\n"
+    )
+
+
+def build_dmg(app: pathlib.Path,
+              sign_identity: str | None = None) -> pathlib.Path:
+    version = _version()
+    arch = _app_arch(app)
+    raw_id = (
+        sign_identity if sign_identity is not None
+        else (os.environ.get("COMPARTMENT_CODESIGN_IDENTITY", "").strip()
+              or None)
+    )
+    signer = (raw_id if (raw_id and raw_id != "-")
+              else _detected_app_signer(app))
+    stage = BUILD / "dmg"
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    _run("ditto", app, stage / app.name)
+    os.symlink("/Applications", stage / "Applications")
+    (stage / "READ ME FIRST.txt").write_text(
+        _dmg_readme(version, arch, developer_id=bool(signer)),
+        encoding="utf-8")
     out = BUILD / artifact_name(version, arch, "dmg")
     out.unlink(missing_ok=True)
     # hdiutil on a CI runner now and then fails with "Resource busy" while
@@ -984,8 +1187,125 @@ def build_dmg(app: pathlib.Path) -> pathlib.Path:
                 raise
             print("hdiutil failed; trying again in 5 s")
             time.sleep(5)
+    if signer:
+        _run("codesign", "--force", "--sign", signer, "--timestamp", out)
     print(f"built {out}")
     return out
+
+
+def _asc_credentials(
+    key_path: str | pathlib.Path | None = None,
+    key_id: str | None = None,
+    issuer_id: str | None = None,
+) -> tuple[pathlib.Path, str, str]:
+    kid = (key_id if key_id is not None
+           else os.environ.get("ASC_KEY_ID", "")).strip()
+    iss = (issuer_id if issuer_id is not None
+           else os.environ.get("ASC_ISSUER_ID", "")).strip()
+    raw_path = (str(key_path) if key_path is not None
+                else os.environ.get("ASC_KEY_PATH", "")).strip()
+    if raw_path:
+        p = pathlib.Path(raw_path).expanduser()
+    elif kid:
+        p = (pathlib.Path.home() / ".appstoreconnect" / "private_keys"
+             / f"AuthKey_{kid}.p8")
+    else:
+        p = None
+    if not kid or not iss or p is None or not p.is_file():
+        raise SystemExit(
+            "error: --notarize requires ASC_KEY_ID, ASC_ISSUER_ID, and "
+            "ASC_KEY_PATH (or ~/.appstoreconnect/private_keys/"
+            "AuthKey_<ASC_KEY_ID>.p8)")
+    return p, kid, iss
+
+
+def notarize_artifact(
+    artifact: pathlib.Path,
+    *,
+    key_path: str | pathlib.Path | None = None,
+    key_id: str | None = None,
+    issuer_id: str | None = None,
+    timeout: str | None = None,
+) -> None:
+    """Submit `artifact` (.app, .dmg, or .pkg) to Apple's notary service,
+    wait for `Accepted` (dumping `notarytool log` on any other result), and
+    staple + validate the ticket."""
+    resolved_key, resolved_kid, resolved_iss = _asc_credentials(
+        key_path=key_path, key_id=key_id, issuer_id=issuer_id)
+    resolved_timeout = (
+        timeout if timeout is not None
+        else (os.environ.get("COMPARTMENT_NOTARIZE_TIMEOUT", "").strip()
+              or "90m")
+    )
+
+    def _submit(submit_path: pathlib.Path) -> subprocess.CompletedProcess:
+        print(f"submitting {artifact.name} to Apple notary service…")
+        cmd = ["xcrun", "notarytool", "submit", str(submit_path),
+               "--key", str(resolved_key),
+               "--key-id", resolved_kid,
+               "--issuer", resolved_iss,
+               "--wait"]
+        if resolved_timeout:
+            cmd += ["--timeout", resolved_timeout]
+        cmd += ["--output-format", "json"]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    if artifact.suffix == ".app":
+        with tempfile.TemporaryDirectory(prefix="compartment-notarize-") as td:
+            zip_path = pathlib.Path(td) / f"{artifact.stem}-notarize.zip"
+            _run("ditto", "-c", "-k", "--keepParent", artifact, zip_path)
+            out = _submit(zip_path)
+    else:
+        out = _submit(artifact)
+
+    data: dict = {}
+    try:
+        data = json.loads(out.stdout) if out.stdout.strip() else {}
+    except ValueError:
+        data = {}
+
+    if out.returncode != 0 and not data:
+        raise SystemExit(
+            f"error: notarytool submit failed for {artifact.name}\n"
+            f"{(out.stderr or out.stdout).strip()[:2000]}")
+
+    sub_id = data.get("id")
+    status = data.get("status")
+    msg = str(data.get("message") or "")
+    if out.returncode == 124 or ("Timeout" in msg and not status):
+        raise SystemExit(
+            f"error: Apple notary service is still processing {artifact.name} "
+            f"after {resolved_timeout} (submission id {sub_id}: {msg or 'In Progress'}).\n"
+            "Apple continues processing server-side (first submissions from a "
+            "new Developer ID team can be held for in-depth analysis); check "
+            f"status with `xcrun notarytool info {sub_id}` and staple once "
+            "Accepted.")
+    if status != "Accepted":
+        log_detail = ""
+        if sub_id:
+            log_out = subprocess.run(
+                ["xcrun", "notarytool", "log", str(sub_id),
+                 "--key", str(resolved_key),
+                 "--key-id", resolved_kid,
+                 "--issuer", resolved_iss],
+                capture_output=True, text=True)
+            log_detail = (log_out.stdout or log_out.stderr).strip()
+        raise SystemExit(
+            f"error: notarization of {artifact.name} ended with status "
+            f"{status!r} (id {sub_id})\n{log_detail[:4000]}")
+
+    print(f"notarized {artifact.name} (id {sub_id}); stapling ticket…")
+    for attempt in range(3):
+        try:
+            _run("xcrun", "stapler", "staple", artifact)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            print("stapler fetch not ready yet; trying again in 5 s")
+            time.sleep(5)
+    _run("xcrun", "stapler", "validate", artifact)
+    print(f"stapled and validated: {artifact.name}")
 
 
 def main() -> int:
@@ -1000,15 +1320,67 @@ def main() -> int:
                          "every wheel is chosen for it")
     ap.add_argument("--dmg", action="store_true")
     ap.add_argument("--pkg", action="store_true")
+    ap.add_argument("--sign-app",
+                    help="Developer ID Application identity, 'auto', or '-' "
+                         "(env COMPARTMENT_CODESIGN_IDENTITY)")
+    ap.add_argument("--sign-pkg",
+                    help="Developer ID Installer identity or 'auto' "
+                         "(env COMPARTMENT_INSTALLER_IDENTITY)")
+    ap.add_argument("--sign-auto", action="store_true",
+                    help="discover Developer ID identities in the keychain, "
+                         "falling back to ad-hoc when absent")
+    ap.add_argument("--notarize", action="store_true",
+                    help="notarize with xcrun notarytool and staple tickets "
+                         "(env COMPARTMENT_NOTARIZE=1)")
+    ap.add_argument("--notarize-timeout",
+                    help="max wait per notarytool submission, e.g. 90m "
+                         "(env COMPARTMENT_NOTARIZE_TIMEOUT)")
     args = ap.parse_args()
+    app_id, pkg_id = _resolve_signing_identities(
+        args.sign_app, args.sign_pkg, args.sign_auto)
+    notarize = args.notarize or _truthy_env("COMPARTMENT_NOTARIZE")
+    notarize_kw = ({"timeout": args.notarize_timeout}
+                   if args.notarize_timeout else {})
+    if notarize:
+        _asc_credentials()
+        if app_id == "-":
+            raise SystemExit(
+                "error: --notarize requires a Developer ID Application "
+                "identity (--sign-auto or --sign-app)")
+        if args.pkg and not pkg_id:
+            raise SystemExit(
+                "error: --notarize with --pkg requires a Developer ID "
+                "Installer identity (--sign-auto or --sign-pkg)")
     BUILD.mkdir(exist_ok=True)
     try:
-        artifacts = [build_app(args.spec, python=args.python,
-                               min_macos=args.min_macos)]
+        app_kw: dict = {"python": args.python, "min_macos": args.min_macos}
+        if app_id != "-":
+            app_kw["sign_identity"] = app_id
+        app = build_app(args.spec, **app_kw)
+        if notarize:
+            notarize_artifact(app, **notarize_kw)
+            _verify_signature(app)
+        artifacts = [app]
+        containers: list[pathlib.Path] = []
         if args.dmg:
-            artifacts.append(build_dmg(artifacts[0]))
+            dmg = (build_dmg(app, sign_identity=app_id)
+                   if app_id != "-" else build_dmg(app))
+            containers.append(dmg)
+            artifacts.append(dmg)
         if args.pkg:
-            artifacts.append(build_pkg(artifacts[0]))
+            pkg = (build_pkg(app, sign_identity=pkg_id)
+                   if pkg_id else build_pkg(app))
+            containers.append(pkg)
+            artifacts.append(pkg)
+        if notarize and len(containers) == 1:
+            notarize_artifact(containers[0], **notarize_kw)
+        elif notarize and len(containers) > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(containers)) as pool:
+                futs = [pool.submit(notarize_artifact, c, **notarize_kw)
+                        for c in containers]
+                for fut in futs:
+                    fut.result()
     except subprocess.CalledProcessError as exc:
         # A step that failed says which, in one line, instead of a
         # traceback through _run that a CI log buries the command in.

@@ -49,6 +49,26 @@ def test_unseal_hazards_is_safe_on_a_clean_bundle(tmp_path):
     _builder()._unseal_hazards(contents)          # must not raise
 
 
+def test_unseal_hazards_removes_broken_and_external_symlinks(tmp_path):
+    outside = tmp_path / "outside.dylib"
+    outside.write_bytes(b"stray")
+    contents = tmp_path / "Compartment.app" / "Contents"
+    bin_dir = contents / "Resources" / "runtime" / "bin"
+    lib_dir = contents / "Resources" / "runtime" / "lib"
+    bin_dir.mkdir(parents=True)
+    lib_dir.mkdir(parents=True)
+    (bin_dir / "python3.12").write_bytes(b"exe")
+    (bin_dir / "python3").symlink_to("python3.12")
+    (lib_dir / "broken.dylib").symlink_to(tmp_path / "missing.dylib")
+    (lib_dir / "external.dylib").symlink_to(outside)
+
+    _builder()._unseal_hazards(contents)
+
+    assert (bin_dir / "python3").is_symlink(), "in-bundle symlink must stay"
+    assert not (lib_dir / "broken.dylib").is_symlink()
+    assert not (lib_dir / "external.dylib").is_symlink()
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="codesign is macOS only")
 def test_verify_signature_rejects_an_unsigned_bundle(tmp_path):
     """The guard that would have stopped 1.13.0 going out."""
@@ -553,3 +573,277 @@ def test_the_default_minimum_is_what_the_bundled_onnxruntime_needs():
     # still selects the macosx_13_0 wheels it has to.
     major, _minor = b._version_tuple(b.MIN_MACOS)
     assert major == 13
+
+
+# ---------------------- Developer ID signing, Hardened Runtime & notarization
+
+def test_signing_identities_auto_discover_or_fall_back_to_adhoc(monkeypatch):
+    import subprocess
+    b = _builder()
+    for var in ("COMPARTMENT_CODESIGN_IDENTITY",
+                "COMPARTMENT_INSTALLER_IDENTITY",
+                "COMPARTMENT_SIGN_AUTO"):
+        monkeypatch.delenv(var, raising=False)
+
+    # Contributor machine with no Apple Developer certificates: falls back to
+    # ad-hoc ('-') and unsigned pkg (None).
+    monkeypatch.setattr(
+        b.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a[0], 0, "     0 valid identities found\n", ""))
+    assert b._resolve_signing_identities(sign_auto=True) == ("-", None)
+
+    # Keychain carrying both Developer ID identities: --sign-auto picks both.
+    kc_listing = (
+        '  1) AAAA "Developer ID Application: Example Org (ABCDE12345)"\n'
+        '  2) BBBB "Developer ID Installer: Example Org (ABCDE12345)"\n'
+        "     2 valid identities found\n"
+    )
+    monkeypatch.setattr(
+        b.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, kc_listing, ""))
+    assert b._resolve_signing_identities(sign_auto=True) == (
+        "Developer ID Application: Example Org (ABCDE12345)",
+        "Developer ID Installer: Example Org (ABCDE12345)",
+    )
+    # Without --sign-auto or env vars, default build stays ad-hoc so local
+    # test builds never touch keychain signing unexpectedly.
+    assert b._resolve_signing_identities() == ("-", None)
+
+
+def test_developer_id_signs_nested_mach_o_deepest_first_with_hardened_runtime(
+        tmp_path, monkeypatch):
+    import plistlib
+    b = _builder()
+    deep_lib = ("Contents/Resources/runtime/lib/python3.12/site-packages/"
+                "onnxruntime/capi/libonnxruntime.dylib")
+    shallow_lib = "Contents/Resources/runtime/lib/libpython3.12.dylib"
+    nested_py = "Contents/Resources/runtime/bin/python3.12"
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (13, 4)),
+        deep_lib: _macho("arm64", (13, 4)),
+        shallow_lib: _macho("arm64", (13, 4)),
+        nested_py: _macho("arm64", (13, 4)),
+        "Contents/Resources/runtime/bin/compartment": b"#!/bin/sh\n",
+    })
+    (app / "Contents" / "Resources" / "runtime" / "bin" / "python3").symlink_to(
+        "python3.12")
+    (app / deep_lib).chmod(0o444)
+
+    calls = []
+    seen_entitlements = []
+
+    def fake_run(*args, **kw):
+        argv = [str(a) for a in args]
+        if "--entitlements" in argv:
+            ent_file = pathlib.Path(argv[argv.index("--entitlements") + 1])
+            with open(ent_file, "rb") as fh:
+                seen_entitlements.append(plistlib.load(fh))
+        calls.append(argv)
+
+    monkeypatch.setattr(b, "_run", fake_run)
+    ident = "Developer ID Application: Example Org (ABCDE12345)"
+    b._sign_app_developer_id(app, ident)
+
+    targets = [c[-1] for c in calls]
+    assert targets == [
+        str(app / deep_lib),
+        str(app / shallow_lib),
+        str(app / nested_py),
+        str(app),
+    ]
+    assert (app / deep_lib).stat().st_mode & 0o200, "read-only dylib made writable"
+    for c in calls:
+        assert "--timestamp" in c and "--options" in c and "runtime" in c
+        assert "--deep" not in c
+    # Shared libraries must NOT carry executable entitlements; executables and
+    # the outer bundle carry allow-unsigned-executable-memory only (leaving
+    # Library Validation enabled).
+    assert "--entitlements" not in calls[0]
+    assert "--entitlements" not in calls[1]
+    assert "--entitlements" in calls[2]
+    assert "--entitlements" in calls[3]
+    assert seen_entitlements == [
+        {"com.apple.security.cs.allow-unsigned-executable-memory": True},
+        {"com.apple.security.cs.allow-unsigned-executable-memory": True},
+    ]
+
+
+def test_pkg_and_dmg_reflect_developer_id_vs_adhoc_signing(
+        tmp_path, monkeypatch):
+    import plistlib
+    b = _builder()
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (13, 4))})
+    with open(app / "Contents" / "Info.plist", "wb") as fh:
+        plistlib.dump({"LSMinimumSystemVersion": "13.4"}, fh)
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    for var in ("COMPARTMENT_CODESIGN_IDENTITY",
+                "COMPARTMENT_INSTALLER_IDENTITY"):
+        monkeypatch.delenv(var, raising=False)
+
+    ran = []
+    monkeypatch.setattr(b, "_run", lambda *a, **k: ran.append([str(x) for x in a]))
+
+    # Ad-hoc DMG: keeps the Privacy & Security note and does not codesign .dmg
+    monkeypatch.setattr(b, "_detected_app_signer", lambda _a: None)
+    b.build_dmg(app)
+    adhoc_readme = (tmp_path / "build" / "dmg" / "READ ME FIRST.txt").read_text()
+    assert "Open Anyway" in adhoc_readme
+    assert not any(c[0] == "codesign" for c in ran)
+
+    # Developer ID DMG + PKG: clean readme, signed .dmg, signed .pkg
+    ran.clear()
+    app_id = "Developer ID Application: Example Org (ABCDE12345)"
+    pkg_id = "Developer ID Installer: Example Org (ABCDE12345)"
+    dmg = b.build_dmg(app, sign_identity=app_id)
+    signed_readme = (tmp_path / "build" / "dmg" / "READ ME FIRST.txt").read_text()
+    assert "Open Anyway" not in signed_readme
+    assert "$99/year" not in signed_readme
+    assert "\u2014" not in signed_readme
+    assert any(c[:4] == ["codesign", "--force", "--sign", app_id]
+               and "--timestamp" in c and c[-1] == str(dmg) for c in ran)
+
+    ran.clear()
+    pkg = b.build_pkg(app, sign_identity=pkg_id)
+    pb = next(c for c in ran if c[0] == "productbuild")
+    assert "--sign" in pb and pb[pb.index("--sign") + 1] == pkg_id
+    assert "--timestamp" in pb and pb[-1] == str(pkg)
+
+
+def test_notarize_artifact_submits_waits_staples_and_dumps_log_on_rejection(
+        tmp_path, monkeypatch):
+    import json
+    import subprocess
+    b = _builder()
+    key_file = tmp_path / "AuthKey_TEST123456.p8"
+    key_file.write_text("fake-key\n")
+    dmg = tmp_path / "Compartment-4.16.1.dmg"
+    dmg.write_bytes(b"dmg")
+    app = tmp_path / "Compartment.app"
+    (app / "Contents").mkdir(parents=True)
+
+    monkeypatch.setattr(b.time, "sleep", lambda _s: None)
+    run_calls = []
+    staple_attempts = [0]
+
+    def fake_run(*args, **kw):
+        argv = [str(a) for a in args]
+        run_calls.append(argv)
+        if argv[:3] == ["xcrun", "stapler", "staple"]:
+            staple_attempts[0] += 1
+            if staple_attempts[0] == 1:
+                raise subprocess.CalledProcessError(65, argv)
+
+    monkeypatch.setattr(b, "_run", fake_run)
+    monkeypatch.setattr(
+        b.subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, json.dumps({"id": "sub-1", "status": "Accepted"}), ""))
+
+    b.notarize_artifact(app, key_path=key_file, key_id="TEST123456",
+                        issuer_id="00000000-0000-0000-0000-000000000000")
+    assert any(c[:4] == ["ditto", "-c", "-k", "--keepParent"] for c in run_calls)
+    assert staple_attempts[0] == 2
+    assert ["xcrun", "stapler", "validate", str(app)] in run_calls
+
+    # Rejected notarization fetches `xcrun notarytool log <id>` and exits.
+    subproc_calls = []
+
+    def fake_rejected(argv, **kw):
+        subproc_calls.append([str(a) for a in argv])
+        if "submit" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"id": "sub-bad", "status": "Invalid"}), "")
+        return subprocess.CompletedProcess(
+            argv, 0, '{"issues": [{"message": "The signature is invalid."}]}', "")
+
+    monkeypatch.setattr(b.subprocess, "run", fake_rejected)
+    with pytest.raises(SystemExit) as exc:
+        b.notarize_artifact(dmg, key_path=key_file, key_id="TEST123456",
+                            issuer_id="00000000-0000-0000-0000-000000000000")
+    assert "sub-bad" in str(exc.value)
+    assert "The signature is invalid." in str(exc.value)
+    assert any(c[:4] == ["xcrun", "notarytool", "log", "sub-bad"]
+               for c in subproc_calls)
+
+    # Timeout (rc=124) reports the submission id and in-depth analysis guidance
+    # without calling `notarytool log` (which is unavailable while In Progress).
+    subproc_calls.clear()
+    monkeypatch.setattr(
+        b.subprocess, "run",
+        lambda argv, **kw: (
+            subproc_calls.append([str(a) for a in argv])
+            or subprocess.CompletedProcess(
+                argv, 124,
+                json.dumps({
+                    "id": "sub-hold",
+                    "message": "Timeout of 90m was reached before processing completed.",
+                }),
+                "",
+            )
+        ),
+    )
+    with pytest.raises(SystemExit) as exc_hold:
+        b.notarize_artifact(dmg, key_path=key_file, key_id="TEST123456",
+                            issuer_id="00000000-0000-0000-0000-000000000000",
+                            timeout="90m")
+    assert "sub-hold" in str(exc_hold.value)
+    assert "still processing" in str(exc_hold.value)
+    assert not any("log" in c for c in subproc_calls)
+
+
+def test_notarize_refuses_adhoc_signing_before_building(tmp_path, monkeypatch):
+    b = _builder()
+    key_file = tmp_path / "AuthKey_TEST123456.p8"
+    key_file.write_text("fake\n")
+    monkeypatch.setenv("ASC_KEY_PATH", str(key_file))
+    monkeypatch.setenv("ASC_KEY_ID", "TEST123456")
+    monkeypatch.setenv("ASC_ISSUER_ID", "00000000-0000-0000-0000-000000000000")
+    for var in ("COMPARTMENT_CODESIGN_IDENTITY",
+                "COMPARTMENT_INSTALLER_IDENTITY",
+                "COMPARTMENT_SIGN_AUTO"):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(SystemExit, match="Developer ID Application"):
+        _main(b, monkeypatch, tmp_path, ["--notarize"])
+
+
+def test_main_notarizes_app_then_dmg_and_pkg_concurrently(
+        tmp_path, monkeypatch, capsys):
+    import threading
+    b = _builder()
+    key_file = tmp_path / "AuthKey_TEST123456.p8"
+    key_file.write_text("fake\n")
+    monkeypatch.setenv("ASC_KEY_PATH", str(key_file))
+    monkeypatch.setenv("ASC_KEY_ID", "TEST123456")
+    monkeypatch.setenv("ASC_ISSUER_ID", "00000000-0000-0000-0000-000000000000")
+
+    app = tmp_path / "build" / "Compartment.app"
+    dmg = tmp_path / "build" / "Compartment-4.16.1.dmg"
+    pkg = tmp_path / "build" / "Compartment-4.16.1.pkg"
+    monkeypatch.setattr(b, "build_app", lambda *a, **k: app)
+    monkeypatch.setattr(b, "_verify_signature", lambda _a: None)
+    monkeypatch.setattr(b, "build_dmg", lambda *a, **k: dmg)
+    monkeypatch.setattr(b, "build_pkg", lambda *a, **k: pkg)
+
+    barrier = threading.Barrier(2, timeout=5.0)
+    notarized = []
+    lock = threading.Lock()
+
+    def fake_notarize(target):
+        if target in (dmg, pkg):
+            barrier.wait()
+        with lock:
+            notarized.append(target)
+
+    monkeypatch.setattr(b, "notarize_artifact", fake_notarize)
+    rc = _main(
+        b, monkeypatch, tmp_path,
+        ["--pkg", "--dmg",
+         "--sign-app", "Developer ID Application: Example Org (ABCDE12345)",
+         "--sign-pkg", "Developer ID Installer: Example Org (ABCDE12345)",
+         "--notarize"],
+    )
+    assert rc == 0
+    assert notarized[0] == app
+    assert set(notarized[1:]) == {dmg, pkg}

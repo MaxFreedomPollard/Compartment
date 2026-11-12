@@ -13,10 +13,10 @@ GitHub's machines and attaches them to a draft, so nobody has to remember:
 
 | Artifact | For |
 |---|---|
-| `Compartment-<version>.pkg` | macOS on Apple silicon, one click, with the optional menu bar utility |
-| `Compartment-<version>.dmg` | macOS on Apple silicon, drag to Applications |
-| `Compartment-<version>-intel.pkg` | macOS on Intel, one click |
-| `Compartment-<version>-intel.dmg` | macOS on Intel, drag to Applications |
+| `Compartment-<version>.pkg` | macOS on Apple silicon, Developer ID signed and Apple notarized, one click, with the optional menu bar utility |
+| `Compartment-<version>.dmg` | macOS on Apple silicon, Developer ID signed and Apple notarized, drag to Applications |
+| `Compartment-<version>-intel.pkg` | macOS on Intel, Developer ID signed and Apple notarized, one click |
+| `Compartment-<version>-intel.dmg` | macOS on Intel, Developer ID signed and Apple notarized, drag to Applications |
 | `compartment-<version>-py3-none-any.whl` | pip / offline installs, any OS |
 | `compartment-<version>.tar.gz` | source distribution, packagers, air-gapped builds |
 | `SHA256SUMS.txt` | the checksums of everything above |
@@ -83,10 +83,21 @@ python -m pytest -q                          # must be green
 
 # 2. merge the release PR, then tag the merge commit and push the tag.
 #    That is the whole build: release.yml checks the tag against every
-#    version field, builds the wheel and sdist, builds the macOS app, .pkg
-#    and .dmg on an Apple silicon runner AND an Intel one, and attaches all
-#    of them plus SHA256SUMS.txt to a DRAFT release. Release notes come from
+#    version field, builds the wheel and sdist, builds, Developer ID signs
+#    (under Hardened Runtime), notarizes with Apple (`xcrun notarytool`), and
+#    staples (`xcrun stapler`) the macOS app, .pkg and .dmg on an Apple
+#    silicon runner AND an Intel one, and attaches all of them plus
+#    SHA256SUMS.txt to a DRAFT release. Release notes come from
 #    .github/release-notes/vX.Y.Z.md when that file exists.
+#
+#    GitHub Actions repository secrets for macOS signing and notarization
+#    (forks without them fall back automatically to ad-hoc signing):
+#      MACOS_CERT_P12_BASE64   base64 PKCS#12 holding Developer ID Application,
+#                              Developer ID Installer, and DeveloperIDG2CA
+#      MACOS_CERT_PASSWORD     password for that PKCS#12 bundle
+#      ASC_KEY_ID              App Store Connect API Key ID
+#      ASC_ISSUER_ID           App Store Connect API Issuer UUID
+#      ASC_PRIVATE_KEY         contents of AuthKey_<ASC_KEY_ID>.p8
 git tag vX.Y.Z && git push origin vX.Y.Z
 
 # 3. review the draft on the Releases page, then press Publish. Publishing
@@ -95,9 +106,10 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 #    bundle against that PyPI release and attaches it; and publish-registry.yml.
 #    A rebuild of an existing tag: Actions -> Release -> Run workflow -> tag.
 #
-#    Building by hand still works when it has to, from a Mac:
+#    Building, signing, and notarizing by hand still works from a Mac:
 #      rm -rf dist && python -m build
-#      python tools/build_macos_app.py --pkg --dmg   # NON-framework Python; see the script
+#      ASC_KEY_ID=... ASC_ISSUER_ID=... \
+#        python tools/build_macos_app.py --pkg --dmg --sign-auto --notarize
 #      gh release create vX.Y.Z --draft --notes-file NOTES.md build/*.pkg build/*.dmg dist/*
 
 # 4. nothing to do by hand for PyPI or the registry; see "Verify" below.
@@ -131,6 +143,10 @@ mcp-publisher login github --token "$(gh auth token)" \
   download link 404s. Check: `gh release view vX.Y.Z --json isDraft,tagName`.
 - **The download actually serves.** `curl -sIL <asset-url> | head -1` should be
   `HTTP/2 200`, with a `content-length` matching the artifact.
+- **Both macOS `.dmg` and `.pkg` downloads carry stapled Apple notarization tickets.**
+  `xcrun stapler validate Compartment-<version>.dmg` and
+  `xcrun stapler validate Compartment-<version>.pkg` must pass, and `spctl` must
+  report `accepted` (`Notarized Developer ID`).
 - **PyPI picked it up.** The release triggers `publish.yml`; confirm the new
   version appears at pypi.org/project/compartment.
 - **The registry hands out a pin that installs.** Whichever entry carries

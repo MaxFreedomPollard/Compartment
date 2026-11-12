@@ -106,7 +106,7 @@ jobs:
           - runner: macos-15-intel
             arch: intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -119,13 +119,86 @@ jobs:
         run: |
           uv python install 3.12
           echo "EMBED_PY=$(uv python find --managed-python 3.12)" >> "$GITHUB_ENV"
+      - name: Set up Apple Developer ID signing and notarization
+        shell: bash
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          if [ -n "$MACOS_CERT_P12_BASE64" ] && [ -n "$MACOS_CERT_PASSWORD" ] \
+             && [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] && [ -n "$ASC_PRIVATE_KEY" ]; then
+            KEYCHAIN="$RUNNER_TEMP/compartment-signing.keychain-db"
+            KEYCHAIN_PASS="$(openssl rand -hex 24)"
+            P12_FILE="$RUNNER_TEMP/signing.p12"
+            G2_FILE="$RUNNER_TEMP/DeveloperIDG2CA.cer"
+            ASC_KEY_FILE="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+
+            security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+
+            EXISTING_KCS=()
+            while IFS= read -r kc; do
+              kc_trimmed="$(echo "$kc" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')"
+              [ -n "$kc_trimmed" ] && EXISTING_KCS+=("$kc_trimmed")
+            done < <(security list-keychains -d user)
+            security list-keychains -d user -s "$KEYCHAIN" "${EXISTING_KCS[@]}"
+
+            curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$G2_FILE"
+            security import "$G2_FILE" -k "$KEYCHAIN" -A || true
+
+            printf '%s' "$MACOS_CERT_P12_BASE64" | tr -d '[:space:]' | base64 --decode > "$P12_FILE"
+            chmod 600 "$P12_FILE"
+            security import "$P12_FILE" -k "$KEYCHAIN" \
+              -P "$MACOS_CERT_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign
+            rm -f "$P12_FILE" "$G2_FILE"
+
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
+            security find-identity -v "$KEYCHAIN" | grep -qF "Developer ID Application:"
+            security find-identity -v "$KEYCHAIN" | grep -qF "Developer ID Installer:"
+            echo "Verified Developer ID Application and Developer ID Installer identities in ephemeral keychain."
+
+            printf '%s\n' "$ASC_PRIVATE_KEY" > "$ASC_KEY_FILE"
+            chmod 600 "$ASC_KEY_FILE"
+
+            {
+              echo "SIGNING_READY=1"
+              echo "SIGNING_KEYCHAIN=$KEYCHAIN"
+              echo "ASC_KEY_PATH=$ASC_KEY_FILE"
+            } >> "$GITHUB_ENV"
+          else
+            echo "Developer ID secrets not configured; falling back to ad-hoc signing."
+            echo "SIGNING_READY=0" >> "$GITHUB_ENV"
+          fi
       - name: Build Compartment.app, the .pkg and the .dmg
         # On an Intel runner the script names them Compartment-<v>-intel.*
         # itself, and the installer refuses to run on the other architecture.
         shell: bash
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg
+          if [ "${SIGNING_READY:-0}" = "1" ]; then
+            "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg --sign-auto --notarize --notarize-timeout 150m
+            for artifact in build/Compartment.app build/Compartment-*.pkg build/Compartment-*.dmg; do
+              xcrun stapler validate "$artifact"
+            done
+          else
+            "$EMBED_PY" tools/build_macos_app.py --python "$EMBED_PY" --pkg --dmg
+          fi
           ls -l build
+      - name: Clean up ephemeral signing keychain and API key
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" 2>/dev/null || true
+          fi
+          rm -f "${ASC_KEY_PATH:-}" "$RUNNER_TEMP"/signing.p12 "$RUNNER_TEMP"/AuthKey_*.p8
       - name: Exactly one .pkg and one .dmg of this version
         shell: bash
         env:
