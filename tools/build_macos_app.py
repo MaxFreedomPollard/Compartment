@@ -1138,6 +1138,92 @@ def _verify_survives_running(app: pathlib.Path,
     together; COMPARTMENT_VAULT is belt and braces for a HOME that some
     other layer has already resolved.
     """
+    is_mas = (mac_app_store if mac_app_store is not None
+              else (app / "Contents" / "embedded.provisionprofile").is_file())
+    if is_mas:
+        # macOS taskgated refuses to execute production Mac App Store
+        # provisioning profiles locally (Code=-215: production profiles are
+        # validated and re-signed by Apple on App Store Connect). Verify the
+        # production signature on `app`, then execute a scratch copy signed
+        # with local App Sandbox entitlements inside a real sandbox container
+        # and confirm running writes nothing inside the bundle.
+        _verify_signature(app)
+        with open(app / "Contents" / "Info.plist", "rb") as fh:
+            info = plistlib.load(fh)
+        b_id = str(info.get("CFBundleIdentifier") or BUNDLE_ID)
+        shm_group = str(info.get("CompartmentAppGroup") or "").strip()
+        local_signer = (
+            _find_keychain_identity("Apple Development:")
+            or _find_keychain_identity("Developer ID Application:")
+            or "-"
+        )
+        with tempfile.TemporaryDirectory(prefix="compartment-masprobe-") as tmp:
+            td_p = pathlib.Path(tmp)
+            probe_app = td_p / app.name
+            _run("ditto", app, probe_app)
+            (probe_app / "Contents" / "embedded.provisionprofile").unlink(
+                missing_ok=True)
+            _, _, nested_exes = _nested_machos(probe_app)
+            child_ent = td_p / "child.entitlements.plist"
+            app_ent = td_p / "app.entitlements.plist"
+            with open(child_ent, "wb") as fh:
+                plistlib.dump({
+                    "com.apple.security.app-sandbox": True,
+                    "com.apple.security.inherit": True,
+                    "com.apple.security.cs.allow-unsigned-executable-memory": True,
+                }, fh)
+            outer_ent: dict[str, object] = {
+                "com.apple.security.app-sandbox": True,
+                "com.apple.security.cs.allow-unsigned-executable-memory": True,
+                "com.apple.security.files.user-selected.read-write": True,
+                "com.apple.security.network.server": True,
+            }
+            if shm_group and local_signer != "-":
+                outer_ent["com.apple.security.application-groups"] = [shm_group]
+            with open(app_ent, "wb") as fh:
+                plistlib.dump(outer_ent, fh)
+            for exe in nested_exes:
+                _ensure_writable_macho(exe)
+                _run("codesign", "--force", "--sign", local_signer,
+                     "--entitlements", child_ent, exe)
+            if local_signer == "-":
+                _run("codesign", "--force", "--sign", "-",
+                     "--identifier", b_id, "--entitlements", app_ent, probe_app)
+            else:
+                _run("codesign", "--force", "--sign", local_signer,
+                     "--entitlements", app_ent, probe_app)
+            container_probe = (
+                pathlib.Path.home() / "Library" / "Containers" / b_id
+                / "Data" / "tmp" / f"buildprobe-{os.getpid()}"
+            )
+            mas_env = {
+                **os.environ,
+                "COMPARTMENT_VAULT": str(container_probe / "probe.vault"),
+                "COMPARTMENT_SESSION_DIR": str(container_probe / "session"),
+            }
+            try:
+                probe_exe = probe_app / "Contents" / "MacOS" / APP_NAME
+                out = subprocess.run(
+                    [str(probe_exe), "--self-check"],
+                    capture_output=True, text=True, env=mas_env)
+                if out.returncode != 0:
+                    raise SystemExit(
+                        "error: the built MAS app cannot run in App Sandbox\n"
+                        + (out.stderr or out.stdout).strip()[:2000])
+                cli_out = subprocess.run(
+                    [str(probe_exe), "-m", "compartment.cli", "--version"],
+                    capture_output=True, text=True, env=mas_env)
+                if cli_out.returncode != 0:
+                    raise SystemExit(
+                        "error: the signed MAS launcher CLI cannot run\n"
+                        + (cli_out.stderr or cli_out.stdout).strip()[:2000])
+                _verify_signature(probe_app)
+            finally:
+                shutil.rmtree(container_probe, ignore_errors=True)
+        _verify_signature(app)
+        print("signature survives running the app")
+        return
+
     with tempfile.TemporaryDirectory(prefix="compartment-buildprobe-") as tmp:
         probe = pathlib.Path(tmp)
         probe_env = {**os.environ,
@@ -1150,31 +1236,16 @@ def _verify_survives_running(app: pathlib.Path,
         if out.returncode != 0:
             raise SystemExit("error: the built app cannot run\n"
                              + (out.stderr or out.stdout).strip()[:2000])
-        is_mas = (mac_app_store if mac_app_store is not None
-                  else (app / "Contents" / "embedded.provisionprofile").is_file())
-        if is_mas:
-            # Nested python3.12 carries com.apple.security.inherit, which macOS
-            # allows only when spawned by an already-sandboxed parent; external
-            # callers invoke the main launcher with `-m compartment.cli`.
+        cli = (app / "Contents" / "Resources" / "runtime" / "bin"
+               / "compartment")
+        if cli.is_file():
             cli_out = subprocess.run(
-                [str(app / "Contents" / "MacOS" / APP_NAME),
-                 "-m", "compartment.cli", "--version"],
+                [str(cli), "--version"],
                 capture_output=True, text=True, env=probe_env)
             if cli_out.returncode != 0:
                 raise SystemExit(
-                    "error: the signed MAS launcher CLI cannot run\n"
+                    "error: the signed CLI inside the bundle cannot run\n"
                     + (cli_out.stderr or cli_out.stdout).strip()[:2000])
-        else:
-            cli = (app / "Contents" / "Resources" / "runtime" / "bin"
-                   / "compartment")
-            if cli.is_file():
-                cli_out = subprocess.run(
-                    [str(cli), "--version"],
-                    capture_output=True, text=True, env=probe_env)
-                if cli_out.returncode != 0:
-                    raise SystemExit(
-                        "error: the signed CLI inside the bundle cannot run\n"
-                        + (cli_out.stderr or cli_out.stdout).strip()[:2000])
     _verify_signature(app)
     print("signature survives running the app")
 

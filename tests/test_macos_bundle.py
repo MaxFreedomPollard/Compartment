@@ -169,6 +169,8 @@ def test_a_built_launcher_really_runs_as_an_interpreter(bundle):
     exe = bundle / "Contents" / "MacOS" / "Compartment"
     if not exe.is_file():
         pytest.skip(f"no bundle at {bundle}")
+    if (bundle / "Contents" / "embedded.provisionprofile").is_file():
+        pytest.skip(f"{bundle} carries a production MAS profile (re-signed by Apple)")
     import subprocess
     r = subprocess.run([str(exe), "-c", "import sys; print(sys.prefix)"],
                        capture_output=True, text=True, timeout=120)
