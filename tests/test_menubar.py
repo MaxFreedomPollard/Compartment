@@ -690,3 +690,5 @@ def test_app_sandbox_mcp_snippet_and_authorized_connect(tmp_path, monkeypatch):
     assert "[mcp_servers.compartment]" in (
         codex_dir / "config.toml").read_text(encoding="utf-8")
     assert menubar.integration_status(vault)["codex"] is True
+    assert menubar.PRIVACY_POLICY_URL == (
+        "https://maxfreedompollard.github.io/Compartment/privacy")

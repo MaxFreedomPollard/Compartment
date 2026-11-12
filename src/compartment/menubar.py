@@ -1880,6 +1880,7 @@ def _app_service():
 # Must match tools/build_macos_app.py: the identity of the real app bundle.
 BUNDLE_ID = "io.github.maxfreedompollard.compartment"
 LAUNCH_AGENT_LABEL = f"{BUNDLE_ID}.menubar"
+PRIVACY_POLICY_URL = "https://maxfreedompollard.github.io/Compartment/privacy"
 
 
 def _agent_plist() -> Path:
@@ -2730,8 +2731,14 @@ def run(vault: str | None = None, show: bool = False,
             # there, and sends the user looking for the Unlock control that
             # sentence implies. So does either word before the first read
             # has landed; lock_badge says neither until one is known.
+            priv_b = NSButton.buttonWithTitle_target_action_(
+                "Privacy", self, "openPrivacy:")
+            priv_b.setControlSize_(2)                   # NSControlSizeMini
+            priv_b.setBordered_(False)
+            priv_b.setToolTip_("Open Compartment Privacy Policy")
             title = row(label("Compartment", 15, bold=True),
-                        label(lock_badge(st), 11, secondary=True))
+                        label(lock_badge(st), 11, secondary=True),
+                        _spacer(), priv_b)
             views.append(title)
             views.append(label(summarise(st), 11, secondary=True))
             if st["error"]:
@@ -3291,6 +3298,10 @@ def run(vault: str | None = None, show: bool = False,
         def openDashboard_(self, sender):
             if open_dashboard(vault_path) is None:
                 _d("the dashboard did not start")
+
+        def openPrivacy_(self, sender):
+            run_in_background(
+                lambda: open_in_browser(PRIVACY_POLICY_URL), lambda _: None)
 
         def unlockNow_(self, sender):
             if self.pw_field is None:
