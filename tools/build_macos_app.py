@@ -748,12 +748,16 @@ def _resolve_team_id(
 def _xcode_sdk_dt_keys() -> dict[str, object]:
     """Synthesize Xcode `DT*` Info.plist keys from the active macOS SDK so
     App Store Connect recognizes builds compiled with Command Line Tools."""
-    os_build = subprocess.run(
-        ["sw_vers", "-buildVersion"], capture_output=True, text=True
-    ).stdout.strip() or "26A434"
-    sdk_path_str = subprocess.run(
-        ["xcrun", "--show-sdk-path"], capture_output=True, text=True
-    ).stdout.strip()
+    def _probe(argv: list[str]) -> str:
+        try:
+            return subprocess.run(
+                argv, capture_output=True, text=True
+            ).stdout.strip()
+        except OSError:
+            return ""
+
+    os_build = _probe(["sw_vers", "-buildVersion"]) or "26A434"
+    sdk_path_str = _probe(["xcrun", "--show-sdk-path"])
     sdk_name = "macosx27.0"
     sdk_ver = "27.0"
     sdk_build = "26A425"

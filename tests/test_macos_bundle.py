@@ -964,13 +964,18 @@ def test_mac_app_store_signs_sandbox_and_builds_component_pkg(
     ]]
 
 
-def test_xcode_sdk_dt_keys_populate_required_app_store_metadata():
+def test_xcode_sdk_dt_keys_populate_required_app_store_metadata(monkeypatch):
     b = _builder()
-    dt = b._xcode_sdk_dt_keys()
-    for key in ("BuildMachineOSBuild", "CFBundleSupportedPlatforms",
-                "DTCompiler", "DTPlatformBuild", "DTPlatformName",
-                "DTPlatformVersion", "DTSDKBuild", "DTSDKName",
-                "DTXcode", "DTXcodeBuild"):
-        assert dt.get(key), f"missing {key}"
-    assert dt["CFBundleSupportedPlatforms"] == ["MacOSX"]
-    assert dt["DTPlatformName"] == "macosx"
+    for mock_missing in (False, True):
+        if mock_missing:
+            def _missing(*_a, **_k):
+                raise FileNotFoundError(2, "No such file or directory", "sw_vers")
+            monkeypatch.setattr(b.subprocess, "run", _missing)
+        dt = b._xcode_sdk_dt_keys()
+        for key in ("BuildMachineOSBuild", "CFBundleSupportedPlatforms",
+                    "DTCompiler", "DTPlatformBuild", "DTPlatformName",
+                    "DTPlatformVersion", "DTSDKBuild", "DTSDKName",
+                    "DTXcode", "DTXcodeBuild"):
+            assert dt.get(key), f"missing {key} (mock_missing={mock_missing})"
+        assert dt["CFBundleSupportedPlatforms"] == ["MacOSX"]
+        assert dt["DTPlatformName"] == "macosx"
