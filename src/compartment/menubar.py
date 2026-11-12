@@ -231,6 +231,23 @@ def compartment_bin() -> str:
             or shutil.which("compartment") or "compartment")
 
 
+def _in_macos_app_sandbox() -> bool:
+    """True when running inside a macOS App Sandbox container."""
+    return sys.platform == "darwin" and bool(
+        os.environ.get("APP_SANDBOX_CONTAINER_ID"))
+
+
+def _bundle_launcher_exe() -> str | None:
+    """Path to `<Bundle>.app/Contents/MacOS/Compartment` when running from an
+    app bundle, or None otherwise."""
+    for parent in Path(__file__).resolve().parents:
+        if parent.name == "Contents" and parent.parent.suffix == ".app":
+            exe = parent / "MacOS" / "Compartment"
+            if exe.is_file():
+                return str(exe)
+    return None
+
+
 def _cli_argv() -> list[str]:
     """How this process runs the CLI. See _python_exe for which Python."""
     return [_python_exe(), "-m", "compartment.cli"]
@@ -378,11 +395,14 @@ def read_settings(vault: str) -> dict:
     popover works even when memory is locked.
     """
     cfg = VaultConfig.load(vault)
-    from . import claude_hooks
-    try:
-        hook = claude_hooks.is_installed()
-    except Exception:                                   # noqa: BLE001
+    if _in_macos_app_sandbox():
         hook = False
+    else:
+        from . import claude_hooks
+        try:
+            hook = claude_hooks.is_installed()
+        except Exception:                               # noqa: BLE001
+            hook = False
     return {
         "capture_hook": hook,
         "search_starter_facts": bool(
@@ -477,6 +497,8 @@ def vault_presence(vault: str) -> bool | None:
 
 def settings_paths(vault: str) -> list:
     """The files read_settings reads."""
+    if _in_macos_app_sandbox():
+        return [VaultConfig.path_for(vault)]
     from . import claude_hooks
     return [VaultConfig.path_for(vault), claude_hooks.SETTINGS]
 
@@ -760,7 +782,7 @@ class PanelState:
             except Exception as exc:                    # noqa: BLE001
                 new["error"] = f"could not read the settings: {exc}"
 
-        sig = tuple(file_signature(p) for p in integration_paths())
+        sig = tuple(file_signature(p) for p in integration_paths(self.vault))
         if force or sig != sigs.get("agents"):
             new["integrations"] = integration_status(self.vault)
             new_sigs["agents"] = sig
@@ -964,6 +986,23 @@ def open_in_browser(url: str) -> bool:
     try:
         if os.environ.get("BROWSER"):
             return bool(webbrowser.open(url))
+        if _in_macos_app_sandbox():
+            try:
+                import objc
+                from Foundation import NSURL
+                objc.loadBundle(
+                    "AppKit", {},
+                    bundle_path="/System/Library/Frameworks/AppKit.framework")
+                ns_url = NSURL.URLWithString_(url)
+                if ns_url is not None and objc.lookUpClass(
+                        "NSWorkspace").sharedWorkspace().openURL_(ns_url):
+                    return True
+            except Exception:                           # noqa: BLE001
+                pass
+            return subprocess.run(
+                ["/usr/bin/open", url], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=15).returncode == 0
         if sys.platform not in ("win32", "darwin"):
             if _is_wsl():
                 for opener in ("wslview", "explorer.exe"):
@@ -1310,6 +1349,166 @@ INTEGRATION_TARGETS = (("claude", "Claude"),
                        ("codex", "Codex"))
 
 
+def _sandbox_integrations_path(vault: str) -> Path:
+    v = Path(vault).expanduser()
+    return v.parent / f"{v.name}.integrations.json"
+
+
+def _record_sandbox_integration(vault: str, target: str,
+                                config_path: Path) -> None:
+    rec_path = _sandbox_integrations_path(vault)
+    data: dict = {}
+    try:
+        if rec_path.is_file():
+            loaded = json.loads(rec_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+    except (OSError, ValueError):
+        data = {}
+    connected = data.get("connected")
+    if not isinstance(connected, dict):
+        connected = {}
+    connected[target] = str(config_path)
+    data["connected"] = connected
+    try:
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        rec_path.write_text(json.dumps(data, indent=2) + "\n",
+                            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _real_user_home() -> Path:
+    """The user's real macOS home directory, even inside an App Sandbox
+    container where `HOME` points at `~/Library/Containers/<id>/Data`."""
+    try:
+        import pwd
+        pw_dir = pwd.getpwuid(os.getuid()).pw_dir
+        if pw_dir:
+            return Path(pw_dir)
+    except Exception:                                   # noqa: BLE001
+        pass
+    return Path.home()
+
+
+def _sandbox_default_config_dir(target: str) -> Path:
+    """Directory hint for `NSOpenPanel` when connecting `target` from inside
+    the macOS App Sandbox."""
+    real_home = _real_user_home()
+    if target == "claude":
+        return real_home / "Library" / "Application Support" / "Claude"
+    if target == "antigravity":
+        return real_home / ".gemini" / "antigravity"
+    if target == "codex":
+        return real_home / ".codex"
+    if target == "openclaw":
+        return real_home / ".openclaw"
+    if target == "hermes":
+        return real_home / ".hermes"
+    return real_home
+
+
+def sandbox_mcp_command(vault: str, target: str) -> tuple[str, list[str]]:
+    """MCP server `(command, args)` for external hosts connecting to a
+    sandboxed Compartment.app bundle."""
+    caller = "claude-code" if target == "claude" else target
+    launcher = _bundle_launcher_exe()
+    if launcher:
+        return (launcher,
+                ["-m", "compartment.cli", "--vault", vault,
+                 "--caller", caller, "serve"])
+    return (compartment_bin(),
+            ["--vault", vault, "--caller", caller, "serve"])
+
+
+def sandbox_mcp_snippet(vault: str, target: str) -> str:
+    """Ready-to-paste MCP server configuration block for `target`."""
+    cmd, args = sandbox_mcp_command(vault, target)
+    entry = {"command": cmd, "args": args}
+    if target == "codex":
+        from . import clients
+        return clients._toml_block(entry)
+    if target == "openclaw":
+        return json.dumps({"mcp": {"servers": {"compartment": entry}}},
+                          indent=2)
+    return json.dumps({"mcpServers": {"compartment": entry}}, indent=2)
+
+
+def sandbox_connect_selected_path(vault: str, target: str,
+                                  selected: Path) -> tuple[bool, str]:
+    """Write Compartment's MCP registration into a file or folder explicitly
+    authorized by the user via `NSOpenPanel` inside the macOS App Sandbox."""
+    if target not in dict(INTEGRATION_TARGETS):
+        return False, f"unknown target {target!r}"
+    name = dict(INTEGRATION_TARGETS)[target]
+    cmd, args = sandbox_mcp_command(vault, target)
+    entry = {"command": cmd, "args": args}
+    sel = Path(selected)
+
+    try:
+        from . import clients
+        if target == "hermes" and sel.is_dir():
+            plug_src = Path(__file__).resolve().parent / "data" / "hermes-plugin"
+            if (plug_src / "plugin.yaml").is_file():
+                plug_dst = (sel if sel.name == "compartment"
+                            else sel / "plugins" / "compartment")
+                plug_dst.mkdir(parents=True, exist_ok=True)
+                for fname in ("__init__.py", "plugin.yaml"):
+                    shutil.copy2(plug_src / fname, plug_dst / fname)
+                _record_sandbox_integration(vault, target,
+                                            plug_dst / "plugin.yaml")
+                return True, (f"{name} plugin installed in {plug_dst}. "
+                              f"Restart {name} to pick up the change.")
+
+        if sel.is_dir():
+            default_names = {
+                "claude": "claude_desktop_config.json",
+                "antigravity": "mcp_config.json",
+                "codex": "config.toml",
+                "openclaw": "openclaw.json",
+                "hermes": "mcp_config.json",
+            }
+            cfg_path = sel / default_names.get(target, "mcp_config.json")
+        else:
+            cfg_path = sel
+
+        if target == "codex" or cfg_path.suffix.lower() == ".toml":
+            codex_client = clients.CLIENTS["codex"]
+            out = {"client": "codex", "display": name, "config": str(cfg_path),
+                   "backup": None, "written": False, "snippet": None,
+                   "note": None, "reason": None}
+            res = clients._register_toml(codex_client, cfg_path, entry, out)
+            if not res["written"] and res["reason"] != (
+                    "already registered; left as it is"):
+                return False, f"could not update {cfg_path.name}: {res['reason']}"
+            _record_sandbox_integration(vault, target, cfg_path)
+            return True, (f"{name} is connected ({cfg_path.name}). "
+                          f"Restart {name} to pick up the change.")
+
+        data = clients._read_json(cfg_path)
+        if target == "openclaw" or cfg_path.name == "openclaw.json":
+            mcp = data.setdefault("mcp", {})
+            if not isinstance(mcp, dict):
+                return False, f'"mcp" in {cfg_path.name} is not a JSON object'
+            servers = mcp.setdefault("servers", {})
+            if not isinstance(servers, dict):
+                return False, (f'"mcp.servers" in {cfg_path.name} is not a '
+                               "JSON object")
+            servers["compartment"] = entry
+        else:
+            servers = data.setdefault("mcpServers", {})
+            if not isinstance(servers, dict):
+                return False, (f'"mcpServers" in {cfg_path.name} is not a '
+                               "JSON object")
+            servers["compartment"] = entry
+        clients.write_config(cfg_path, json.dumps(data, indent=2) + "\n")
+        _record_sandbox_integration(vault, target, cfg_path)
+        return True, (f"{name} is connected ({cfg_path.name}). "
+                      f"Restart {name} to pick up the change.")
+    except (OSError, ValueError) as exc:
+        return False, f"could not connect {name}: {exc}"
+
+
 def integration_status(vault: str) -> dict:
     """Which agents are already wired to this machine.
 
@@ -1326,6 +1525,19 @@ def integration_status(vault: str) -> dict:
     it has not checked is worse than no indicator.
     """
     out = {t: False for t, _ in INTEGRATION_TARGETS}
+    if _in_macos_app_sandbox():
+        try:
+            rec = _sandbox_integrations_path(vault)
+            if rec.is_file():
+                doc = json.loads(rec.read_text(encoding="utf-8"))
+                connected = (doc.get("connected")
+                             if isinstance(doc, dict) else None)
+                if isinstance(connected, dict):
+                    for t in out:
+                        out[t] = bool(connected.get(t))
+        except (OSError, ValueError):
+            pass
+        return out
     try:                                                # Claude Code
         p = _claude_code_config()
         if p.is_file():
@@ -1422,7 +1634,7 @@ def openclaw_servers(cfg) -> dict:
     return servers if isinstance(servers, dict) else {}
 
 
-def integration_paths() -> list[Path]:
+def integration_paths(vault: str | None = None) -> list[Path]:
     """Every file `integration_status` reads, so the panel can tell from their
     modification times alone that no agent's configuration has changed, and
     skip reading them. Built from the same helpers, so a target cannot be
@@ -1430,6 +1642,8 @@ def integration_paths() -> list[Path]:
 
     Every one of them used to be read twice on every click, whether or not
     anything in it had changed."""
+    if _in_macos_app_sandbox():
+        return [_sandbox_integrations_path(vault or default_vault())]
     from . import claude_desktop, clients
     return [_claude_code_config(), claude_desktop.config_path(),
             _hermes_plugin_manifest(), _openclaw_config(),
@@ -1615,6 +1829,24 @@ LOGIN_STATUS = {0: "not registered", 1: "enabled", 2: "requires approval",
                 3: "not found"}
 
 
+def _is_compartment_bundle(mb) -> bool:
+    """True when `mb` is a real Compartment.app bundle (default or custom
+    bundle identifier, such as a Mac App Store build) rather than Python.app."""
+    if mb is None:
+        return False
+    bid = str(mb.bundleIdentifier() or "")
+    if not bid or bid.startswith("org.python."):
+        return False
+    if bid == BUNDLE_ID:
+        return True
+    try:
+        info = mb.infoDictionary() or {}
+        return (str(info.get("CFBundleExecutable") or "") == "Compartment"
+                and str(mb.bundlePath() or "").endswith(".app"))
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def _app_service():
     """SMAppService for this bundle, or None when we are not running from
     Compartment.app (a loose `compartment menubar` has no bundle to register)."""
@@ -1629,7 +1861,7 @@ def _app_service():
     # ordinary pip install. SMAppService would then act on Python.app: status
     # comes back "not found", and registering would put PYTHON in the user's
     # login items instead of Compartment.
-    if (NSBundle.mainBundle().bundleIdentifier() or "") != BUNDLE_ID:
+    if not _is_compartment_bundle(NSBundle.mainBundle()):
         return None
     try:
         objc.loadBundle(
@@ -2232,7 +2464,8 @@ def run(vault: str | None = None, show: bool = False,
                             NSBackingStoreBuffered, NSBox, NSColor,
                             NSRunningApplication,
                             NSFont, NSImage, NSMakeRect, NSMenu, NSMenuItem,
-                            NSOpenPanel, NSPanel, NSPopover, NSSavePanel,
+                            NSOpenPanel, NSPanel, NSPasteboard,
+                            NSPasteboardTypeString, NSPopover, NSSavePanel,
                             NSScreen, NSSegmentedControl,
                             NSClipView, NSScrollView,
                             NSBitmapImageRep, NSGraphicsContext,
@@ -2242,7 +2475,7 @@ def run(vault: str | None = None, show: bool = False,
                             NSWindowStyleMaskClosable, NSWindowStyleMaskTitled,
                             NSWindowStyleMaskUtilityWindow)
         from Foundation import (NSBundle, NSDistributedNotificationCenter,
-                                NSObject)
+                                NSObject, NSURL)
     except ImportError:
         # Into this interpreter, by name. The [menubar] extra this used to
         # name has been empty since PyObjC became a base dependency, so
@@ -2564,15 +2797,26 @@ def run(vault: str | None = None, show: bool = False,
                 views.append(label("SETTINGS", 10, bold=True, secondary=True))
                 s = st["settings"]
 
-                self.hook_switch = NSSwitch.alloc().init()
-                self.hook_switch.setState_(1 if s["capture_hook"] else 0)
-                self.hook_switch.setTarget_(self)
-                self.hook_switch.setAction_("toggleHook:")
-                # No explanatory line under these two: the switch says what it
-                # does, and a popover cannot grow past the height macOS gives it
-                # without putting the whole panel behind a scrollbar.
-                views.append(row(label("Create memories automatically"), _spacer(),
-                                 self.hook_switch))
+                if _in_macos_app_sandbox():
+                    self.hook_switch = None
+                    self.login_switch = NSSwitch.alloc().init()
+                    self.login_switch.setState_(
+                        1 if login_status() == "enabled" else 0)
+                    self.login_switch.setTarget_(self)
+                    self.login_switch.setAction_("toggleLogin:")
+                    views.append(row(label("Start at login"), _spacer(),
+                                     self.login_switch))
+                else:
+                    self.login_switch = None
+                    self.hook_switch = NSSwitch.alloc().init()
+                    self.hook_switch.setState_(1 if s["capture_hook"] else 0)
+                    self.hook_switch.setTarget_(self)
+                    self.hook_switch.setAction_("toggleHook:")
+                    # No explanatory line under these two: the switch says what it
+                    # does, and a popover cannot grow past the height macOS gives it
+                    # without putting the whole panel behind a scrollbar.
+                    views.append(row(label("Create memories automatically"),
+                                     _spacer(), self.hook_switch))
 
                 self.starter_switch = NSSwitch.alloc().init()
                 self.starter_switch.setState_(1 if s["search_starter_facts"] else 0)
@@ -2862,6 +3106,10 @@ def run(vault: str | None = None, show: bool = False,
             self.panel.refresh_async()
 
         # ---- actions ---------------------------------------------------
+        def toggleLogin_(self, sender):
+            set_login(bool(sender.state()), vault_path)
+            self.rebuild()
+
         def toggleHook_(self, sender):
             self.panel.change_setting("capture_hook", bool(sender.state()))
             self.rebuild()
@@ -2904,6 +3152,52 @@ def run(vault: str | None = None, show: bool = False,
                 return
             if self.connect_busy is not None:
                 return                          # one at a time
+            if _in_macos_app_sandbox():
+                dlg = NSOpenPanel.openPanel()
+                dlg.setTitle_(f"Connect {name} to Compartment")
+                dlg.setMessage_(
+                    f"Select {name}'s configuration file or folder to "
+                    "register Compartment automatically, or click Cancel to "
+                    "copy the MCP configuration snippet to your clipboard.")
+                dlg.setPrompt_("Connect")
+                dlg.setCanChooseFiles_(True)
+                dlg.setCanChooseDirectories_(True)
+                dlg.setAllowsMultipleSelection_(False)
+                dlg.setShowsHiddenFiles_(True)
+                try:
+                    hint_dir = _sandbox_default_config_dir(target)
+                    dlg.setDirectoryURL_(NSURL.fileURLWithPath_(str(hint_dir)))
+                except Exception:                           # noqa: BLE001
+                    pass
+                NSApp.activateIgnoringOtherApps_(True)
+                if int(dlg.runModal()) != 1:
+                    snippet_text = sandbox_mcp_snippet(vault_path, target)
+                    pb = NSPasteboard.generalPasteboard()
+                    pb.clearContents()
+                    pb.setString_forType_(snippet_text, NSPasteboardTypeString)
+                    self.connect_note = (
+                        f"Copied {name} MCP config to clipboard. Paste it "
+                        f"into {name}'s MCP settings.")
+                    if not self._onScreen():
+                        self.showWindow()
+                    else:
+                        self.rebuild()
+                    return
+                url = dlg.URL()
+                chosen = str(url.path() or "") if url is not None else ""
+                if not chosen:
+                    return
+                self.connect_busy = target
+                self.connect_note = f"Connecting {name}…"
+                if not self._onScreen():
+                    self.showWindow()
+                else:
+                    self.rebuild()
+                self._inBackground(
+                    lambda: sandbox_connect_selected_path(
+                        vault_path, target, Path(chosen)),
+                    "connectDone:")
+                return
             self.connect_busy = target
             self.connect_note = f"Connecting {name}…"
             self.rebuild()
@@ -3151,9 +3445,17 @@ def run(vault: str | None = None, show: bool = False,
             if ok:
                 self.panel.refresh_async(force=True)
 
-        def quitApp_(self, sender):
+        @objc.python_method
+        def _stopHelpers(self):
             self.panel.close()
             stop_dashboard()
+            if _in_macos_app_sandbox():
+                with contextlib.suppress(Exception):
+                    from . import embed_daemon
+                    embed_daemon.stop(wait=2.0)
+
+        def quitApp_(self, sender):
+            self._stopHelpers()
             NSApp.terminate_(self)
 
         def togglePopover_(self, sender):
@@ -3302,6 +3604,9 @@ def run(vault: str | None = None, show: bool = False,
             # exactly one window and losing the icon by closing it would be
             # indistinguishable from the app crashing.
             return False
+
+        def applicationWillTerminate_(self, notification):
+            ctrl._stopHelpers()
 
     delegate = CompartmentAppDelegate.alloc().init()
     app.setDelegate_(delegate)

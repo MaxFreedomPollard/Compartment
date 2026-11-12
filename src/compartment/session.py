@@ -428,6 +428,44 @@ def _win_forget(sub: str) -> bool:
 
 # --- holder identity, and the accessors the rest of the module uses --------
 
+_bundle_shm_group_cache: tuple[bool, str | None] | None = None
+
+
+def _bundle_shm_group() -> str | None:
+    """Read `CompartmentAppGroup` from `<Bundle>.app/Contents/Info.plist` when
+    running from a sandboxed macOS app bundle, cached for the process."""
+    global _bundle_shm_group_cache
+    if _bundle_shm_group_cache is not None:
+        return _bundle_shm_group_cache[1]
+    import plistlib
+    found: str | None = None
+    try:
+        for parent in Path(__file__).resolve().parents:
+            if parent.name == "Contents" and parent.parent.suffix == ".app":
+                info_plist = parent / "Info.plist"
+                if info_plist.is_file():
+                    with open(info_plist, "rb") as fh:
+                        raw = plistlib.load(fh).get("CompartmentAppGroup")
+                    if isinstance(raw, str) and raw.strip():
+                        found = raw.strip().strip("/")
+                break
+    except Exception:                                        # noqa: BLE001
+        found = None
+    _bundle_shm_group_cache = (True, found)
+    return found
+
+
+def _sandbox_shm_group() -> str | None:
+    """App Group prefix for POSIX `shm_open` inside the macOS App Sandbox, or
+    None outside it."""
+    explicit = env("SHM_GROUP")
+    if explicit and explicit.strip():
+        return explicit.strip().strip("/")
+    if sys.platform == "darwin" and os.environ.get("APP_SANDBOX_CONTAINER_ID"):
+        return _bundle_shm_group()
+    return None
+
+
 def _holder() -> str:
     """Name of this user's per-boot secret for this session store.
 
@@ -439,6 +477,13 @@ def _holder() -> str:
     ).hexdigest()[:24]
     if IS_WINDOWS:
         return rf"Software\Compartment\boot-secret\{digest}"
+    group = _sandbox_shm_group()
+    if group:
+        # macOS App Sandbox permits shm_open without a leading slash when
+        # prefixed with an entitled App Group (<TeamID>.<name>/...), within
+        # the 30-character POSIX shm name limit (31 bytes including NUL).
+        keep = max(8, 30 - len(group) - 1)
+        return f"{group}/{digest[:keep]}"
     # macOS caps a POSIX shm name at 31 characters, the slash included.
     return f"/cmpt.{digest}"
 

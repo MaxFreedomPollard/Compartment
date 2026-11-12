@@ -459,3 +459,21 @@ def test_a_test_that_stores_a_credential_leaves_no_secret_behind(
             left.append(store)
             session._forget_boot_secret()       # not left for a restart
     assert left == []
+
+
+def test_holder_uses_app_group_prefix_within_30_chars_in_macos_sandbox(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(session, "IS_WINDOWS", False)
+    monkeypatch.setattr(session.sys, "platform", "darwin")
+    monkeypatch.setattr(session, "_session_dir", lambda: tmp_path / "session")
+    monkeypatch.setenv("APP_SANDBOX_CONTAINER_ID", "com.example.compartment")
+    monkeypatch.setenv("COMPARTMENT_SHM_GROUP", "ABCDE12345.cmpt")
+
+    name = session._holder()
+    assert not name.startswith("/")
+    assert name.startswith("ABCDE12345.cmpt/")
+    assert len(name) <= 30
+
+    monkeypatch.delenv("COMPARTMENT_SHM_GROUP", raising=False)
+    monkeypatch.delenv("APP_SANDBOX_CONTAINER_ID", raising=False)
+    assert session._holder().startswith("/cmpt.")

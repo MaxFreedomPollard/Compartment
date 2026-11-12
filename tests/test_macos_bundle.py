@@ -847,3 +847,128 @@ def test_main_notarizes_app_then_dmg_and_pkg_concurrently(
     assert rc == 0
     assert notarized[0] == app
     assert set(notarized[1:]) == {dmg, pkg}
+
+
+# ------------------------------------ Mac App Store signing, sandbox & .pkg
+
+def test_mac_app_store_signing_identities_and_mutual_exclusion(
+        tmp_path, monkeypatch):
+    import subprocess
+    b = _builder()
+    for var in ("COMPARTMENT_CODESIGN_IDENTITY",
+                "COMPARTMENT_INSTALLER_IDENTITY",
+                "COMPARTMENT_SIGN_AUTO",
+                "COMPARTMENT_MAC_APP_STORE"):
+        monkeypatch.delenv(var, raising=False)
+
+    kc_listing = (
+        '  1) AAAA "3rd Party Mac Developer Application: Example Org (ABCDE12345)"\n'
+        '  2) BBBB "3rd Party Mac Developer Installer: Example Org (ABCDE12345)"\n'
+        "     2 valid identities found\n"
+    )
+    monkeypatch.setattr(
+        b.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, kc_listing, ""))
+    assert b._resolve_signing_identities(
+        sign_auto=True, mac_app_store=True
+    ) == (
+        "3rd Party Mac Developer Application: Example Org (ABCDE12345)",
+        "3rd Party Mac Developer Installer: Example Org (ABCDE12345)",
+    )
+
+    with pytest.raises(SystemExit, match="mutually exclusive"):
+        _main(
+            b, monkeypatch, tmp_path,
+            ["--mac-app-store", "--notarize",
+             "--sign-app",
+             "3rd Party Mac Developer Application: Example Org (ABCDE12345)"],
+        )
+
+
+def test_mac_app_store_signs_sandbox_and_builds_component_pkg(
+        tmp_path, monkeypatch):
+    import plistlib
+    b = _builder()
+    deep_lib = ("Contents/Resources/runtime/lib/python3.12/site-packages/"
+                "onnxruntime/capi/libonnxruntime.dylib")
+    nested_py = "Contents/Resources/runtime/bin/python3.12"
+    app = _fake_app(tmp_path, {
+        "Contents/MacOS/Compartment": _macho("arm64", (13, 4)),
+        deep_lib: _macho("arm64", (13, 4)),
+        nested_py: _macho("arm64", (13, 4)),
+    })
+    with open(app / "Contents" / "Info.plist", "wb") as fh:
+        plistlib.dump({
+            "CFBundleIdentifier": "com.example.compartment",
+            "CFBundleShortVersionString": "4.16.1",
+            "LSMinimumSystemVersion": "13.4",
+        }, fh)
+    monkeypatch.setattr(b, "BUILD", tmp_path / "build")
+    (tmp_path / "build").mkdir()
+
+    calls = []
+    seen_entitlements = []
+
+    def fake_run(*args, **kw):
+        argv = [str(a) for a in args]
+        if "--entitlements" in argv:
+            ent_file = pathlib.Path(argv[argv.index("--entitlements") + 1])
+            with open(ent_file, "rb") as fh:
+                seen_entitlements.append(plistlib.load(fh))
+        calls.append(argv)
+
+    monkeypatch.setattr(b, "_run", fake_run)
+    app_id = "3rd Party Mac Developer Application: Example Org (ABCDE12345)"
+    pkg_id = "3rd Party Mac Developer Installer: Example Org (ABCDE12345)"
+    assert b._resolve_team_id(app_id, None) == "ABCDE12345"
+
+    b._sign_app_mac_app_store(
+        app, app_id,
+        bundle_id="com.example.compartment",
+        team_id="ABCDE12345",
+        app_group="ABCDE12345.cmpt",
+    )
+    assert [c[-1] for c in calls] == [
+        str(app / deep_lib),
+        str(app / nested_py),
+        str(app),
+    ]
+    assert "--entitlements" not in calls[0]
+    assert seen_entitlements[0] == {
+        "com.apple.security.app-sandbox": True,
+        "com.apple.security.inherit": True,
+        "com.apple.security.cs.allow-unsigned-executable-memory": True,
+    }
+    assert seen_entitlements[1] == {
+        "com.apple.security.app-sandbox": True,
+        "com.apple.security.cs.allow-unsigned-executable-memory": True,
+        "com.apple.security.files.user-selected.read-write": True,
+        "com.apple.security.network.server": True,
+        "com.apple.security.application-groups": ["ABCDE12345.cmpt"],
+        "com.apple.application-identifier": "ABCDE12345.com.example.compartment",
+        "com.apple.developer.team-identifier": "ABCDE12345",
+    }
+
+    calls.clear()
+    mas_pkg = b.build_mas_pkg(app, sign_identity=pkg_id)
+    assert mas_pkg.name == "Compartment-4.16.1-MAS.pkg"
+    assert calls == [[
+        "productbuild",
+        "--component", str(app), "/Applications",
+        "--identifier", "com.example.compartment",
+        "--version", "4.16.1",
+        "--sign", pkg_id,
+        str(mas_pkg),
+    ]]
+
+
+def test_xcode_sdk_dt_keys_populate_required_app_store_metadata():
+    b = _builder()
+    dt = b._xcode_sdk_dt_keys()
+    for key in ("BuildMachineOSBuild", "CFBundleSupportedPlatforms",
+                "DTCompiler", "DTPlatformBuild", "DTPlatformName",
+                "DTPlatformVersion", "DTSDKBuild", "DTSDKName",
+                "DTXcode", "DTXcodeBuild"):
+        assert dt.get(key), f"missing {key}"
+    assert dt["CFBundleSupportedPlatforms"] == ["MacOSX"]
+    assert dt["DTPlatformName"] == "macosx"

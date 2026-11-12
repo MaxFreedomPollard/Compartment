@@ -68,7 +68,20 @@ int main(int argc, char **argv) {
      * them. Anything else still means "run the menu bar app", which keeps a
      * Finder launch (no arguments at all) and `Compartment --vault X` working
      * the way they always have. */
-    if (!(u > 0 && (strcmp(user[0], "-m") == 0 || strcmp(user[0], "-c") == 0))) {
+    int py_i = 0;
+    while (py_i < u && user[py_i][0] == '-' && user[py_i][1] != '\0' &&
+           (strcmp(user[py_i], "-B") == 0 || strcmp(user[py_i], "-E") == 0 ||
+            strcmp(user[py_i], "-I") == 0 || strcmp(user[py_i], "-O") == 0 ||
+            strcmp(user[py_i], "-OO") == 0 || strcmp(user[py_i], "-P") == 0 ||
+            strcmp(user[py_i], "-S") == 0 || strcmp(user[py_i], "-s") == 0 ||
+            strcmp(user[py_i], "-u") == 0 || strcmp(user[py_i], "-v") == 0)) {
+        py_i++;
+    }
+    int is_py = (u > 0 && (strcmp(user[0], "-m") == 0 ||
+                           strcmp(user[0], "-c") == 0)) ||
+                (py_i < u && (strcmp(user[py_i], "-m") == 0 ||
+                              strcmp(user[py_i], "-c") == 0));
+    if (!is_py) {
         py[n++] = "-m";
         py[n++] = "compartment.cli";
         py[n++] = "menubar";

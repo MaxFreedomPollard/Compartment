@@ -660,16 +660,25 @@ def _resolve_signing_identities(
     sign_app: str | None = None,
     sign_pkg: str | None = None,
     sign_auto: bool = False,
+    *,
+    mac_app_store: bool = False,
 ) -> tuple[str, str | None]:
     """Resolve (app_identity, pkg_identity) from CLI flags, environment
     variables, or automatic keychain discovery, falling back cleanly to
-    ad-hoc ('-') and None when no Developer ID certificates are available."""
+    ad-hoc ('-') and None when no matching certificates are available."""
     auto = sign_auto or _truthy_env("COMPARTMENT_SIGN_AUTO")
 
     raw_app = (sign_app if sign_app is not None
                else os.environ.get("COMPARTMENT_CODESIGN_IDENTITY", "").strip())
     if raw_app == "auto" or (not raw_app and auto):
-        app_id = _find_keychain_identity("Developer ID Application:") or "-"
+        if mac_app_store:
+            app_id = (
+                _find_keychain_identity("3rd Party Mac Developer Application:")
+                or _find_keychain_identity("Apple Distribution:")
+                or "-"
+            )
+        else:
+            app_id = _find_keychain_identity("Developer ID Application:") or "-"
     elif raw_app:
         app_id = raw_app
     else:
@@ -678,7 +687,11 @@ def _resolve_signing_identities(
     raw_pkg = (sign_pkg if sign_pkg is not None
                else os.environ.get("COMPARTMENT_INSTALLER_IDENTITY", "").strip())
     if raw_pkg == "auto" or (not raw_pkg and auto):
-        pkg_id = _find_keychain_identity("Developer ID Installer:")
+        if mac_app_store:
+            pkg_id = _find_keychain_identity(
+                "3rd Party Mac Developer Installer:")
+        else:
+            pkg_id = _find_keychain_identity("Developer ID Installer:")
     elif raw_pkg and raw_pkg != "-":
         pkg_id = raw_pkg
     else:
@@ -687,10 +700,117 @@ def _resolve_signing_identities(
     return app_id, pkg_id
 
 
-def _sign_app_developer_id(app: pathlib.Path, identity: str) -> None:
-    """Sign every nested Mach-O inside `app` deepest-path-first under Hardened
-    Runtime with a secure timestamp, then sign the outer bundle without
-    `--deep`."""
+def _extract_profile_plist(profile_path: pathlib.Path) -> dict:
+    """Decode an Apple `.provisionprofile` CMS document into a Python dict."""
+    raw = profile_path.read_bytes()
+    try:
+        dec = subprocess.run(
+            ["security", "cms", "-D", "-i", str(profile_path)],
+            capture_output=True, timeout=30)
+        if dec.returncode == 0 and dec.stdout:
+            return plistlib.loads(dec.stdout)
+    except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException):
+        pass
+    start = raw.find(b"<?xml")
+    if start < 0:
+        start = raw.find(b"<plist")
+    end = raw.find(b"</plist>")
+    if start >= 0 and end > start:
+        return plistlib.loads(raw[start:end + len(b"</plist>")])
+    raise SystemExit(
+        f"error: could not parse provisioning profile {profile_path}")
+
+
+def _resolve_team_id(
+    sign_identity: str | None = None,
+    profile_plist: dict | None = None,
+) -> str:
+    """Extract the 10-character Apple Team ID from `profile_plist` or a signing
+    identity common name `... (TEAMID1234)`."""
+    if isinstance(profile_plist, dict):
+        teams = profile_plist.get("TeamIdentifier")
+        if isinstance(teams, list) and teams and isinstance(teams[0], str):
+            return teams[0].strip()
+        ent = profile_plist.get("Entitlements")
+        if isinstance(ent, dict):
+            tid = ent.get("com.apple.developer.team-identifier")
+            if isinstance(tid, str) and tid.strip():
+                return tid.strip()
+    if sign_identity:
+        m = re.search(r"\(([A-Z0-9]{10})\)\s*$", sign_identity.strip())
+        if m:
+            return m.group(1)
+    raise SystemExit(
+        "error: could not determine Apple Team ID from provisioning profile "
+        "or signing identity")
+
+
+def _xcode_sdk_dt_keys() -> dict[str, object]:
+    """Synthesize Xcode `DT*` Info.plist keys from the active macOS SDK so
+    App Store Connect recognizes builds compiled with Command Line Tools."""
+    os_build = subprocess.run(
+        ["sw_vers", "-buildVersion"], capture_output=True, text=True
+    ).stdout.strip() or "26A434"
+    sdk_path_str = subprocess.run(
+        ["xcrun", "--show-sdk-path"], capture_output=True, text=True
+    ).stdout.strip()
+    sdk_name = "macosx27.0"
+    sdk_ver = "27.0"
+    sdk_build = "26A425"
+    if sdk_path_str:
+        sdk_path = pathlib.Path(sdk_path_str)
+        sdk_settings = sdk_path / "SDKSettings.plist"
+        if sdk_settings.is_file():
+            with open(sdk_settings, "rb") as fh:
+                sd = plistlib.load(fh)
+            sdk_name = str(sd.get("CanonicalName") or sdk_name)
+            sdk_ver = str(sd.get("Version")
+                          or sd.get("DefaultDeploymentTarget") or sdk_ver)
+        sys_ver = (sdk_path / "System" / "Library" / "CoreServices"
+                   / "SystemVersion.plist")
+        if sys_ver.is_file():
+            with open(sys_ver, "rb") as fh:
+                sv = plistlib.load(fh)
+            sdk_build = str(sv.get("ProductBuildVersion") or sdk_build)
+
+    dt_xcode = ""
+    dt_xcode_build = ""
+    xcode_plist = pathlib.Path("/Applications/Xcode.app/Contents/Info.plist")
+    if xcode_plist.is_file():
+        with open(xcode_plist, "rb") as fh:
+            xp = plistlib.load(fh)
+        dt_xcode = str(xp.get("DTXcode") or "")
+        dt_xcode_build = str(xp.get("DTXcodeBuild") or "")
+    if not dt_xcode or not dt_xcode_build:
+        try:
+            major = int(sdk_ver.split(".", 1)[0])
+        except ValueError:
+            major = 27
+        dt_xcode = dt_xcode or f"{major:02d}00"
+        if major == 27:
+            dt_xcode_build = dt_xcode_build or "27A266a"
+        elif major == 26:
+            dt_xcode_build = dt_xcode_build or "17A400"
+        else:
+            dt_xcode_build = dt_xcode_build or sdk_build
+
+    return {
+        "BuildMachineOSBuild": os_build,
+        "CFBundleSupportedPlatforms": ["MacOSX"],
+        "DTCompiler": "com.apple.compilers.llvm.clang.1_0",
+        "DTPlatformBuild": sdk_build,
+        "DTPlatformName": "macosx",
+        "DTPlatformVersion": sdk_ver,
+        "DTSDKBuild": sdk_build,
+        "DTSDKName": sdk_name,
+        "DTXcode": dt_xcode,
+        "DTXcodeBuild": dt_xcode_build,
+    }
+
+
+def _nested_machos(app: pathlib.Path) -> tuple[
+    pathlib.Path, list[pathlib.Path], list[pathlib.Path]
+]:
     contents = app / "Contents"
     main_exe = contents / "MacOS" / APP_NAME
     nested_libs: list[pathlib.Path] = []
@@ -704,15 +824,23 @@ def _sign_app_developer_id(app: pathlib.Path, identity: str) -> None:
             nested_libs.append(p)
         else:
             nested_exes.append(p)
-
     depth_order = lambda p: (-len(p.parts), str(p))
     nested_libs.sort(key=depth_order)
     nested_exes.sort(key=depth_order)
+    return main_exe, nested_libs, nested_exes
 
-    def _ensure_writable(target: pathlib.Path) -> None:
-        mode = target.stat().st_mode
-        if not (mode & 0o200):
-            target.chmod(mode | 0o200)
+
+def _ensure_writable_macho(target: pathlib.Path) -> None:
+    mode = target.stat().st_mode
+    if not (mode & 0o200):
+        target.chmod(mode | 0o200)
+
+
+def _sign_app_developer_id(app: pathlib.Path, identity: str) -> None:
+    """Sign every nested Mach-O inside `app` deepest-path-first under Hardened
+    Runtime with a secure timestamp, then sign the outer bundle without
+    `--deep`."""
+    main_exe, nested_libs, nested_exes = _nested_machos(app)
 
     print(f"signing {len(nested_libs)} nested libraries and "
           f"{len(nested_exes)} nested executables under Hardened Runtime…")
@@ -721,24 +849,81 @@ def _sign_app_developer_id(app: pathlib.Path, identity: str) -> None:
         with open(ent_plist, "wb") as fh:
             plistlib.dump(_ENTITLEMENTS, fh)
         for lib in nested_libs:
-            _ensure_writable(lib)
+            _ensure_writable_macho(lib)
             _run("codesign", "--force", "--sign", identity,
                  "--timestamp", "--options", "runtime", lib)
         for exe in nested_exes:
-            _ensure_writable(exe)
+            _ensure_writable_macho(exe)
             _run("codesign", "--force", "--sign", identity,
                  "--timestamp", "--options", "runtime",
                  "--entitlements", ent_plist, exe)
-        _ensure_writable(main_exe)
+        _ensure_writable_macho(main_exe)
         _run("codesign", "--force", "--sign", identity,
              "--timestamp", "--options", "runtime",
              "--entitlements", ent_plist, app)
 
 
-def build_app(spec: str | None = None, out: pathlib.Path | None = None,
-              python: str | None = None,
-              min_macos: str = MIN_MACOS,
-              sign_identity: str | None = None) -> pathlib.Path:
+def _sign_app_mac_app_store(
+    app: pathlib.Path,
+    identity: str,
+    *,
+    bundle_id: str,
+    team_id: str,
+    app_group: str,
+) -> None:
+    """Sign every nested Mach-O inside `app` for Mac App Store distribution
+    with App Sandbox (`inherit` on nested executables) and team-scoped
+    entitlements on the outer bundle."""
+    main_exe, nested_libs, nested_exes = _nested_machos(app)
+    child_entitlements = {
+        "com.apple.security.app-sandbox": True,
+        "com.apple.security.inherit": True,
+        "com.apple.security.cs.allow-unsigned-executable-memory": True,
+    }
+    app_entitlements = {
+        "com.apple.security.app-sandbox": True,
+        "com.apple.security.cs.allow-unsigned-executable-memory": True,
+        "com.apple.security.files.user-selected.read-write": True,
+        "com.apple.security.network.server": True,
+        "com.apple.security.application-groups": [app_group],
+        "com.apple.application-identifier": f"{team_id}.{bundle_id}",
+        "com.apple.developer.team-identifier": team_id,
+    }
+    print(f"signing {len(nested_libs)} nested libraries and "
+          f"{len(nested_exes)} nested executables for Mac App Store…")
+    with tempfile.TemporaryDirectory(prefix="compartment-mas-ent-") as td:
+        child_plist = pathlib.Path(td) / "child.entitlements.plist"
+        app_plist = pathlib.Path(td) / "app.entitlements.plist"
+        with open(child_plist, "wb") as fh:
+            plistlib.dump(child_entitlements, fh)
+        with open(app_plist, "wb") as fh:
+            plistlib.dump(app_entitlements, fh)
+        for lib in nested_libs:
+            _ensure_writable_macho(lib)
+            _run("codesign", "--force", "--sign", identity, lib)
+        for exe in nested_exes:
+            _ensure_writable_macho(exe)
+            _run("codesign", "--force", "--sign", identity,
+                 "--entitlements", child_plist, exe)
+        _ensure_writable_macho(main_exe)
+        _run("codesign", "--force", "--sign", identity,
+             "--entitlements", app_plist, app)
+
+
+def build_app(
+    spec: str | None = None,
+    out: pathlib.Path | None = None,
+    python: str | None = None,
+    min_macos: str = MIN_MACOS,
+    sign_identity: str | None = None,
+    *,
+    mac_app_store: bool = False,
+    bundle_id: str | None = None,
+    build_number: str | None = None,
+    copyright_text: str | None = None,
+    provisioning_profile: str | pathlib.Path | None = None,
+    app_group: str | None = None,
+) -> pathlib.Path:
     """spec: what to pip-install (default: this checkout, so the build always
     matches the source it came from)."""
     version = _version()
@@ -829,23 +1014,80 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
 
     build_icon(resources / f"{APP_NAME}.icns")
 
-    info = {
+    resolved_app_id = (
+        sign_identity if sign_identity is not None
+        else (os.environ.get("COMPARTMENT_CODESIGN_IDENTITY", "").strip()
+              or "-")
+    )
+    effective_bundle_id = (
+        (bundle_id if bundle_id is not None
+         else os.environ.get("COMPARTMENT_BUNDLE_ID", "")).strip()
+        or BUNDLE_ID
+    )
+    effective_build_number = (
+        (build_number if build_number is not None
+         else os.environ.get("COMPARTMENT_BUILD_NUMBER", "")).strip()
+        or ("1" if mac_app_store else version)
+    )
+    effective_copyright = (
+        (copyright_text if copyright_text is not None
+         else os.environ.get("COMPARTMENT_COPYRIGHT", "")).strip()
+        or "https://github.com/MaxFreedomPollard/Compartment"
+    )
+
+    mas_team_id = ""
+    mas_app_group = ""
+    if mac_app_store:
+        if resolved_app_id == "-":
+            raise SystemExit(
+                "error: --mac-app-store requires a Mac App Store signing "
+                "identity (--sign-auto or --sign-app)")
+        raw_profile = (
+            str(provisioning_profile) if provisioning_profile is not None
+            else os.environ.get("COMPARTMENT_PROVISIONING_PROFILE", "")
+        ).strip()
+        if not raw_profile:
+            raise SystemExit(
+                "error: --mac-app-store requires --provisioning-profile "
+                "(or COMPARTMENT_PROVISIONING_PROFILE)")
+        profile_src = pathlib.Path(raw_profile).expanduser()
+        if not profile_src.is_file():
+            raise SystemExit(
+                f"error: provisioning profile not found: {profile_src}")
+        profile_plist = _extract_profile_plist(profile_src)
+        mas_team_id = _resolve_team_id(resolved_app_id, profile_plist)
+        raw_group = (
+            app_group if app_group is not None
+            else os.environ.get("COMPARTMENT_APP_GROUP", "")
+        ).strip().strip("/")
+        mas_app_group = raw_group or f"{mas_team_id}.cmpt"
+        embedded_profile = contents / "embedded.provisionprofile"
+        shutil.copy2(profile_src, embedded_profile)
+        embedded_profile.chmod(0o644)
+
+    info: dict[str, object] = {
         "CFBundleName": APP_NAME,
         "CFBundleDisplayName": APP_NAME,
-        "CFBundleIdentifier": BUNDLE_ID,
+        "CFBundleIdentifier": effective_bundle_id,
         "CFBundleExecutable": APP_NAME,
         "CFBundleIconFile": f"{APP_NAME}.icns",
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
-        "CFBundleVersion": version,
+        "CFBundleVersion": effective_build_number,
         "CFBundleInfoDictionaryVersion": "6.0",
         "LSUIElement": True,               # menu bar only, no dock icon
         "LSMinimumSystemVersion": min_macos,
-        "NSHumanReadableCopyright": "https://github.com/"
-                                    "MaxFreedomPollard/Compartment",
+        "NSHumanReadableCopyright": effective_copyright,
         "NSHumanReadableDescription": DESCRIPTION,
-        "LSApplicationCategoryType": "public.app-category.productivity",
+        "LSApplicationCategoryType": (
+            "public.app-category.developer-tools" if mac_app_store
+            else "public.app-category.productivity"
+        ),
     }
+    if mac_app_store:
+        info["ITSAppUsesNonExemptEncryption"] = False
+        info["CompartmentAppGroup"] = mas_app_group
+        info.update(_xcode_sdk_dt_keys())
     with open(contents / "Info.plist", "wb") as fh:
         plistlib.dump(info, fh)
 
@@ -859,14 +1101,16 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     _verify_console_scripts(app)
     _verify_deployment_target(app, arch, min_macos)
 
-    resolved_app_id = (
-        sign_identity if sign_identity is not None
-        else (os.environ.get("COMPARTMENT_CODESIGN_IDENTITY", "").strip()
-              or "-")
-    )
-    if resolved_app_id == "-":
+    if mac_app_store:
+        _sign_app_mac_app_store(
+            app, resolved_app_id,
+            bundle_id=effective_bundle_id,
+            team_id=mas_team_id,
+            app_group=mas_app_group,
+        )
+    elif resolved_app_id == "-":
         _run("codesign", "--force", "--deep", "--sign", "-",
-             "--identifier", BUNDLE_ID, app)
+             "--identifier", effective_bundle_id, app)
     else:
         _sign_app_developer_id(app, resolved_app_id)
     _verify_signature(app)
@@ -876,7 +1120,8 @@ def build_app(spec: str | None = None, out: pathlib.Path | None = None,
     return app
 
 
-def _verify_survives_running(app: pathlib.Path) -> None:
+def _verify_survives_running(app: pathlib.Path,
+                             *, mac_app_store: bool | None = None) -> None:
     """A signed app must not invalidate itself by being used.
 
     Anything the app writes inside its own bundle - bytecode caches being the
@@ -905,16 +1150,31 @@ def _verify_survives_running(app: pathlib.Path) -> None:
         if out.returncode != 0:
             raise SystemExit("error: the built app cannot run\n"
                              + (out.stderr or out.stdout).strip()[:2000])
-        cli = (app / "Contents" / "Resources" / "runtime" / "bin"
-               / "compartment")
-        if cli.is_file():
+        is_mas = (mac_app_store if mac_app_store is not None
+                  else (app / "Contents" / "embedded.provisionprofile").is_file())
+        if is_mas:
+            # Nested python3.12 carries com.apple.security.inherit, which macOS
+            # allows only when spawned by an already-sandboxed parent; external
+            # callers invoke the main launcher with `-m compartment.cli`.
             cli_out = subprocess.run(
-                [str(cli), "--version"],
+                [str(app / "Contents" / "MacOS" / APP_NAME),
+                 "-m", "compartment.cli", "--version"],
                 capture_output=True, text=True, env=probe_env)
             if cli_out.returncode != 0:
                 raise SystemExit(
-                    "error: the signed CLI inside the bundle cannot run\n"
+                    "error: the signed MAS launcher CLI cannot run\n"
                     + (cli_out.stderr or cli_out.stdout).strip()[:2000])
+        else:
+            cli = (app / "Contents" / "Resources" / "runtime" / "bin"
+                   / "compartment")
+            if cli.is_file():
+                cli_out = subprocess.run(
+                    [str(cli), "--version"],
+                    capture_output=True, text=True, env=probe_env)
+                if cli_out.returncode != 0:
+                    raise SystemExit(
+                        "error: the signed CLI inside the bundle cannot run\n"
+                        + (cli_out.stderr or cli_out.stdout).strip()[:2000])
     _verify_signature(app)
     print("signature survives running the app")
 
@@ -1092,6 +1352,38 @@ def build_pkg(app: pathlib.Path,
     else:
         _run("productbuild", "--distribution", dist, "--package-path", BUILD,
              out)
+    print(f"built {out}")
+    return out
+
+
+def build_mas_pkg(
+    app: pathlib.Path,
+    sign_identity: str | None = None,
+) -> pathlib.Path:
+    """Build a Mac App Store `.pkg` via `productbuild --component` signed with
+    a `3rd Party Mac Developer Installer` certificate."""
+    with open(app / "Contents" / "Info.plist", "rb") as fh:
+        info = plistlib.load(fh)
+    version = str(info.get("CFBundleShortVersionString") or _version())
+    bundle_id = str(info.get("CFBundleIdentifier") or BUNDLE_ID)
+    arch = _app_arch(app)
+    pkg_id = (
+        sign_identity if sign_identity is not None
+        else (os.environ.get("COMPARTMENT_INSTALLER_IDENTITY", "").strip()
+              or None)
+    )
+    if not pkg_id or pkg_id == "-":
+        raise SystemExit(
+            "error: Mac App Store .pkg requires a 3rd Party Mac Developer "
+            "Installer identity (--sign-auto or --sign-pkg)")
+    out = BUILD / artifact_name(f"{version}-MAS", arch, "pkg")
+    out.unlink(missing_ok=True)
+    _run("productbuild",
+         "--component", app, "/Applications",
+         "--identifier", bundle_id,
+         "--version", version,
+         "--sign", pkg_id,
+         out)
     print(f"built {out}")
     return out
 
@@ -1335,12 +1627,46 @@ def main() -> int:
     ap.add_argument("--notarize-timeout",
                     help="max wait per notarytool submission, e.g. 90m "
                          "(env COMPARTMENT_NOTARIZE_TIMEOUT)")
+    ap.add_argument("--mac-app-store", action="store_true",
+                    help="build an App Sandbox bundle and Mac App Store .pkg "
+                         "(env COMPARTMENT_MAC_APP_STORE=1)")
+    ap.add_argument("--bundle-id",
+                    help="override CFBundleIdentifier "
+                         "(env COMPARTMENT_BUNDLE_ID)")
+    ap.add_argument("--build-number",
+                    help="override CFBundleVersion "
+                         "(env COMPARTMENT_BUILD_NUMBER)")
+    ap.add_argument("--copyright", dest="copyright_text",
+                    help="override NSHumanReadableCopyright "
+                         "(env COMPARTMENT_COPYRIGHT)")
+    ap.add_argument("--provisioning-profile",
+                    help="path to .provisionprofile embedded for Mac App Store "
+                         "(env COMPARTMENT_PROVISIONING_PROFILE)")
+    ap.add_argument("--app-group",
+                    help="App Group identifier for sandboxed POSIX shm_open "
+                         "(env COMPARTMENT_APP_GROUP)")
     args = ap.parse_args()
+    mac_app_store = (args.mac_app_store
+                     or _truthy_env("COMPARTMENT_MAC_APP_STORE"))
     app_id, pkg_id = _resolve_signing_identities(
-        args.sign_app, args.sign_pkg, args.sign_auto)
+        args.sign_app, args.sign_pkg, args.sign_auto,
+        mac_app_store=mac_app_store)
     notarize = args.notarize or _truthy_env("COMPARTMENT_NOTARIZE")
     notarize_kw = ({"timeout": args.notarize_timeout}
                    if args.notarize_timeout else {})
+    if mac_app_store and notarize:
+        raise SystemExit(
+            "error: --mac-app-store and --notarize are mutually exclusive "
+            "(Mac App Store builds are reviewed via App Store Connect)")
+    if mac_app_store:
+        if app_id == "-":
+            raise SystemExit(
+                "error: --mac-app-store requires a Mac App Store application "
+                "identity (--sign-auto or --sign-app)")
+        if args.pkg and not pkg_id:
+            raise SystemExit(
+                "error: --mac-app-store with --pkg requires a 3rd Party Mac "
+                "Developer Installer identity (--sign-auto or --sign-pkg)")
     if notarize:
         _asc_credentials()
         if app_id == "-":
@@ -1356,20 +1682,35 @@ def main() -> int:
         app_kw: dict = {"python": args.python, "min_macos": args.min_macos}
         if app_id != "-":
             app_kw["sign_identity"] = app_id
+        if mac_app_store:
+            app_kw["mac_app_store"] = True
+        if args.bundle_id is not None:
+            app_kw["bundle_id"] = args.bundle_id
+        if args.build_number is not None:
+            app_kw["build_number"] = args.build_number
+        if args.copyright_text is not None:
+            app_kw["copyright_text"] = args.copyright_text
+        if args.provisioning_profile is not None:
+            app_kw["provisioning_profile"] = args.provisioning_profile
+        if args.app_group is not None:
+            app_kw["app_group"] = args.app_group
         app = build_app(args.spec, **app_kw)
         if notarize:
             notarize_artifact(app, **notarize_kw)
             _verify_signature(app)
         artifacts = [app]
         containers: list[pathlib.Path] = []
-        if args.dmg:
+        if args.dmg and not mac_app_store:
             dmg = (build_dmg(app, sign_identity=app_id)
                    if app_id != "-" else build_dmg(app))
             containers.append(dmg)
             artifacts.append(dmg)
         if args.pkg:
-            pkg = (build_pkg(app, sign_identity=pkg_id)
-                   if pkg_id else build_pkg(app))
+            if mac_app_store:
+                pkg = build_mas_pkg(app, sign_identity=pkg_id)
+            else:
+                pkg = (build_pkg(app, sign_identity=pkg_id)
+                       if pkg_id else build_pkg(app))
             containers.append(pkg)
             artifacts.append(pkg)
         if notarize and len(containers) == 1:

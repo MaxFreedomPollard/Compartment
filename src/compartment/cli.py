@@ -2763,6 +2763,11 @@ def connect_present_agents(vault: str) -> list[str]:
     from argparse import Namespace
     from . import menubar
 
+    if sys.platform == "darwin" and os.environ.get("APP_SANDBOX_CONTAINER_ID"):
+        print("\nConnect agents from the CONNECT AN AGENT row in the menu bar "
+              "panel.")
+        return []
+
     here = [(t, name) for t, name in menubar.INTEGRATION_TARGETS
             if agent_present(t)]
     if not here:

@@ -650,3 +650,43 @@ def test_a_dash_that_never_says_where_it_serves_is_given_up_on(monkeypatch,
                 p.kill()
             p.wait(timeout=10)
         clicked.join(timeout=10)
+
+
+def test_app_sandbox_mcp_snippet_and_authorized_connect(tmp_path, monkeypatch):
+    import json
+    from compartment import menubar
+    monkeypatch.setattr(menubar.sys, "platform", "darwin")
+    monkeypatch.setenv("APP_SANDBOX_CONTAINER_ID", "com.example.compartment")
+    fake_exe = "/Applications/Compartment.app/Contents/MacOS/Compartment"
+    monkeypatch.setattr(menubar, "_bundle_launcher_exe", lambda: fake_exe)
+
+    vault = str(tmp_path / "memory.vault")
+    s = menubar.read_settings(vault)
+    assert set(s) == {"capture_hook", "search_starter_facts",
+                      "expire_memories", "auto_lock_minutes"}
+    assert s["capture_hook"] is False
+
+    snippet = json.loads(menubar.sandbox_mcp_snippet(vault, "antigravity"))
+    assert snippet["mcpServers"]["compartment"] == {
+        "command": fake_exe,
+        "args": ["-m", "compartment.cli", "--vault", vault,
+                 "--caller", "antigravity", "serve"],
+    }
+
+    ag_dir = tmp_path / "ag"
+    ag_dir.mkdir()
+    ok, msg = menubar.sandbox_connect_selected_path(vault, "antigravity", ag_dir)
+    assert ok, msg
+    written = json.loads((ag_dir / "mcp_config.json").read_text(encoding="utf-8"))
+    assert written["mcpServers"]["compartment"]["command"] == fake_exe
+    status = menubar.integration_status(vault)
+    assert status["antigravity"] is True
+    assert status["claude"] is False
+
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    ok_c, msg_c = menubar.sandbox_connect_selected_path(vault, "codex", codex_dir)
+    assert ok_c, msg_c
+    assert "[mcp_servers.compartment]" in (
+        codex_dir / "config.toml").read_text(encoding="utf-8")
+    assert menubar.integration_status(vault)["codex"] is True
