@@ -9,7 +9,7 @@ Need help with Compartment on macOS, Linux, or Windows? Reach out directly or br
 
 ## Contact
 
-* **Email support:** [support@bellrope.app](mailto:support@bellrope.app)
+* **Email support:** [maxpollard790@gmail.com](mailto:maxpollard790@gmail.com)
 * **Bug reports and feature requests:** [GitHub Issues](https://github.com/MaxFreedomPollard/Compartment/issues)
 * **Documentation:** [Compartment README](https://github.com/MaxFreedomPollard/Compartment#readme)
 * **Privacy policy:** [Compartment Privacy Policy](/Compartment/privacy)
