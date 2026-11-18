@@ -41,7 +41,7 @@ from .acl import VaultConfig
 from .platforms import file_signature
 
 AUTO_LOCK_CHOICES = [15, 30, 60, 0]          # 0 = never
-POPOVER_WIDTH = 440
+POPOVER_WIDTH = 460
 POPOVER_MAX_HEIGHT = 640
 CONTENT_INSET = 16
 CONTENT_WIDTH = POPOVER_WIDTH - CONTENT_INSET * 2

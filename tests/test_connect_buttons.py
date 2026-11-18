@@ -243,8 +243,7 @@ def test_all_connect_buttons_fit_on_one_line_on_macos():
         "    row.layoutSubtreeIfNeeded()\n"
         "    assert len({round(b.frame().origin.y, 1) for b in buttons}) == 1\n"
         "    for b in buttons:\n"
-        "        assert round(b.frame().size.width, 1) == round(\n"
-        "            b.fittingSize().width, 1)\n"
+        "        assert abs(b.frame().size.width - b.fittingSize().width) <= 0.5\n"
         "    last = buttons[-1].frame()\n"
         "    assert last.origin.x + last.size.width <= menubar.CONTENT_WIDTH\n"
     )

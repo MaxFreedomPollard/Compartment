@@ -208,7 +208,7 @@ def _libc():
         try:
             lib = ctypes.CDLL(ctypes.util.find_library(name) if name else None,
                               use_errno=True)
-        except OSError:
+        except (OSError, TypeError):
             continue
         if not hasattr(lib, "shm_open"):
             continue
