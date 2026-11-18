@@ -111,7 +111,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.check.outputs.tag }}
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0 (exact: no floating major tags are published)
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.0 (exact: no floating major tags are published)
       - name: A standalone, non-framework Python to embed
         # tools/build_macos_app.py explains why it must not be a framework
         # build: the app would then report itself as org.python.python.
