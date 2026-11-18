@@ -351,9 +351,13 @@ def test_a_long_list_of_passages_is_embedded_once_through_the_daemon(
     t.start()
     try:
         r = None
-        assert _wait_until(
-            lambda: (r := RemoteEmbedder.connect(path=daemon.path, spawn=False)) is not None,
-            10)
+
+        def _ready():
+            nonlocal r
+            r = RemoteEmbedder.connect(path=daemon.path, spawn=False)
+            return r is not None
+
+        assert _wait_until(_ready, 10)
         n = 33_000
         out = r.embed_passages([f"memory number {i}" for i in range(n)])
         assert out.shape == (n, r.dim)
