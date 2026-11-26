@@ -41,7 +41,7 @@ from .menubar import (APP_COMMAND, AUTO_LOCK_CHOICES, INTEGRATION_TARGETS,
                       change_passphrase, claim_first_run, create_vault,
                       default_backup_filename, default_vault, integrate,
                       lock_holder_pid, lock_vault, merge_vault,
-                      open_dashboard, stop_dashboard,
+                      open_dashboard, open_gui, stop_dashboard, stop_gui,
                       offers_settings, release_instance_lock,
                       run_in_background, self_check,
                       starter_note, summarise, unlock_vault,
@@ -152,6 +152,11 @@ def panel_rows(state: dict) -> list[tuple[str, str]]:
     # allowed to be.
     if state.get("connect_note"):
         rows.append(("note", state["connect_note"]))
+    if state.get("exists") and state["locked"] is False:
+        docs_n = int(state.get("documents") or 0)
+        rows.append(("heading", f"DOCUMENTS ({docs_n:,})" if docs_n > 0 else "DOCUMENTS"))
+        rows.append(("doc_search", "Search documents"))
+        rows.append(("gui", "Open GUI"))
     rows.append(("heading", f"LAST {RECENT_COUNT} MEMORIES"))
     recent = state.get("recent") or []
     if not state.get("exists"):
@@ -242,6 +247,14 @@ def _panel_command(vault: str | None = None) -> str:
     return f'"{sys.executable}" -m compartment.cli --vault "{vault}" panel'
 
 
+def _gui_command(vault: str | None = None) -> str:
+    exe = shutil.which("compartment")
+    vault = vault or env("VAULT") or str(home() / "memory.vault")
+    if exe:
+        return f'"{exe}" --vault "{vault}" gui'
+    return f'"{sys.executable}" -m compartment.cli --vault "{vault}" gui'
+
+
 def install_desktop_entry(vault: str | None = None) -> str:
     """Put Compartment in the applications menu. Returns what happened."""
     path = desktop_entry_path()
@@ -252,12 +265,16 @@ def install_desktop_entry(vault: str | None = None) -> str:
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=Compartment\n"
-            "Comment=Encrypted memory for AI agents\n"
+            "Comment=Encrypted memory and document vault for AI agents\n"
             f"Exec={_panel_command(vault)}\n"
             + (f"Icon={icon}\n" if icon.is_file() else "")
             + "Terminal=false\n"
             "Categories=Utility;Security;\n"
-            "Keywords=memory;vault;mcp;agent;\n",
+            "Keywords=memory;documents;vault;mcp;agent;\n"
+            "Actions=gui;\n\n"
+            "[Desktop Action gui]\n"
+            "Name=Open Compartment GUI\n"
+            f"Exec={_gui_command(vault)}\n",
             encoding="utf-8")
         path.chmod(0o644)
     except OSError as exc:
@@ -1290,6 +1307,88 @@ def run(vault: str | None = None, show: bool = False,
                                         redraw())).pack(side="left", padx=6)
             return
 
+        if (state["exists"] and state["locked"] is False
+                and panel.get("viewing_doc")):
+            doc = panel["viewing_doc"]
+            top = ttk.Frame(frame)
+            top.pack(fill="x", pady=(0, 6))
+            ttk.Button(top, text="← Back",
+                       command=lambda: (panel.update(viewing_doc=None,
+                                                     doc_copy_note=None),
+                                        redraw())).pack(side="left")
+            ttk.Button(top, text="Open in GUI",
+                       command=lambda did=doc.get("id"): open_gui(
+                           vault_path, doc_id=did)).pack(side="right")
+
+            def copy_doc_body():
+                txt = doc.get("content")
+                if txt is None:
+                    txt = doc.get("extracted_text") or doc.get("path") or ""
+                try:
+                    root.clipboard_clear()
+                    root.clipboard_append(str(txt))
+                    panel["doc_copy_note"] = "Copied to clipboard."
+                except Exception as exc:                # noqa: BLE001
+                    panel["doc_copy_note"] = f"Copy failed: {exc}"
+                redraw()
+
+            ttk.Button(top, text="Copy",
+                       command=copy_doc_body).pack(side="right", padx=(0, 6))
+            ttk.Label(frame, text=doc.get("title") or doc.get("path") or "Document",
+                      wraplength=WRAP, font=("Segoe UI", 10, "bold"),
+                      justify="left").pack(anchor="w")
+            meta = (f"{doc.get('namespace', 'main')}/{doc.get('path', '')} · "
+                    f"v{doc.get('version', 1)} · "
+                    f"{int(doc.get('size_bytes') or 0):,} B")
+            ttk.Label(frame, text=meta, foreground="#666",
+                      wraplength=WRAP, justify="left").pack(anchor="w", pady=(2, 0))
+            if panel.get("doc_copy_note"):
+                ttk.Label(frame, text=panel["doc_copy_note"],
+                          wraplength=WRAP).pack(anchor="w", pady=(4, 0))
+            ttk.Separator(frame).pack(fill="x", pady=8)
+            outline = doc.get("outline") or []
+            if outline:
+                heads = " · ".join(h.get("heading", "") for h in outline[:6])
+                ttk.Label(frame, text="SECTIONS",
+                          font=("Segoe UI", 8, "bold")).pack(anchor="w")
+                ttk.Label(frame, text=heads, foreground="#666",
+                          wraplength=WRAP, justify="left").pack(anchor="w", pady=(2, 6))
+            body_text = doc.get("content")
+            if body_text is None:
+                body_text = doc.get("extracted_text") or ""
+            if body_text:
+                clipped = body_text[:1800]
+                if len(body_text) > 1800 or doc.get("truncated"):
+                    clipped += "\n\n… (open in GUI to read or edit full document)"
+                ttk.Label(frame, text=clipped, wraplength=WRAP,
+                          justify="left").pack(anchor="w")
+            elif doc.get("is_binary"):
+                ttk.Label(
+                    frame,
+                    text=(f"Binary file ({doc.get('mime_type', 'application/octet-stream')}). "
+                          "Open in GUI to export or inspect."),
+                    foreground="#666", wraplength=WRAP,
+                    justify="left").pack(anchor="w")
+            else:
+                ttk.Label(frame, text="(empty document)",
+                          foreground="#666").pack(anchor="w")
+            mems = doc.get("memories") or []
+            if mems:
+                ttk.Separator(frame).pack(fill="x", pady=8)
+                stale_n = sum(1 for m in mems if m.get("stale"))
+                hdr = f"GROUNDED MEMORIES ({len(mems)}" + (
+                    f", {stale_n} stale)" if stale_n else ")")
+                ttk.Label(frame, text=hdr,
+                          font=("Segoe UI", 8, "bold")).pack(anchor="w")
+                for m in mems[:5]:
+                    prefix = "[STALE] " if m.get("stale") else "• "
+                    mt = " ".join((m.get("text") or "").split())
+                    ttk.Label(frame,
+                              text=prefix + mt[:110] + ("…" if len(mt) > 110 else ""),
+                              wraplength=WRAP, justify="left"
+                              ).pack(anchor="w", pady=(3, 0))
+            return
+
         ttk.Label(frame, text=summarise(state), wraplength=WRAP,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
         if state.get("error"):
@@ -1484,6 +1583,125 @@ def run(vault: str | None = None, show: bool = False,
             ttk.Label(frame, text=panel["connect_note"], wraplength=WRAP,
                       justify="left").pack(anchor="w", pady=(4, 0))
 
+        if state["exists"] and state["locked"] is False:
+            ttk.Separator(frame).pack(fill="x", pady=10)
+            docs_n = int(state.get("documents") or 0)
+            doc_hdr_row = ttk.Frame(frame)
+            doc_hdr_row.pack(fill="x")
+            ttk.Label(
+                doc_hdr_row,
+                text=f"DOCUMENTS ({docs_n:,})" if docs_n > 0 else "DOCUMENTS",
+                font=("Segoe UI", 8, "bold")).pack(side="left")
+            ttk.Button(
+                doc_hdr_row, text="Open GUI",
+                command=lambda: open_gui(vault_path)).pack(side="right")
+
+            dsearch_row = ttk.Frame(frame)
+            dsearch_row.pack(fill="x", pady=(6, 0))
+            dq_entry = ttk.Entry(dsearch_row)
+            if panel.get("doc_query"):
+                dq_entry.insert(0, panel["doc_query"])
+            dq_entry.pack(side="left", fill="x", expand=True)
+            panel["doc_entry"] = dq_entry
+
+            def do_doc_search(*_):
+                if panel.get("doc_searching"):
+                    return
+                q = dq_entry.get().strip()
+                panel["doc_query"] = q
+                panel["doc_searching"] = True
+                panel["doc_note"] = "Searching documents…"
+                panel["viewing_doc"] = None
+                redraw()
+
+                def searched(out):
+                    panel["doc_searching"] = False
+                    if isinstance(out, Exception):
+                        panel["doc_results"] = []
+                        panel["doc_note"] = f"Document search failed: {out}"
+                    elif not out.get("ok"):
+                        panel["doc_results"] = []
+                        panel["doc_note"] = (out.get("error")
+                                             or "Document search failed.")
+                    else:
+                        hits = out.get("results") or []
+                        total = int(out.get("total_documents") or 0)
+                        panel["doc_results"] = hits
+                        if hits:
+                            panel["doc_note"] = None
+                        elif total == 0:
+                            panel["doc_note"] = (
+                                "No documents stored yet. Open GUI to add or import.")
+                        else:
+                            panel["doc_note"] = f"No documents matched {q!r}."
+                    redraw()
+
+                off_ui(lambda: states.search_documents(q, limit=6), searched)
+
+            def clear_doc_search():
+                panel["doc_query"] = ""
+                panel["doc_results"] = None
+                panel["doc_note"] = None
+                panel["viewing_doc"] = None
+                panel["doc_copy_note"] = None
+                redraw()
+
+            def open_doc_hit(did, label_txt):
+                panel["doc_note"] = f"Opening {label_txt}…"
+                redraw()
+
+                def opened(out):
+                    if isinstance(out, Exception) or not out.get("ok") or not out.get("document"):
+                        panel["doc_note"] = (
+                            f"could not open document: {out}"
+                            if isinstance(out, Exception)
+                            else (out.get("error") or "could not open document"))
+                        redraw()
+                        return
+                    panel["doc_note"] = None
+                    panel["doc_copy_note"] = None
+                    panel["viewing_doc"] = out["document"]
+                    redraw()
+
+                off_ui(lambda: states.get_document(did, max_chars=24_000), opened)
+
+            dq_entry.bind("<Return>", do_doc_search)
+            ttk.Button(
+                dsearch_row, text="Search",
+                state="disabled" if panel.get("doc_searching") else "normal",
+                command=do_doc_search).pack(side="left", padx=(6, 0))
+            if panel.get("doc_results") is not None:
+                ttk.Button(dsearch_row, text="Clear",
+                           command=clear_doc_search).pack(side="left", padx=(4, 0))
+            if panel.get("doc_note"):
+                ttk.Label(frame, text=panel["doc_note"], foreground="#666",
+                          wraplength=WRAP, justify="left").pack(anchor="w", pady=(4, 0))
+            for d in (panel.get("doc_results") or [])[:6]:
+                pin = "★ " if d.get("pinned") else ""
+                title_s = d.get("title") or d.get("path") or "Document"
+                stale_s = (f" · {d['stale_memory_count']} stale"
+                           if d.get("stale_memory_count") else "")
+                lbl = (f"{pin}{title_s[:38]}"
+                       f"{'…' if len(title_s) > 38 else ''}  "
+                       f"(v{d.get('version', 1)}{stale_s})")
+                did = d.get("id")
+                ttk.Button(
+                    frame, text=lbl,
+                    command=lambda _did=did, _lbl=title_s: open_doc_hit(_did, _lbl)
+                ).pack(anchor="w", pady=(4, 0))
+                sub = f"{d.get('namespace', 'main')}/{d.get('path', '')}"
+                if d.get("best_section"):
+                    sub += f" [{d['best_section']}]"
+                ttk.Label(frame, text=sub, foreground="#666",
+                          wraplength=WRAP, justify="left").pack(anchor="w")
+                if d.get("excerpt"):
+                    snip = " ".join(str(d["excerpt"]).split())
+                    ttk.Label(
+                        frame,
+                        text=snip[:110] + ("…" if len(snip) > 110 else ""),
+                        foreground="#555", wraplength=WRAP,
+                        justify="left").pack(anchor="w")
+
         ttk.Separator(frame).pack(fill="x", pady=10)
         ttk.Label(frame, text=f"LAST {RECENT_COUNT} MEMORIES",
                   font=("Segoe UI", 8, "bold")).pack(anchor="w")
@@ -1540,7 +1758,11 @@ def run(vault: str | None = None, show: bool = False,
                            lambda: states.lock(lambda: lock_vault(vault_path)),
                            lambda _out: (panel.update(note=None,
                                                       changing=False,
-                                                      merging_src=None),
+                                                      merging_src=None,
+                                                      doc_query="",
+                                                      doc_results=None,
+                                                      doc_note=None,
+                                                      viewing_doc=None),
                                          refresh()))
                        ).pack(side="left", padx=6)
         if state["exists"] and state["locked"] is False:
@@ -1551,6 +1773,10 @@ def run(vault: str | None = None, show: bool = False,
                                             refresh())).pack(side="left", padx=6)
             ttk.Button(buttons, text="Dashboard",
                        command=lambda: open_dashboard(vault_path)
+                       ).pack(side="left", padx=6)
+        else:
+            ttk.Button(buttons, text="Open GUI",
+                       command=lambda: open_gui(vault_path)
                        ).pack(side="left", padx=6)
         ttk.Button(buttons, text="Quit", command=quit_app).pack(side="right")
 
@@ -1566,6 +1792,7 @@ def run(vault: str | None = None, show: bool = False,
         for child in win.winfo_children():
             child.destroy()
         panel["entries"] = []
+        panel["doc_entry"] = None
         state = states.snapshot()          # reads nothing: a redraw never waits
         panel["shown"] = state
 
@@ -1673,11 +1900,19 @@ def run(vault: str | None = None, show: bool = False,
                     return
             except Exception:                         # noqa: BLE001
                 pass
+        de = panel.get("doc_entry")
+        if de is not None:
+            try:
+                if de.winfo_exists() and win.focus_get() == de:
+                    return
+            except Exception:                         # noqa: BLE001
+                pass
         redraw()
 
     def quit_app() -> None:
         states.close()
         stop_dashboard()
+        stop_gui()
         icon = panel.get("icon")
         if icon is not None:
             try:
@@ -1698,12 +1933,18 @@ def run(vault: str | None = None, show: bool = False,
             menu=pystray.Menu(
                 pystray.MenuItem("Open Compartment", from_tray(show_panel),
                                  default=True),
+                pystray.MenuItem("Open GUI",
+                                 from_tray(lambda: open_gui(vault_path))),
                 pystray.MenuItem("Back up vault…", from_tray(do_backup)),
                 pystray.MenuItem("Lock now",
                                  from_tray(lambda: off_ui(
                                      lambda: states.lock(
                                          lambda: lock_vault(vault_path)),
-                                     lambda _out: (panel.update(note=None),
+                                     lambda _out: (panel.update(note=None,
+                                                                doc_query="",
+                                                                doc_results=None,
+                                                                doc_note=None,
+                                                                viewing_doc=None),
                                                    refresh())))),
                 pystray.MenuItem("Open dashboard",
                                  from_tray(lambda: open_dashboard(vault_path))),

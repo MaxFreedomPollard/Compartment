@@ -4,7 +4,7 @@ description: Sweep this conversation and save everything worth referencing again
 version: 1.0.0
 platforms: [macos, linux, windows]
 disable-model-invocation: true
-allowed-tools: mcp__compartment__memory_search, mcp__compartment__memory_store, mcp__compartment__memory_store_many, mcp__compartment__memory_status, mcp__compartment__memory_recent
+allowed-tools: mcp__compartment__memory_search, mcp__compartment__memory_store, mcp__compartment__memory_store_many, mcp__compartment__memory_status, mcp__compartment__memory_recent, mcp__compartment__doc_put, mcp__compartment__doc_patch, mcp__compartment__doc_get, mcp__compartment__doc_list, mcp__compartment__doc_search
 metadata:
   hermes:
     tags: [memory, compartment, context, session, recall]
@@ -33,6 +33,12 @@ release locations.
 **Then properly associate and store** every durable observation, decision,
 opinion and thought that is not publicly available: anything that would be
 expensive or impossible to work out again from scratch.
+
+**Persistent documents:** If this session produced or revised a durable long-form
+artifact (a specification, runbook, architecture plan, contract summary, tax/financial
+note, or structured reference), store or update it as a versioned document with
+`doc_put` / `doc_patch` first, and pass its `doc_id` (and optional `doc_section`)
+when storing atomic claims extracted from it so future updates flag stale memories.
 
 **Also store the session itself - as several one-claim memories, never one
 narrative:** one for what was asked, one for what it turned into, one for

@@ -152,10 +152,26 @@ text, dates or embeddings. It only adds tags unless you pass `--prune`,
 shows what would change.
 
 **A graph as well as a list.** `memory_link` records a relation: subject,
-predicate, object, optionally tied to a memory and to a validity window.
-`memory_relations` answers by entity, by predicate, or as of a date.
-Compartment stores and matches relations deterministically; the host model
-decides what to link.
+predicate, object, optionally tied to a memory (`src_id`), a persistent
+document (`doc_id`), and a validity window. `memory_relations` answers by
+entity, by predicate, or as of a date. Compartment stores and matches
+relations deterministically; the host model decides what to link.
+
+**Persistent encrypted documents (DMS) that strengthen core memory.**
+Atomic 200-character claims stay sharp because long-form specifications,
+runbooks, living notes, contracts, tax records, receipts, and binary files
+have a first-class encrypted, versioned home inside the same `.vault` file.
+Every content update creates an immutable version (`v1`, `v2`, ...) with full
+history and unified diffs, is chunked along Markdown section boundaries (with
+pure-stdlib text extraction for `.md`, `.txt`, `.html`, `.docx`, `.odt`,
+`.pptx`, `.xlsx`, `.epub`, `.rtf`, and simple `.pdf`), and is indexed for
+hybrid vector + keyword search (`doc_put`, `doc_patch`, `doc_get`, `doc_list`,
+`doc_search`, `doc_delete`, and `compartment doc ...`). Grounding an atomic
+memory with `doc_id` (and optional `doc_section`) pins it to that document
+version so later edits automatically flag outdated derived memories as stale
+(`doc_stale: true`), while reflexive `memory_search` calls automatically
+surface matching document passages alongside atomic memories without crowding
+them out.
 
 **Memories are data, not instructions.** Recalled memories are wrapped with
 a notice that they are stored data. Content from an untrusted source can be
@@ -203,6 +219,13 @@ vault and no key. Looking never locks, unlocks or rewrites the vault. It is
 meant to be one of the many apps on your
 computer, not something you have to learn: every function is a button or a
 switch, and the defaults were chosen by measurement.
+
+The **Open GUI** button (or `compartment gui` / `compartment app`) opens an
+optional full cross-platform desktop workspace (macOS, Windows, and Linux) for
+editing and browsing encrypted documents, viewing outlines, version history,
+diffs, grounded memories, staleness flags, relations, settings, backups, and
+imports/exports - with zero new dependencies and zero network sockets (it works
+even under `--assert-offline`).
 
 The **Dashboard** button opens the whole vault in your browser: growth over
 time, the relation graph with every entity named, tags, per-agent counts and
@@ -702,11 +725,13 @@ surface if you want to change something.
 
 ### In the app
 
-The panel behind the icon: **Unlock** and **Lock**, **Change password**,
-**Create memories automatically** (the capture hook), **Search starter
-facts**, **Auto-lock** (15, 30, 60 minutes or never), the **CONNECT AN
-AGENT** buttons for Claude, Hermes Agent, OpenClaw, AntiGravity and Codex, **Refresh** and
-**Quit**.
+The panel behind the icon keeps every lightweight control: **Unlock** and
+**Lock**, **Back up…** and **Merge…**, **Change password**, **Create memories
+automatically** (the capture hook), **Search starter facts**, **Forget memories
+when they expire**, **Auto-lock** (15, 30, 60 minutes or never), the **CONNECT
+AN AGENT** buttons for Claude, Hermes Agent, OpenClaw, AntiGravity and Codex,
+inline **Document Search** with quick preview, **Open GUI**, **Dashboard**,
+**Refresh** and **Quit**.
 
 ### Commands
 
@@ -718,13 +743,15 @@ Global flags, before the command: `--vault PATH`, `--caller NAME`,
 | `init` | create the vault. `--passphrase`, `--creator`, `--keychain`, `--no-session`, `--no-app` |
 | `unlock` / `lock` | open or close it. `--passphrase-stdin`, `--keyfile`, `--keychain`, `--once`; `lock --sign --identity` |
 | `status` / `verify` / `selftest` | what is in it, is it intact, does it work |
-| `store` / `get` / `forget` | one memory. `--source` (required), `--discovered`, `--expires`, `--namespace`, `--tag`, `--importance`, `--kind fact\|opinion`, `--supersedes ID`, `--keep-both`, `--quarantined`, `--raw`; `forget --shred` |
-| `search` / `recent` | find things. `--namespace`, `--tag`, `--top-k`, `--limit`, `--all`, `--json` |
+| `store` / `get` / `forget` | one memory. `--source` (required), `--discovered`, `--expires`, `--namespace`, `--tag`, `--importance`, `--kind fact\|opinion`, `--supersedes ID`, `--keep-both`, `--doc-id`, `--doc-section`, `--quarantined`, `--raw`; `forget --shred` |
+| `search` / `recent` | find things. `--namespace`, `--tag`, `--top-k`, `--doc-id`, `--no-documents`, `--limit`, `--all`, `--json` |
+| `doc` | encrypted, versioned document management: `put`, `patch`, `get`, `list`, `search`, `history`, `diff`, `memories`, `stale`, `compile`, `import`, `export`, `export-all`, `delete` (`--archive` / `--shred`) |
 | `expire` | remove expired memories |
 | `atomize` | list over-limit blob memories as JSONL (`--out` + `--plaintext`), apply an agent-written split plan (`--apply`) |
 | `opinions audit` | backfill `kind` on opinion-shaped records, cluster overlapping live opinions, resolve with `--keep-newest`. `--threshold`, `--no-backfill`, `--json` |
 | `link` / `relations` / `unlink` | the relation graph, with validity windows (`--from`, `--to`, `--as-of`) |
-| `panel` (`menubar`, `tray`) | the app. `--show`, `--self-check`, `--render`, `--login` |
+| `panel` (`menubar`, `tray`) | the status bar / tray app (includes inline document search). `--show`, `--self-check`, `--render`, `--login` |
+| `gui` (`app`) | optional cross-platform desktop GUI for documents, versions, diffs, memories, relations, and vault settings. `--doc`, `--self-check` |
 | `integrate <agent>` | wire claude, hermes, openclaw or any listed client, and install `/compartmentalize`. `--list`, `--all`, `--no-import`, `--no-hooks`; `integrate --refresh` updates the instructions an earlier install wrote into agent files and nothing else |
 | `hook` | the Claude Code capture hook: `install --pin-vault`, `uninstall`, `status`, `capture` |
 | `import-claude` | pull in what Claude Code already wrote. `--dir`, `--namespace`, `--dry-run` |

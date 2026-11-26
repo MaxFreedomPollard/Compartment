@@ -85,8 +85,19 @@ Slot secrets:
 
 `payload_plain = TLV(sections)`; currently one section, `"sqlite"` - a
 serialized SQLite database image (schema in `store.py`; includes records,
-FTS5 index, audit chain, meta).
+FTS5 index, relations, persistent encrypted documents/versions/chunks/doc_fts,
+audit chain, meta).
 `payload_ct = AEAD_seal(master_key, payload_plain, aad="compartment-payload:"+vault_id)`.
+
+Each document version in `document_versions` carries its own random 256-bit
+data key wrapped under `master_key` (`aad="compartment-doc-key:"+version_id`),
+sealing a binary envelope (`CDOC\x01 | u32 meta_len | canonical_json | raw_bytes`,
+optionally zlib-compressed) with `aad="compartment-doc-body:"+version_id`.
+Each indexed chunk in `document_chunks` is sealed under its version key with
+`aad="compartment-doc-chunk:"+chunk_id`. Destroying a version or document via
+crypto-shred (`doc delete --shred`) deletes its wrapped keys, rows, and
+`doc_fts` entries, `VACUUM`s the in-memory database, and atomically rewrites
+the sealed payload.
 
 TLV container:
 ```
@@ -114,8 +125,12 @@ write leaves no bytes behind. Ops:
 {"op":"reaffirm","id":"...","affirmed":t,"audit":AuditRow}
 {"op":"supersede","ids":["..."],"by":"...","audit":AuditRow}
 {"op":"link","audit":AuditRow,"relation":{"id","subject","predicate","object",
-  "ns","src_id",s|null,"valid_from",t|null,"valid_to",t|null,"prov",{...},"created",t}}
+  "ns","src_id",s|null,"doc_id",s|null,"valid_from",t|null,"valid_to",t|null,"prov",{...},"created",t}}
 {"op":"unlink","id":"...","audit":AuditRow}
+{"op":"doc_put","audit":AuditRow,"doc":{"id","version_id","version","ns","path","title",
+  "mime_type","is_binary","raw_b64","extracted_text","chunks":[...],"vecs":base64_f32,...}}
+{"op":"doc_meta","audit":AuditRow,"meta":{"id",...}}
+{"op":"doc_delete","id":"...","archive":true|false,"version":n|null,"shred":true|false,"audit":AuditRow}
 ```
 
 A reader encountering an op it does not know refuses the vault (tamper),

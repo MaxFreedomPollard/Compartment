@@ -191,6 +191,10 @@ class VaultView:
                 self._v._replay(entry)
             self._seq += len(cts)
             self._end += used
+            # Any journaled doc_put/doc_meta/doc_delete changes document_chunks;
+            # drop the lazy doc vector index so the next doc_search rebuilds it.
+            self._v.doc_index = None
+            self._v._doc_chunk_by_ikey = {}
         # A partial entry after the last whole one is an append still being
         # written. It is read next time, once it is complete.
         return "tail" if cts else "cached"
@@ -203,33 +207,34 @@ class VaultView:
             self._v.config = VaultConfig.load(self.path)
             self._cfg_sig = sig
 
-    # ---------------------------------------------------------------- answers
+    def _ensure_open(self) -> tuple[str | None, dict | None]:
+        """Ensure the read-only Vault is loaded and caught up.
 
-    def snapshot(self, limit: int = RECENT_DEFAULT) -> dict:
-        """Everything the panel shows about the vault itself. Never raises."""
+        Returns (how, None) on success or (None, error_or_locked_reply) if the
+        vault is missing, locked, or unreadable. Never writes to disk."""
         try:
             os.stat(self.path)
         except FileNotFoundError:
             self.drop()
-            return {"ok": True, "exists": False}
+            return None, {"ok": True, "exists": False}
         except OSError as exc:
             # A folder it may not read, a network share that stalled: the
             # vault may well be there. Not the same as missing.
-            return {"ok": False, "exists": True,
-                    "error": f"could not look at the vault file: {exc}"}
+            return None, {"ok": False, "exists": True,
+                          "error": f"could not look at the vault file: {exc}"}
         try:
             found = Vault.find_credential(self.path)
         except CryptoError as exc:
             # Could not tell: an unreadable credential file, a boot that
             # cannot be identified. Not the same thing as locked.
-            return {"ok": False, "exists": True,
-                    "error": f"could not check the stored unlock: {exc}"}
+            return None, {"ok": False, "exists": True,
+                          "error": f"could not check the stored unlock: {exc}"}
         except Exception as exc:                        # noqa: BLE001
-            return {"ok": False, "exists": True,
-                    "error": f"{type(exc).__name__}: {exc}"}
+            return None, {"ok": False, "exists": True,
+                          "error": f"{type(exc).__name__}: {exc}"}
         if found is None:
             self.drop()
-            return {"ok": True, "exists": True, "locked": True}
+            return None, {"ok": True, "exists": True, "locked": True}
         pw, key = found
         if self._v is not None and key is not None and key != self._key:
             self.drop()               # a different credential: read afresh
@@ -245,11 +250,25 @@ class VaultView:
                 if how == "full":
                     self._load(pw, key)
             self._config_current()
-            out = self._v.peek_recent(self.caller, limit=limit)
+            return how, None
         except CredentialRefused:
             self.drop()
-            return {"ok": True, "exists": True, "locked": True,
-                    "credential_refused": True}
+            return None, {"ok": True, "exists": True, "locked": True,
+                          "credential_refused": True}
+        except Exception as exc:                        # noqa: BLE001
+            self.drop()
+            return None, {"ok": False, "exists": True,
+                          "error": f"{type(exc).__name__}: {exc}"}
+
+    # ---------------------------------------------------------------- answers
+
+    def snapshot(self, limit: int = RECENT_DEFAULT) -> dict:
+        """Everything the panel shows about the vault itself. Never raises."""
+        how, err = self._ensure_open()
+        if err is not None:
+            return err
+        try:
+            out = self._v.peek_recent(self.caller, limit=limit)
         except Exception as exc:                        # noqa: BLE001
             self.drop()
             return {"ok": False, "exists": True,
@@ -257,7 +276,67 @@ class VaultView:
         counts = out["counts"]
         return {"ok": True, "exists": True, "locked": False,
                 "records": counts["total"], "organic": counts["organic"],
+                "documents": counts.get("documents", 0),
                 "recent": out["results"], "read": how}
+
+    def doc_search(self, query: str = "", limit: int = 6,
+                   status: str = "active") -> dict:
+        """Read-only document search for the top bar / tray panel.
+
+        Never writes to the vault or appends audit rows. Lazily builds only
+        the document chunk vector index on first search when documents exist,
+        leaving the starter-memory index untouched so idle RAM stays tiny."""
+        how, err = self._ensure_open()
+        if err is not None:
+            return err
+        try:
+            total_docs = self._v.db.document_count(include_archived=(status == "all"))
+            if total_docs == 0:
+                return {"ok": True, "exists": True, "locked": False,
+                        "results": [], "total_documents": 0, "read": how}
+            q = (query or "").strip()
+            lim = max(1, min(50, int(limit)))
+            if not q:
+                listing = self._v.doc_list(
+                    caller=self.caller, status=status, limit=lim)
+                return {"ok": True, "exists": True, "locked": False,
+                        "results": listing["documents"],
+                        "total_documents": listing["total"], "read": how}
+            if self._v.doc_index is None:
+                self._v._rebuild_doc_index()
+            try:
+                hits = self._v._search_documents_internal(
+                    q, caller=self.caller, status=status, top_k=lim,
+                    audit_read=False)
+            except Exception:                           # noqa: BLE001
+                hits = self._v._search_documents_internal(
+                    q, caller=self.caller, status=status, top_k=lim,
+                    audit_read=False, lexical_only=True)
+            return {"ok": True, "exists": True, "locked": False,
+                    "results": hits, "total_documents": total_docs,
+                    "read": how}
+        except Exception as exc:                        # noqa: BLE001
+            return {"ok": False, "exists": True,
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+    def doc_get(self, doc_id: str, *, max_chars: int = 24_000,
+                version: int | None = None,
+                section: str | None = None) -> dict:
+        """Read-only document preview for the top bar / tray panel."""
+        how, err = self._ensure_open()
+        if err is not None:
+            return err
+        try:
+            doc = self._v.doc_get(
+                doc_id, caller=self.caller, version=version, section=section,
+                max_chars=max(500, min(200_000, int(max_chars))),
+                include_memories=True, include_history=True,
+                include_binary=False, _audit=False)
+            return {"ok": True, "exists": True, "locked": False,
+                    "document": doc, "read": how}
+        except Exception as exc:                        # noqa: BLE001
+            return {"ok": False, "exists": True,
+                    "error": f"{type(exc).__name__}: {exc}"}
 
     def check_credential(self) -> None:
         """Between requests: drop the key if its credential has gone."""
@@ -292,6 +371,32 @@ def _handle(view: VaultView, line: str) -> dict:
         except (TypeError, ValueError):
             limit = RECENT_DEFAULT
         out = view.snapshot(limit=limit)
+    elif op == "doc_search":
+        try:
+            limit = int(req.get("limit", 6))
+        except (TypeError, ValueError):
+            limit = 6
+        out = view.doc_search(
+            str(req.get("query") or ""),
+            limit=limit,
+            status=str(req.get("status") or "active"),
+        )
+    elif op == "doc_get":
+        try:
+            max_chars = int(req.get("max_chars", 24_000))
+        except (TypeError, ValueError):
+            max_chars = 24_000
+        ver = req.get("version")
+        try:
+            ver = int(ver) if ver is not None else None
+        except (TypeError, ValueError):
+            ver = None
+        out = view.doc_get(
+            str(req.get("doc_id") or ""),
+            max_chars=max_chars,
+            version=ver,
+            section=(str(req["section"]) if req.get("section") else None),
+        )
     elif op == "drop":
         view.drop()
         out = {"ok": True}

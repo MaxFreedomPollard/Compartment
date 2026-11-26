@@ -30,6 +30,12 @@ release locations.
 opinion and thought that is not publicly available: anything that would be
 expensive or impossible to work out again from scratch.
 
+**Persistent documents:** If this session produced or revised a durable long-form
+artifact (a specification, runbook, architecture plan, contract summary, tax/financial
+note, or structured reference), store or update it as a versioned document with
+`doc_put` / `doc_patch` first, and pass its `doc_id` (and optional `doc_section`)
+when storing atomic claims extracted from it so future updates flag stale memories.
+
 **Also store the session itself - as several one-claim memories, never one
 narrative:** one for what was asked, one for what it turned into, one for
 what changed by the end, one for what is still open. That the work happened

@@ -1,7 +1,7 @@
 # Plugins, extensions and store listings
 
 Compartment is one Python package on PyPI and one MCP server
-(`compartment serve`, stdio, 14 memory tools). Everything below is a way for a
+(`compartment serve`, stdio, 20 MCP tools for encrypted memory and document management). Everything below is a way for a
 particular host or catalogue to find that server and start it. This page says,
 store by store, what the listing is, how a user installs from it, and what the
 maintainer has to do to publish or update it. The formats were checked against

@@ -131,6 +131,8 @@ def _drop_key(v: Vault) -> None:
         v.db.conn.close()
         v.index = None
         v._id_by_ikey = {}
+        v.doc_index = None
+        v._doc_chunk_by_ikey = {}
 
 
 # ---------------------------------------------------------------- snapshots
@@ -162,6 +164,14 @@ def snapshot_stats(v: Vault, caller: str = "dash") -> dict:
             f"SELECT COUNT(*) c FROM (SELECT subject_n e FROM relations "
             f"WHERE {ns} UNION SELECT object_n FROM relations WHERE {ns})",
             nsp + nsp).fetchone()["c"]
+        n_docs = con.execute(
+            f"SELECT COUNT(*) c FROM documents WHERE status != 'archived' AND {ns}",
+            nsp).fetchone()["c"]
+        n_doc_vers = con.execute(
+            f"SELECT COUNT(*) c FROM document_versions "
+            f"WHERE doc_id IN (SELECT id FROM documents WHERE {ns})",
+            nsp).fetchone()["c"]
+        n_grounded, n_stale = v.db.grounded_memory_counts(allowed)
 
         # Bucket in LOCAL time: every other timestamp on the page is rendered
         # with the browser's locale, and a UTC bucket would let the last bar
@@ -192,6 +202,8 @@ def snapshot_stats(v: Vault, caller: str = "dash") -> dict:
     return {
         "vault": st["vault"], "vault_id": st["vault_id"],
         "records": n_records, "relations": n_relations,
+        "documents": n_docs, "document_versions": n_doc_vers,
+        "grounded_memories": n_grounded, "stale_memories": n_stale,
         "entities": n_entities, "quarantined": n_quar,
         "namespaces": [e for e in st["namespaces"]
                        if e["namespace"] in allowed],
@@ -316,6 +328,35 @@ def snapshot_search(v: Vault, query: str, caller: str = "dash",
     return {"results": results}
 
 
+def snapshot_documents(v: Vault, caller: str = "dash",
+                       limit: int = 200) -> dict:
+    """Read-only document library summary for the dashboard."""
+    with v._oplock:
+        v._require_open()
+        return v.doc_list(caller=caller, status="all", limit=limit)
+
+
+def snapshot_doc(v: Vault, doc_id: str, caller: str = "dash",
+                 version: int | None = None) -> dict:
+    """Read-only decrypted view of one document (no audit/touch write)."""
+    with v._oplock:
+        v._require_open()
+        return v.doc_get(
+            doc_id, caller=caller, version=version, max_chars=200_000,
+            include_memories=True, include_history=True,
+            include_binary=False, _audit=False)
+
+
+def snapshot_doc_search(v: Vault, query: str, caller: str = "dash",
+                        top_k: int = 10) -> dict:
+    """Read-only document search (no audit/touch write)."""
+    with v._oplock:
+        v._require_open()
+        hits = v._search_documents_internal(
+            query, caller=caller, status="all", top_k=top_k, audit_read=False)
+        return {"results": hits}
+
+
 # ------------------------------------------------------------------ server
 
 def _make_handler(ref: _VaultRef, token: str):
@@ -398,6 +439,24 @@ def _make_handler(ref: _VaultRef, token: str):
                         self._json({"results": []})
                     else:
                         self._json(snapshot_search(ref.get(), q))
+                elif route == "api/documents":
+                    self._json(snapshot_documents(ref.get()))
+                elif route == "api/doc":
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    did = qs.get("id", [""])[0].strip()
+                    ver_s = qs.get("version", [""])[0].strip()
+                    if not did:
+                        self._json({"error": "BadRequest", "message": "id required"},
+                                   code=400)
+                    else:
+                        ver = int(ver_s) if ver_s.isdigit() else None
+                        self._json(snapshot_doc(ref.get(), did, version=ver))
+                elif route == "api/doc_search":
+                    q = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+                    if not q.strip():
+                        self._json({"results": []})
+                    else:
+                        self._json(snapshot_doc_search(ref.get(), q))
                 else:
                     self._send(404, b"not found", "text/plain")
             except (BrokenPipeError, ConnectionResetError):
@@ -591,6 +650,31 @@ tbody tr:hover{background:rgba(255,255,255,.025)}
 .mem .meta{color:var(--faint);font-size:11px;margin-top:3px}
 .mem .meta .ns{color:var(--dim)}
 .quar{color:var(--gold);font-size:11.5px}
+/* ---------- documents ---------- */
+.docrow{display:flex;align-items:center;gap:10px;padding:9px 10px;
+ border-bottom:1px solid var(--line);cursor:pointer;border-radius:8px;
+ transition:background .15s}
+.docrow:hover{background:rgba(255,255,255,.035)}
+.docrow .dt{font-weight:600;color:var(--tx)}
+.docrow .dp{font:11.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+ color:var(--dim)}
+.docrow .dm{margin-left:auto;font-size:11px;color:var(--faint);
+ display:flex;gap:8px;align-items:center;white-space:nowrap}
+.pill{font-size:10.5px;padding:2px 8px;border-radius:999px;
+ background:var(--card2);border:1px solid var(--line);color:var(--dim)}
+.pill.pin{color:var(--gold);border-color:rgba(232,179,57,.4)}
+.pill.stale{color:var(--red);border-color:rgba(255,107,107,.4)}
+.docview{margin-top:14px;background:rgba(10,12,17,.8);border:1px solid var(--line2);
+ border-radius:14px;padding:16px 18px;display:none}
+.docview .dvhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+ margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.docview pre{white-space:pre-wrap;word-break:break-word;max-height:420px;
+ overflow:auto;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+ color:#dce3f0;background:rgba(255,255,255,.02);padding:12px;border-radius:10px;
+ border:1px solid var(--line)}
+.btn{background:var(--card2);color:var(--tx);border:1px solid var(--line2);
+ border-radius:8px;padding:4px 10px;font-size:11.5px;cursor:pointer}
+.btn:hover{border-color:var(--blue)}
 footer{display:flex;justify-content:center;align-items:center;gap:8px;
  color:var(--faint);font-size:11px;margin-top:26px;letter-spacing:.3px}
 footer i{width:5px;height:5px;border-radius:50%;background:var(--green);
@@ -647,6 +731,16 @@ footer i{width:5px;height:5px;border-radius:50%;background:var(--green);
   <div id="results"></div>
  </div>
  <div class="panel wide">
+  <h2>Documents<span class="sub" id="doccount"></span></h2>
+  <div class="searchbox">
+   <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+   <input id="dq" placeholder="search persistent documents…" autocomplete="off">
+  </div>
+  <div class="chips" id="docfolders" style="margin-bottom:10px"></div>
+  <div id="doclist"></div>
+  <div class="docview" id="docview"></div>
+ </div>
+ <div class="panel wide">
   <h2>Most recent memories</h2>
   <div id="recent"></div>
  </div>
@@ -677,14 +771,14 @@ async function api(p){
 function setBadge(id,text,cls){const b=$(id);
  b.querySelector("span").textContent=text;if(cls)b.className="badge "+cls;}
 
-const TILE_AC={Memories:"#58a6ff",Relations:"#e8b339",Entities:"#7ee0ff",
- Namespaces:"#a78bfa","Quarantined":"#ff6b6b","Est. RAM":"#5fd38a",
- "Audit entries":"#8b98ad"};
+const TILE_AC={Memories:"#58a6ff",Documents:"#5fd38a",Relations:"#e8b339",
+ Entities:"#7ee0ff",Namespaces:"#a78bfa","Quarantined":"#ff6b6b",
+ "Est. RAM":"#5fd38a","Audit entries":"#8b98ad"};
 function tiles(s){
- const t=[["Memories",s.records],["Relations",s.relations],
-  ["Entities",s.entities],["Namespaces",s.namespaces.length],
-  ["Quarantined",s.quarantined],["Est. RAM",s.projected_ram_mb+" MB"],
-  ["Audit entries",s.audit_entries]];
+ const t=[["Memories",s.records],["Documents",s.documents||0],
+  ["Relations",s.relations],["Entities",s.entities],
+  ["Namespaces",s.namespaces.length],["Quarantined",s.quarantined],
+  ["Est. RAM",s.projected_ram_mb+" MB"],["Audit entries",s.audit_entries]];
  $("tiles").innerHTML=t.map(([l,n])=>
   `<div class="tile" style="--ac:${TILE_AC[l]}"><span class="spark"></span>`+
   `<div class="n">${typeof n==="number"?fmt(n):n}</div>`+
@@ -888,8 +982,64 @@ async function refresh(){
   const rec=await api("recent");
   $("recent").innerHTML=(rec.recent||[]).map(memline).join("")||
    '<span class="hint">no memories yet</span>';
+  await refreshDocs();
  }catch(e){$("vaultpath").innerHTML=`<span class="err">${esc(String(e))}</span>`;}
 }
+function fmtBytes(b){
+ if(b<1024)return b+" B";if(b<1048576)return (b/1024).toFixed(1)+" KB";
+ return (b/1048576).toFixed(2)+" MB";}
+function docrow(d){
+ const pins=d.pinned?'<span class="pill pin">pinned</span>':"";
+ const stale=d.stale_memory_count?`<span class="pill stale">${d.stale_memory_count} stale mem</span>`:"";
+ const mems=d.memory_count?`<span class="pill">${d.memory_count} mem</span>`:"";
+ const arch=d.status==="archived"?'<span class="pill">archived</span>':"";
+ return `<div class="docrow" data-id="${esc(d.id)}"><div>`+
+  `<div class="dt">${esc(d.title)}</div>`+
+  `<div class="dp">${esc(d.namespace)}/${esc(d.path)}</div>`+
+  (d.excerpt?`<div class="hint" style="margin-top:4px">${esc(d.excerpt)}</div>`:"")+
+  `</div><div class="dm">${pins}${stale}${mems}${arch}`+
+  `<span class="pill">v${d.version}</span><span>${fmtBytes(d.size_bytes||0)}</span>`+
+  `</div></div>`;
+}
+async function openDoc(id,ver){
+ const dv=$("docview");dv.style.display="block";
+ dv.innerHTML='<span class="hint">loading document…</span>';
+ const u="doc?id="+encodeURIComponent(id)+(ver?("&version="+ver):"");
+ const d=await api(u);
+ if(!d||d.error){dv.innerHTML=`<div class="hint err">${esc((d&&(d.message||d.error))||"failed")}</div>`;return;}
+ const vers=(d.versions||[]).map(v=>
+  `<button class="btn" data-ver="${v.version}">${v.version===d.requested_version?"● ":""}v${v.version}</button>`).join(" ");
+ const body=d.content!==undefined?d.content:(d.extracted_text||"(binary file: "+d.mime_type+", "+fmtBytes(d.version_size_bytes)+")");
+ const mems=(d.memories||[]).length?
+  `<div class="hint" style="margin-top:10px"><b>Grounded memories (${d.memories.length})</b></div>`+
+  d.memories.map(m=>`<div class="hint">${m.stale?'<span class="err">[stale v'+m.doc_version+']</span> ':""}${esc(m.text)}</div>`).join(""):"";
+ dv.innerHTML=`<div class="dvhead"><b>${esc(d.title)}</b>`+
+  `<span class="dp">${esc(d.namespace)}/${esc(d.path)} · v${d.requested_version} · ${esc(d.mime_type)}</span>`+
+  `<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">${vers}<button class="btn" id="closeDoc">Close</button></span></div>`+
+  `<pre>${esc(body)}</pre>${mems}`;
+ $("closeDoc").onclick=()=>{dv.style.display="none";};
+ dv.querySelectorAll("[data-ver]").forEach(b=>b.onclick=()=>openDoc(id,b.dataset.ver));
+}
+async function refreshDocs(){
+ if($("dq").value.trim())return;
+ const r=await api("documents");
+ if(!r||r.error){$("doclist").innerHTML='<span class="hint">documents unavailable</span>';return;}
+ $("doccount").textContent=r.total?`${fmt(r.total)} document${r.total===1?"":"s"}`:"";
+ chips("docfolders",r.folders||[],"folder","count");
+ $("doclist").innerHTML=(r.documents||[]).map(docrow).join("")||
+  '<span class="hint">no persistent documents yet - store one with <b>doc_put</b> or <b>compartment doc put</b></span>';
+ $("doclist").querySelectorAll(".docrow").forEach(el=>el.onclick=()=>openDoc(el.dataset.id));
+}
+let ddeb;
+$("dq").addEventListener("input",()=>{clearTimeout(ddeb);
+ ddeb=setTimeout(async()=>{
+  const q=$("dq").value.trim();
+  if(!q){await refreshDocs();return;}
+  const r=await api("doc_search?q="+encodeURIComponent(q));
+  if(!r||r.error){$("doclist").innerHTML=`<div class="hint err">${esc((r&&(r.message||r.error))||"search failed")}</div>`;return;}
+  $("doclist").innerHTML=(r.results||[]).map(docrow).join("")||'<span class="hint">no matching documents</span>';
+  $("doclist").querySelectorAll(".docrow").forEach(el=>el.onclick=()=>openDoc(el.dataset.id));
+ },250);});
 let deb;
 $("q").addEventListener("input",()=>{clearTimeout(deb);
  deb=setTimeout(async()=>{

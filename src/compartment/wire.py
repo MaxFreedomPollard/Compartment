@@ -61,6 +61,21 @@ _RECORD_KEY_LEGACY = (b"engram-record:",)
 _RECORD_BODY = b"compartment-record-body:"
 _RECORD_BODY_LEGACY = (b"engram-record-body:",)
 
+# --- documents -------------------------------------------------------------
+# Added for the encrypted Document Management System (DMS). Each document
+# version gets its own 256-bit data key wrapped under the master key so
+# crypto-shred destroys a version or whole document cleanly; chunks are sealed
+# under their version key with a distinct label.
+
+_DOC_KEY = b"compartment-doc-key:"
+_DOC_KEY_LEGACY: tuple[bytes, ...] = ()
+
+_DOC_BODY = b"compartment-doc-body:"
+_DOC_BODY_LEGACY: tuple[bytes, ...] = ()
+
+_DOC_CHUNK = b"compartment-doc-chunk:"
+_DOC_CHUNK_LEGACY: tuple[bytes, ...] = ()
+
 # --- memory packs ----------------------------------------------------------
 
 _PACK = b"compartment-pack:"
@@ -118,6 +133,21 @@ def record_key(record_id: str) -> tuple[bytes, tuple[bytes, ...]]:
 def record_body(record_id: str) -> tuple[bytes, tuple[bytes, ...]]:
     """Associated data over one record's ciphertext."""
     return _with(_RECORD_BODY, _RECORD_BODY_LEGACY, record_id.encode())
+
+
+def doc_key(version_id: str) -> tuple[bytes, tuple[bytes, ...]]:
+    """Associated data wrapping one document version's data key."""
+    return _with(_DOC_KEY, _DOC_KEY_LEGACY, version_id.encode())
+
+
+def doc_body(version_id: str) -> tuple[bytes, tuple[bytes, ...]]:
+    """Associated data over one document version's encrypted payload."""
+    return _with(_DOC_BODY, _DOC_BODY_LEGACY, version_id.encode())
+
+
+def doc_chunk(chunk_id: str) -> tuple[bytes, tuple[bytes, ...]]:
+    """Associated data over one indexed document chunk's ciphertext."""
+    return _with(_DOC_CHUNK, _DOC_CHUNK_LEGACY, chunk_id.encode())
 
 
 def pack(name: str) -> tuple[bytes, tuple[bytes, ...]]:

@@ -30,7 +30,7 @@ def test_every_tool_says_it_stays_on_this_machine():
     that weighs the hint treated a fully offline vault as an internet
     tool."""
     tools = [_dump(t) for t in _listed()]
-    assert len(tools) == 14
+    assert len(tools) == 20
     for t in tools:
         hints = t["annotations"]
         assert hints["openWorldHint"] is False, t["name"]
@@ -42,14 +42,15 @@ def test_the_hints_match_what_each_tool_does():
     hints = {t["name"]: t["annotations"] for t in map(_dump, _listed())}
     for name in ("memory_search", "memory_get", "memory_recent",
                  "memory_relations", "memory_list_namespaces",
-                 "memory_status", "memory_selftest"):
+                 "memory_status", "memory_selftest",
+                 "doc_get", "doc_list", "doc_search"):
         assert hints[name]["readOnlyHint"] is True, name
-    for name in ("memory_forget", "memory_unlink"):
+    for name in ("memory_forget", "memory_unlink", "doc_delete"):
         assert hints[name]["destructiveHint"] is True, name
     for name in ("memory_link", "memory_unlink", "memory_forget",
-                 "memory_lock", "memory_unlock"):
+                 "memory_lock", "memory_unlock", "doc_delete"):
         assert hints[name].get("idempotentHint") is True, name
-    for name in ("memory_store", "memory_store_many"):
+    for name in ("memory_store", "memory_store_many", "doc_put", "doc_patch"):
         assert not hints[name].get("idempotentHint"), name
 
 

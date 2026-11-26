@@ -46,6 +46,13 @@ DEFAULT_CONFIG = {
         "opinion_update_threshold": 0.80,
         "opinion_reaffirm_threshold": 0.97,
         "index_precision": "f32",
+        # Maximum uncompressed byte size of a single stored document version
+        # (default 32 MiB). Guards RAM since the vault DB lives in memory.
+        "max_document_bytes": 32 * 1024 * 1024,
+        # When True (default), memory_search also returns matching passages
+        # from persistent documents in a separate "documents" array alongside
+        # atomic memory "results" (zero work when the vault has no documents).
+        "search_documents_in_memory_search": True,
     },
 }
 

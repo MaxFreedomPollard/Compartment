@@ -30,7 +30,7 @@ import uuid
 
 import numpy as np
 
-from . import audit, crypto, gate, vaultfile, wire
+from . import audit, crypto, documents, gate, vaultfile, wire
 from .platforms import FileLock, detect_project_slug
 from .acl import AclError, VaultConfig
 from .crypto import CryptoError, TamperError
@@ -391,6 +391,7 @@ class Vault:
         self._embedder: Embedder | None = None
         self._locked = False
         self._id_by_ikey: dict[int, str] = {}
+        self._doc_chunk_by_ikey: dict[int, tuple[str, str]] = {}
         #: When the expiry sweep last ran. Zero means never, so the first read
         #: after opening always sweeps.
         self._last_expiry_sweep = 0.0
@@ -398,6 +399,7 @@ class Vault:
         if os.path.exists(path):
             self._disk_state = self._stat_disk()
         self.index = None
+        self.doc_index = None
         if build_index:
             self._rebuild_index()
 
@@ -715,8 +717,34 @@ class Vault:
         self.header.model = {"name": model_name, "sha256": emb.model_sha256,
                              "dim": emb.dim}
         self._embedder = emb
-        self._audit_and_capture(caller, "reembed",
-                                f"{len(rows)} records → model {model_name}")
+        doc_count = 0
+        if self.db.document_count() > 0:
+            for drow in self.db.conn.execute("SELECT * FROM documents ORDER BY id").fetchall():
+                ver = self.db.get_document_version(drow["id"])
+                if ver is None:
+                    continue
+                raw_b, meta = self.db.decrypt_document_version(ver, self._master)
+                text = meta.get("extracted_text", "")
+                if not text and not drow["is_binary"]:
+                    text = raw_b.decode("utf-8", errors="replace")
+                dtags = json.loads(drow["tags"])
+                chunks = documents.chunk_document(
+                    text, emb, title=drow["title"], path=drow["path"],
+                    summary=drow["summary"] or "", tags=dtags)
+                vecs = (emb.embed_passages([c["embed_text"] for c in chunks])
+                        if chunks else np.zeros((0, emb.dim), dtype=np.float32))
+                fts_header = " ".join(
+                    p for p in (drow["title"], drow["path"],
+                                drow["collection"] or "", drow["summary"] or "",
+                                " ".join(dtags)) if p)
+                self.db.replace_doc_chunks(
+                    drow["id"], ver["id"], chunks, vecs, self._master,
+                    fts_header=fts_header)
+                doc_count += 1
+        detail = f"{len(rows)} records → model {model_name}"
+        if doc_count:
+            detail += f" (+{doc_count} documents)"
+        self._audit_and_capture(caller, "reembed", detail)
         self._rebuild_index()
         self.save()
         return len(rows)
@@ -1105,6 +1133,18 @@ class Vault:
         precision = self.config.settings.get("index_precision", "f32")
         self.index = build_index(dim, ikeys, mat if mat.size else mat.reshape(0, dim),
                                  precision=precision)
+        self._rebuild_doc_index()
+
+    def _rebuild_doc_index(self) -> None:
+        dim = int(self.header.model["dim"])
+        precision = self.config.settings.get("index_precision", "f32")
+        cids, dids, ikeys, mat = self.db.all_doc_vectors()
+        self._doc_chunk_by_ikey = {
+            k: (cid, did) for k, cid, did in zip(ikeys, cids, dids)
+        }
+        self.doc_index = build_index(
+            dim, ikeys, mat if mat.size else np.zeros((0, dim), dtype=np.float32),
+            precision=precision)
 
     def _journal(self, *entries: dict) -> None:
         """Append under ONE file lock: one staleness check, one fsync, so no
@@ -1153,7 +1193,10 @@ class Vault:
                            discovered=r.get("discovered"),
                            expires=r.get("expires"),
                            kind=r.get("kind"),
-                           affirmed=r.get("affirmed"))
+                           affirmed=r.get("affirmed"),
+                           doc_id=r.get("doc_id"),
+                           doc_version=r.get("doc_version"),
+                           doc_section=r.get("doc_section"))
         elif op == "reaffirm":
             # The record may be gone (forgotten later in this same journal);
             # a replay must never be the thing that refuses to open a vault.
@@ -1191,9 +1234,70 @@ class Vault:
                 rel_id=r["id"], subject=r["subject"], predicate=r["predicate"],
                 obj=r["object"], ns=r["ns"], src_id=r.get("src_id"),
                 valid_from=r.get("valid_from"), valid_to=r.get("valid_to"),
-                prov=r["prov"], created=r["created"])
+                prov=r["prov"], created=r["created"], doc_id=r.get("doc_id"))
         elif op == "unlink":
             self.db.delete_relation(e["id"])
+        elif op == "doc_put":
+            d = e["doc"]
+            dim = int(self.header.model["dim"])
+            raw_b = base64.b64decode(d["raw_b64"])
+            chunks = d.get("chunks") or []
+            if chunks:
+                v_arr = np.frombuffer(
+                    base64.b64decode(d["vecs"]), dtype=np.float32)
+                vecs = v_arr.reshape(len(chunks), dim)
+            else:
+                vecs = np.zeros((0, dim), dtype=np.float32)
+            self.db.put_document_version(
+                doc_id=d["id"], version_id=d["version_id"], ns=d["ns"],
+                path=d["path"], title=d["title"], mime_type=d["mime_type"],
+                is_binary=bool(d.get("is_binary", False)), raw_bytes=raw_b,
+                extracted_text=d.get("extracted_text", ""), chunks=chunks,
+                vecs=vecs, master_key=self._master,
+                collection=d.get("collection"), tags=d.get("tags") or [],
+                summary=d.get("summary"), source=d.get("source"),
+                status=d.get("status") or "active",
+                pinned=bool(d.get("pinned", False)),
+                quarantined=bool(d.get("quarantined", False)),
+                change_note=d.get("change_note"), prov=d.get("prov") or {},
+                created=d.get("created"), updated=d.get("updated"),
+                expires=d.get("expires"), filename=d.get("filename"),
+                version_num=d.get("version"))
+        elif op == "doc_meta":
+            m = e["meta"]
+            if self.db.get_document(m["id"]) is not None:
+                kw: dict = {}
+                for k in ("path", "title", "collection", "tags", "summary",
+                          "source", "status", "pinned", "quarantined",
+                          "expires", "updated"):
+                    if k in m:
+                        kw[k] = m[k]
+                self.db.update_document_meta(m["id"], **kw)
+                if "chunks" in m and m.get("version_id"):
+                    dim = int(self.header.model["dim"])
+                    chunks = m["chunks"]
+                    v_arr = np.frombuffer(
+                        base64.b64decode(m["vecs"]), dtype=np.float32)
+                    vecs = (v_arr.reshape(len(chunks), dim)
+                            if chunks else np.zeros((0, dim), dtype=np.float32))
+                    self.db.replace_doc_chunks(
+                        m["id"], m["version_id"], chunks, vecs, self._master,
+                        fts_header=m.get("fts_header", ""))
+        elif op == "doc_delete":
+            did = e["id"]
+            if e.get("archive"):
+                if self.db.get_document(did) is not None:
+                    self.db.update_document_meta(
+                        did, status="archived", updated=e.get("updated"))
+            elif e.get("version") is not None:
+                if self.db.get_document(did) is not None:
+                    try:
+                        self.db.delete_document_version(
+                            did, int(e["version"]), shred=bool(e.get("shred")))
+                    except CryptoError:
+                        pass
+            else:
+                self.db.delete_document(did, shred=bool(e.get("shred")))
         else:
             raise TamperError(f"Unknown journal op {op!r}")
         # Link to the head this log actually has, keeping the original time.
@@ -1221,6 +1325,8 @@ class Vault:
               discovered: str | None = None, expires: str | None = None,
               kind: str = "fact", supersedes: list[str] | None = None,
               affirmed: float | None = None,
+              doc_id: str | None = None, doc_section: str | None = None,
+              doc_version: int | None = None,
               _journal: bool = True, _dedup: bool = True,
               _expiry_strict: bool = True, _gate: bool = True,
               _split_hint: str | None = None) -> dict:
@@ -1229,10 +1335,26 @@ class Vault:
         text, source, discovered, namespace = (
             clean_text(text), clean_text(source), clean_text(discovered),
             clean_text(namespace))
+        doc_id = clean_text(doc_id)
+        doc_section = clean_text(doc_section)
         tags = clean_text(tags)
         ns = namespace or self.config.default_namespace(caller)
         if pack is None:
             self.config.check(caller, ns, write=True)
+        resolved_doc_id: str | None = None
+        resolved_doc_ver: int | None = doc_version
+        resolved_doc_sec: str | None = (doc_section.strip()
+                                        if isinstance(doc_section, str)
+                                        and doc_section.strip() else None)
+        if doc_id and pack is None:
+            doc_row = self._resolve_document(doc_id, caller, namespace=None)
+            resolved_doc_id = doc_row["id"]
+            if resolved_doc_ver is None:
+                resolved_doc_ver = int(doc_row["current_version"])
+            if not (source or "").strip():
+                source = f"doc:{doc_row['path']} (v{resolved_doc_ver})"
+        elif doc_id:
+            resolved_doc_id = doc_id
         if not text.strip():
             raise CryptoError("Refusing to store empty text")
         kind = (kind or "fact").strip().lower()
@@ -1366,7 +1488,10 @@ class Vault:
                              # that restates a memory more atomically would
                              # destroy the one date it exists to preserve.
                              created=created, discovered=disc, expires=exp,
-                             kind=kind, affirmed=affirmed)
+                             kind=kind, affirmed=affirmed,
+                             doc_id=resolved_doc_id,
+                             doc_version=resolved_doc_ver,
+                             doc_section=resolved_doc_sec)
         row = self.db.get_row(rid)
         for seq, k in enumerate(self.db.vector_keys(rid)):
             self._id_by_ikey[k] = rid
@@ -1374,7 +1499,7 @@ class Vault:
         arow = self._audit_and_capture(caller, "store", f"ns={ns} id={rid}")
         entries = []
         if _journal:
-            entries.append({"op": "store", "audit": arow, "record": {
+            rec_payload = {
                 "id": rid, "ns": ns, "text": text,
                 "vec": base64.b64encode(vec.tobytes()).decode(),
                 "tags": tags or [], "importance": importance,
@@ -1382,7 +1507,12 @@ class Vault:
                 "created": row["created"], "source": row["source"],
                 "discovered": row["discovered"], "expires": row["expires"],
                 "kind": kind, "affirmed": affirmed,
-            }})
+            }
+            if resolved_doc_id is not None:
+                rec_payload["doc_id"] = resolved_doc_id
+                rec_payload["doc_version"] = resolved_doc_ver
+                rec_payload["doc_section"] = resolved_doc_sec
+            entries.append({"op": "store", "audit": arow, "record": rec_payload})
         # The replacement exists; now its predecessors leave the searchable
         # surface. Their entries follow the insert's, so a crash between the
         # two leaves both records live - visible and mendable - rather than
@@ -1400,6 +1530,8 @@ class Vault:
                "source": row["source"], "discovered": row["discovered"]}
         if row["expires"]:
             out["expires"] = row["expires"]
+        if resolved_doc_id is not None:
+            out.update(self._doc_grounding_info(row))
         if supersedes:
             out["superseded"] = list(supersedes)
         if similar:
@@ -1573,6 +1705,7 @@ class Vault:
         include_packs = self.config.settings.get("include_packs_in_search", True)
         seen = {e["namespace"] for e in self.db.namespaces()}
         seen |= self.db.relation_namespaces()
+        seen |= self.db.document_namespaces()
         for ns in sorted(seen):
             if ns.startswith("packs/") and not include_packs:
                 continue
@@ -1613,7 +1746,9 @@ class Vault:
                since: float | None = None, until: float | None = None,
                discovered_since: str | None = None,
                discovered_until: str | None = None,
-               queries: list[str] | None = None) -> dict:
+               queries: list[str] | None = None,
+               doc_id: str | None = None,
+               include_documents: bool = True) -> dict:
         """Recall. `top_k=None` (the default) returns every RELEVANT memory
         rather than a fixed number of them - see ranking.RESULT_RELATIVE_FLOOR.
         An explicit `top_k` still means exactly that many, unchanged, because
@@ -1621,11 +1756,18 @@ class Vault:
 
         `queries` optionally supplies decomposed sub-queries for multi-part
         questions: all facets are batch-embedded in one pass and fused by max
-        evidence per record so distinct topics do not dilute one vector."""
+        evidence per record so distinct topics do not dilute one vector.
+
+        `doc_id` optionally filters memories grounded in one persistent
+        document. When `include_documents=True` and the vault holds documents,
+        matching passages from persistent documents are also surfaced in a
+        separate `documents` list alongside `results` without displacing any
+        atomic memory."""
         self._require_open()
         query, namespace, tags = (clean_text(query), clean_text(namespace),
                                   clean_text(tags))
         queries = clean_text(queries)
+        doc_id = clean_text(doc_id)
         discovered_since, discovered_until = (clean_text(discovered_since),
                                               clean_text(discovered_until))
         self._maybe_expire()
@@ -1634,6 +1776,10 @@ class Vault:
             allowed = {namespace}
         else:
             allowed = set(self._readable_namespaces(caller))
+        filter_doc_id: str | None = None
+        if doc_id:
+            filter_doc_id = self._resolve_document(
+                doc_id, caller, namespace=namespace)["id"]
         # An explicit top_k is a hard window; otherwise gather up to the cap
         # and let relevance decide how many come back.
         adaptive = top_k is None
@@ -1655,16 +1801,17 @@ class Vault:
                 seen_f.add(fq.strip())
                 facets.append(fq.strip())
 
+        qvec_single = None
         if len(facets) <= 1:
             q_eff = facets[0] if facets else query
-            qvec = self.embedder.embed_query(q_eff)
+            qvec_single = self.embedder.embed_query(q_eff)
             # Filters below run after ranking, so a pool sized to top_k can be
             # emptied by them while matching records sit just past the cut.
             # Whether to widen turns only on how many candidates a pool finds,
             # so that is settled first and only the pool kept is scored.
-            pool, hits = self._pick_pool(q_eff, qvec, want)
+            pool, hits = self._pick_pool(q_eff, qvec_single, want)
             boosted, vec_score, static = self._rank_candidates(
-                q_eff, qvec, pool, allowed, hits)
+                q_eff, qvec_single, pool, allowed, hits)
         else:
             emb = self.embedder
             qvecs = (emb.embed_queries(facets)
@@ -1713,6 +1860,8 @@ class Vault:
             # the hour before the sweep gets to it. Being told a price that
             # expired is worse than not being told it.
             if self._is_expired(row):
+                continue
+            if filter_doc_id and row["doc_id"] != filter_doc_id:
                 continue
             if tags and not set(tags) <= set(json.loads(row["tags"])):
                 continue
@@ -1771,6 +1920,8 @@ class Vault:
             }
             if row["affirmed"]:
                 item["affirmed_local"] = local_stamp(row["affirmed"])
+            if row["doc_id"]:
+                item.update(self._doc_grounding_info(row))
             if row["quarantined"]:
                 item["quarantined"] = True
                 item["warning"] = QUARANTINE_WARNING
@@ -1780,7 +1931,18 @@ class Vault:
         # search audit entries live in RAM until next save/lock (no journal
         # write per search - reads shouldn't cost an fsync); acceptable, and
         # documented in SECURITY.md.
-        return {"results": results, "note": DATA_NOT_INSTRUCTIONS}
+        out: dict = {"results": results, "note": DATA_NOT_INSTRUCTIONS}
+        if (include_documents and filter_doc_id is None
+                and self.config.settings.get(
+                    "search_documents_in_memory_search", True)
+                and self.db.document_count() > 0):
+            doc_hits = self._search_documents_internal(
+                query, caller=caller, namespace=namespace, tags=tags,
+                status="active", top_k=min(5, max(3, want)),
+                queries=queries, qvec=qvec_single, audit_read=False)
+            if doc_hits:
+                out["documents"] = doc_hits
+        return out
 
     @_synchronized
     def recent(self, caller: str, namespace: str | None = None,
@@ -1821,7 +1983,8 @@ class Vault:
         rows = []
         for row in self.db.conn.execute(
                 "SELECT id, ns, tags, created, importance, quarantined, source, "
-                "discovered, expires, kind, affirmed "
+                "discovered, expires, kind, affirmed, doc_id, doc_version, "
+                "doc_section "
                 "FROM records WHERE superseded_by IS NULL ORDER BY created"):
             if row["ns"] not in allowed:
                 continue
@@ -1855,12 +2018,22 @@ class Vault:
                    "seeded": seeded}
             if row["affirmed"]:
                 rec["affirmed_local"] = local_stamp(row["affirmed"])
+            if row["doc_id"]:
+                rec.update(self._doc_grounding_info(row))
             if row["quarantined"]:
                 rec["quarantined"] = True
             out.append(rec)
-        return {"results": out,
-                "counts": {"total": total, "organic": organic,
-                           "seeded": total - organic}}
+        docs_count = (self.db.document_count(namespace, include_archived=False)
+                      if namespace is not None else
+                      sum(1 for r in self.db.conn.execute(
+                          "SELECT ns FROM documents WHERE status != 'archived'")
+                          if r["ns"] in allowed)
+                      if self.db.document_count() > 0 else 0)
+        counts = {"total": total, "organic": organic,
+                  "seeded": total - organic}
+        if docs_count > 0:
+            counts["documents"] = docs_count
+        return {"results": out, "counts": counts}
 
     @_synchronized
     def get(self, record_id: str, caller: str) -> dict:
@@ -1886,6 +2059,8 @@ class Vault:
         if row["affirmed"]:
             out["affirmed"] = row["affirmed"]
             out["affirmed_local"] = local_stamp(row["affirmed"])
+        if row["doc_id"]:
+            out.update(self._doc_grounding_info(row))
         if row["superseded_by"]:
             # Fetch by id still works - history stays readable - but the
             # reader is told, in the record itself, where the live version is.
@@ -2095,7 +2270,7 @@ class Vault:
     def link(self, subject: str, predicate: str, obj: str, caller: str,
              namespace: str | None = None, src_id: str | None = None,
              valid_from: float | None = None, valid_to: float | None = None,
-             _journal: bool = True) -> dict:
+             doc_id: str | None = None, _journal: bool = True) -> dict:
         """Record one relation in the memory graph: subject -predicate→ object.
         Deterministic storage; the judgment of WHAT to link belongs to the
         host model (or the user), exactly like memory curation. Idempotent:
@@ -2105,6 +2280,7 @@ class Vault:
         subject, predicate, obj, namespace = (
             clean_text(subject), clean_text(predicate), clean_text(obj),
             clean_text(namespace))
+        doc_id = clean_text(doc_id)
         ns = namespace or self.config.default_namespace(caller)
         self.config.check(caller, ns, write=True)
         for label, val in (("subject", subject), ("predicate", predicate),
@@ -2113,6 +2289,10 @@ class Vault:
                 raise CryptoError(f"Refusing to link an empty {label}")
         if src_id is not None and self.db.get_row(src_id) is None:
             raise CryptoError(f"link: no memory record {src_id!r} to attach to")
+        resolved_doc_id: str | None = None
+        if doc_id:
+            resolved_doc_id = self._resolve_document(
+                doc_id, caller, namespace=None)["id"]
         dupe = self.db.find_relation(subject, predicate, obj, ns)
         if dupe is not None:
             return {"id": dupe["id"], "duplicate": True, "namespace": ns}
@@ -2120,19 +2300,26 @@ class Vault:
                 "session": env("SESSION", "-")}
         rid = self.db.insert_relation(
             rel_id=None, subject=subject, predicate=predicate, obj=obj, ns=ns,
-            src_id=src_id, valid_from=valid_from, valid_to=valid_to, prov=prov)
+            src_id=src_id, valid_from=valid_from, valid_to=valid_to, prov=prov,
+            doc_id=resolved_doc_id)
         row = self.db.get_relation(rid)
         arow = self._audit_and_capture(
             caller, "link", f"{subject.strip()} -[{predicate.strip()}]→ "
                             f"{obj.strip()} (ns={ns})")
         if _journal:
-            self._journal({"op": "link", "audit": arow, "relation": {
+            rel_payload = {
                 "id": rid, "subject": subject, "predicate": predicate,
                 "object": obj, "ns": ns, "src_id": src_id,
                 "valid_from": valid_from, "valid_to": valid_to,
                 "prov": prov, "created": row["created"],
-            }})
-        return {"id": rid, "duplicate": False, "namespace": ns}
+            }
+            if resolved_doc_id is not None:
+                rel_payload["doc_id"] = resolved_doc_id
+            self._journal({"op": "link", "audit": arow, "relation": rel_payload})
+        out = {"id": rid, "duplicate": False, "namespace": ns}
+        if resolved_doc_id is not None:
+            out["doc_id"] = resolved_doc_id
+        return out
 
     @_synchronized
     def unlink(self, relation_id: str, caller: str) -> dict:
@@ -2166,12 +2353,16 @@ class Vault:
         rows = self.db.query_relations(entity=entity, subject=subject,
                                        predicate=predicate, obj=obj,
                                        as_of=as_of, ns_in=allowed, limit=limit)
-        out = [{"id": r["id"], "subject": r["subject"],
-                "predicate": r["predicate"], "object": r["object"],
-                "namespace": r["ns"], "src_id": r["src_id"],
-                "valid_from": r["valid_from"], "valid_to": r["valid_to"],
-                "created": r["created"], "provenance": json.loads(r["prov"])}
-               for r in rows]
+        out = []
+        for r in rows:
+            item = {"id": r["id"], "subject": r["subject"],
+                    "predicate": r["predicate"], "object": r["object"],
+                    "namespace": r["ns"], "src_id": r["src_id"],
+                    "valid_from": r["valid_from"], "valid_to": r["valid_to"],
+                    "created": r["created"], "provenance": json.loads(r["prov"])}
+            if r["doc_id"]:
+                item["doc_id"] = r["doc_id"]
+            out.append(item)
         self._audit_and_capture(caller, "relations", f"hits={len(out)}")
         return {"relations": out, "note": DATA_NOT_INSTRUCTIONS}
 
@@ -2224,6 +2415,8 @@ class Vault:
             self.db.conn.close()
             self.index = None
             self._id_by_ikey = {}
+            self.doc_index = None
+            self._doc_chunk_by_ikey = {}
 
     # ---------------------------------------------------------------- status
 
@@ -2234,8 +2427,9 @@ class Vault:
         without one and sees the whole vault."""
         self._require_open()
         n = self.db.count()
+        n_doc_chunks = self.db.document_chunk_count()
         dim = int(self.header.model["dim"])
-        vec_bytes = n * dim * 4
+        vec_bytes = (n + n_doc_chunks) * dim * 4
         from . import embed_daemon
         emb = self._embedder
         daemon_on = embed_daemon.enabled(self._embed_daemon_setting())
@@ -2264,6 +2458,22 @@ class Vault:
                 organic += 1
         superseded = self.db.superseded_count()
         live = n - superseded
+        allowed_ns = (None if caller is None
+                      else set(self._readable_namespaces(caller)))
+        if allowed_ns is None:
+            n_docs = self.db.document_count()
+            n_active_docs = self.db.document_count(include_archived=False)
+            doc_bytes = self.db.document_total_bytes()
+        else:
+            n_docs = sum(
+                1 for r in self.db.conn.execute("SELECT ns FROM documents")
+                if r["ns"] in allowed_ns)
+            n_active_docs = sum(
+                1 for r in self.db.conn.execute(
+                    "SELECT ns FROM documents WHERE status != 'archived'")
+                if r["ns"] in allowed_ns)
+            doc_bytes = self.db.document_total_bytes(allowed_ns)
+        grounded_n, stale_grounded_n = self.db.grounded_memory_counts(allowed_ns)
         return {
             "vault": self.path,
             "vault_id": self.header.vault_id,
@@ -2273,6 +2483,13 @@ class Vault:
             "seeded_records": live - organic,
             "superseded_records": superseded,
             "relations": self.db.relation_count(),
+            "documents": n_docs,
+            "active_documents": n_active_docs,
+            "document_versions": self.db.document_version_count(),
+            "document_chunks": n_doc_chunks,
+            "document_bytes": doc_bytes,
+            "grounded_memories": grounded_n,
+            "stale_grounded_memories": stale_grounded_n,
             "expiring_records": self.db.expiring_count(),
             "expired_pending": (len(self._expired_today())
                                 if not self.expiry_enabled() else 0),
@@ -2519,6 +2736,177 @@ class Vault:
                     if t.startswith("id:"):
                         seed_by_tag[t] = srow["id"]
 
+            # -- documents (merged before records/relations so doc_id remaps) --
+            doc_id_map: dict[str, str] = {}
+            docs_imported = 0
+            doc_versions_added = 0
+            docs_updated = 0
+            if other_db.document_count() > 0:
+                dim = int(self.header.model["dim"])
+                for drow in other_db.conn.execute(
+                        "SELECT * FROM documents ORDER BY created, id").fetchall():
+                    dns = drow["ns"]
+                    self.config.check(caller, dns, write=True)
+                    other_did = drow["id"]
+                    other_tags = json.loads(drow["tags"])
+                    target_doc = (self.db.get_document(other_did)
+                                  or self.db.find_document_by_path(dns, drow["path"]))
+                    if target_doc is not None and target_doc["ns"] != dns:
+                        target_doc = self.db.find_document_by_path(dns, drow["path"])
+                    other_vers = other_db.conn.execute(
+                        "SELECT * FROM document_versions WHERE doc_id = ? "
+                        "ORDER BY version ASC", (other_did,)).fetchall()
+                    if not other_vers:
+                        continue
+                    if target_doc is None:
+                        dest_did = (other_did
+                                    if self.db.get_document(other_did) is None
+                                    else uuid.uuid4().hex)
+                        doc_id_map[other_did] = dest_did
+                        cur_ver_id = drow["current_version_id"]
+                        # Preload chunk rows/vecs for current version if same model.
+                        other_chunks = []
+                        other_vecs = np.zeros((0, dim), dtype=np.float32)
+                        if same_model and cur_ver_id:
+                            crows = other_db.conn.execute(
+                                "SELECT * FROM document_chunks WHERE version_id = ? "
+                                "ORDER BY seq", (cur_ver_id,)).fetchall()
+                            if crows:
+                                other_chunks = [{
+                                    "seq": int(cr["seq"]),
+                                    "section": cr["section"] or "",
+                                    "char_start": int(cr["char_start"]),
+                                    "char_end": int(cr["char_end"]),
+                                    "text": other_db.decrypt_document_chunk(
+                                        cr, other_master),
+                                } for cr in crows]
+                                other_vecs = np.vstack([
+                                    np.frombuffer(cr["vec"], dtype=np.float32)
+                                    for cr in crows])
+                        for vidx, vrow in enumerate(other_vers):
+                            raw_b, vmeta = other_db.decrypt_document_version(
+                                vrow, other_master)
+                            ext_txt = vmeta.get("extracted_text", "")
+                            if not ext_txt and not vrow["is_binary"]:
+                                ext_txt = raw_b.decode("utf-8", errors="replace")
+                            is_last = (vidx == len(other_vers) - 1)
+                            if is_last:
+                                if same_model and other_chunks:
+                                    ch_list, ch_vecs = other_chunks, other_vecs
+                                else:
+                                    ch_list = documents.chunk_document(
+                                        ext_txt, self.embedder,
+                                        title=drow["title"], path=drow["path"],
+                                        summary=drow["summary"] or "",
+                                        tags=other_tags)
+                                    ch_vecs = (self.embedder.embed_passages(
+                                        [c["embed_text"] for c in ch_list])
+                                        if ch_list else np.zeros((0, dim), dtype=np.float32))
+                            else:
+                                ch_list = []
+                                ch_vecs = np.zeros((0, dim), dtype=np.float32)
+                            self.db.put_document_version(
+                                doc_id=dest_did, version_id=None, ns=dns,
+                                path=drow["path"], title=drow["title"],
+                                mime_type=vrow["mime_type"],
+                                is_binary=bool(vrow["is_binary"]),
+                                raw_bytes=raw_b, extracted_text=ext_txt,
+                                chunks=ch_list, vecs=ch_vecs,
+                                master_key=self._master,
+                                collection=drow["collection"], tags=other_tags,
+                                summary=drow["summary"], source=drow["source"],
+                                status=drow["status"],
+                                pinned=bool(drow["pinned"]),
+                                quarantined=bool(drow["quarantined"]),
+                                change_note=vrow["change_note"],
+                                prov=json.loads(vrow["prov"]),
+                                created=instant(drow["created"]),
+                                updated=instant(vrow["created"]),
+                                expires=drow["expires"],
+                                filename=vmeta.get("filename"),
+                                version_num=int(vrow["version"]))
+                            doc_versions_added += 1
+                        docs_imported += 1
+                    else:
+                        dest_did = target_doc["id"]
+                        doc_id_map[other_did] = dest_did
+                        have_shas = {
+                            r["sha256"] for r in self.db.conn.execute(
+                                "SELECT sha256 FROM document_versions WHERE doc_id = ?",
+                                (dest_did,)).fetchall()
+                        }
+                        cur_tags = json.loads(target_doc["tags"])
+                        merged_tags = sorted(set(cur_tags) | set(other_tags))
+                        meta_changed = False
+                        if merged_tags != sorted(set(cur_tags)):
+                            meta_changed = True
+                        new_pinned = bool(target_doc["pinned"]) or bool(drow["pinned"])
+                        if new_pinned != bool(target_doc["pinned"]):
+                            meta_changed = True
+                        latest_other = other_vers[-1]
+                        if (latest_other["sha256"] not in have_shas
+                                and float(drow["updated"]) >= float(target_doc["updated"])):
+                            raw_b, vmeta = other_db.decrypt_document_version(
+                                latest_other, other_master)
+                            ext_txt = vmeta.get("extracted_text", "")
+                            if not ext_txt and not latest_other["is_binary"]:
+                                ext_txt = raw_b.decode("utf-8", errors="replace")
+                            if same_model:
+                                crows = other_db.conn.execute(
+                                    "SELECT * FROM document_chunks WHERE version_id = ? "
+                                    "ORDER BY seq", (latest_other["id"],)).fetchall()
+                                if crows:
+                                    ch_list = [{
+                                        "seq": int(cr["seq"]),
+                                        "section": cr["section"] or "",
+                                        "char_start": int(cr["char_start"]),
+                                        "char_end": int(cr["char_end"]),
+                                        "text": other_db.decrypt_document_chunk(
+                                            cr, other_master),
+                                    } for cr in crows]
+                                    ch_vecs = np.vstack([
+                                        np.frombuffer(cr["vec"], dtype=np.float32)
+                                        for cr in crows])
+                                else:
+                                    ch_list = []
+                                    ch_vecs = np.zeros((0, dim), dtype=np.float32)
+                            else:
+                                ch_list = documents.chunk_document(
+                                    ext_txt, self.embedder,
+                                    title=drow["title"], path=target_doc["path"],
+                                    summary=drow["summary"] or target_doc["summary"] or "",
+                                    tags=merged_tags)
+                                ch_vecs = (self.embedder.embed_passages(
+                                    [c["embed_text"] for c in ch_list])
+                                    if ch_list else np.zeros((0, dim), dtype=np.float32))
+                            self.db.put_document_version(
+                                doc_id=dest_did, version_id=None, ns=dns,
+                                path=target_doc["path"],
+                                title=drow["title"] or target_doc["title"],
+                                mime_type=latest_other["mime_type"],
+                                is_binary=bool(latest_other["is_binary"]),
+                                raw_bytes=raw_b, extracted_text=ext_txt,
+                                chunks=ch_list, vecs=ch_vecs,
+                                master_key=self._master,
+                                collection=drow["collection"] or target_doc["collection"],
+                                tags=merged_tags,
+                                summary=drow["summary"] or target_doc["summary"],
+                                source=drow["source"] or target_doc["source"],
+                                status=drow["status"],
+                                pinned=new_pinned,
+                                quarantined=bool(target_doc["quarantined"]) or bool(drow["quarantined"]),
+                                change_note=latest_other["change_note"],
+                                prov=json.loads(latest_other["prov"]),
+                                updated=instant(latest_other["created"]),
+                                expires=drow["expires"] or target_doc["expires"],
+                                filename=vmeta.get("filename"))
+                            doc_versions_added += 1
+                            docs_updated += 1
+                        elif meta_changed:
+                            self.db.update_document_meta(
+                                dest_did, tags=merged_tags, pinned=new_pinned)
+                            docs_updated += 1
+
             other_rows = other_db.conn.execute(
                 "SELECT * FROM records ORDER BY created, id").fetchall()
             id_map: dict[str, str] = {}
@@ -2637,6 +3025,12 @@ class Vault:
                             reconciled += 1
                         continue
 
+                mapped_doc = None
+                if row["doc_id"]:
+                    mapped_doc = doc_id_map.get(row["doc_id"])
+                    if (mapped_doc is None
+                            and self.db.get_document(row["doc_id"]) is not None):
+                        mapped_doc = row["doc_id"]
                 inserted_id = self.db.insert(
                     record_id=target_rid, ns=ns, text=other_text, vec=vecs,
                     tags=row_tags, importance=float(row["importance"]),
@@ -2645,7 +3039,9 @@ class Vault:
                     created=instant(row["created"]), source=row["source"],
                     discovered=row["discovered"], expires=exp,
                     kind=row["kind"], affirmed=instant(row["affirmed"]),
-                    superseded_by=None)
+                    superseded_by=None, doc_id=mapped_doc,
+                    doc_version=row["doc_version"],
+                    doc_section=row["doc_section"])
                 id_map[rid] = inserted_id
                 if seed_tags:
                     for t in seed_tags:
@@ -2689,21 +3085,29 @@ class Vault:
                         mapped_src = rel["src_id"]
                 rel_id = (rel["id"]
                           if self.db.get_relation(rel["id"]) is None else None)
+                mapped_rel_doc = None
+                if rel["doc_id"]:
+                    mapped_rel_doc = doc_id_map.get(rel["doc_id"])
+                    if (mapped_rel_doc is None
+                            and self.db.get_document(rel["doc_id"]) is not None):
+                        mapped_rel_doc = rel["doc_id"]
                 self.db.insert_relation(
                     rel_id=rel_id, subject=rel["subject"],
                     predicate=rel["predicate"], obj=rel["object"], ns=r_ns,
                     src_id=mapped_src, valid_from=rel["valid_from"],
                     valid_to=rel["valid_to"], prov=json.loads(rel["prov"]),
-                    created=instant(rel["created"]))
+                    created=instant(rel["created"]), doc_id=mapped_rel_doc)
                 relations_added += 1
         finally:
             other_db.conn.close()
 
         self._rebuild_index()
+        doc_detail = (f" +{docs_imported} documents (+{doc_versions_added} versions)"
+                      if (docs_imported or doc_versions_added) else "")
         self._audit_and_capture(
             caller, "merge-vault",
             f"from={loaded.header.vault_id[:12]} +{imported} records "
-            f"+{relations_added} relations ({duplicates_skipped} dupes, "
+            f"+{relations_added} relations{doc_detail} ({duplicates_skipped} dupes, "
             f"{seeded_skipped} seeded, {tombstoned} superseded)")
         self.save()
         return {
@@ -2717,7 +3121,10 @@ class Vault:
             "superseded": tombstoned,
             "relations_added": relations_added,
             "relations_skipped": relations_skipped,
-            "reembedded": (not same_model) and imported > 0,
+            "documents_imported": docs_imported,
+            "document_versions_added": doc_versions_added,
+            "documents_updated": docs_updated,
+            "reembedded": (not same_model) and (imported > 0 or docs_imported > 0 or docs_updated > 0),
         }
 
     # ---------------------------------------------------------- export/import
@@ -2725,14 +3132,16 @@ class Vault:
     @_synchronized
     def export_jsonl(self, caller: str = "user", *,
                      include_seeded: bool = True,
-                     include_relations: bool = False) -> str:
+                     include_relations: bool = False,
+                     include_documents: bool = False) -> str:
         self._require_open()
         lines = []
+        rec_n = 0
         for row in self.db.conn.execute("SELECT * FROM records ORDER BY created, id"):
             if not include_seeded and (
                     row["pack"] is not None or is_seeded(row["tags"])):
                 continue
-            lines.append(json.dumps({
+            rec_obj = {
                 "id": row["id"], "namespace": row["ns"],
                 "text": self.db.decrypt_text(row, self._master),
                 "tags": json.loads(row["tags"]), "importance": row["importance"],
@@ -2743,12 +3152,18 @@ class Vault:
                 "expires": row["expires"], "kind": row["kind"],
                 "affirmed": row["affirmed"],
                 "superseded_by": row["superseded_by"],
-            }, sort_keys=True))
+            }
+            if row["doc_id"]:
+                rec_obj["doc_id"] = row["doc_id"]
+                rec_obj["doc_version"] = row["doc_version"]
+                rec_obj["doc_section"] = row["doc_section"]
+            lines.append(json.dumps(rec_obj, sort_keys=True))
+            rec_n += 1
         rel_n = 0
         if include_relations:
             for rel in self.db.conn.execute(
                     "SELECT * FROM relations ORDER BY created, id"):
-                lines.append(json.dumps({
+                rel_obj = {
                     "type": "relation",
                     "id": rel["id"],
                     "namespace": rel["ns"],
@@ -2760,11 +3175,61 @@ class Vault:
                     "valid_to": rel["valid_to"],
                     "provenance": json.loads(rel["prov"]),
                     "created": rel["created"],
-                }, sort_keys=True))
+                }
+                if rel["doc_id"]:
+                    rel_obj["doc_id"] = rel["doc_id"]
+                lines.append(json.dumps(rel_obj, sort_keys=True))
                 rel_n += 1
-        rec_n = len(lines) - rel_n
-        detail = f"{rec_n} records" + (
-            f", {rel_n} relations" if include_relations else "")
+        doc_n = 0
+        if include_documents:
+            for drow in self.db.conn.execute(
+                    "SELECT * FROM documents ORDER BY created, id").fetchall():
+                vers = []
+                for vrow in self.db.conn.execute(
+                        "SELECT * FROM document_versions WHERE doc_id = ? "
+                        "ORDER BY version ASC", (drow["id"],)).fetchall():
+                    raw_b, vmeta = self.db.decrypt_document_version(
+                        vrow, self._master)
+                    v_item = {
+                        "version": int(vrow["version"]),
+                        "mime_type": vrow["mime_type"],
+                        "is_binary": bool(vrow["is_binary"]),
+                        "sha256": vrow["sha256"],
+                        "size_bytes": int(vrow["size_bytes"]),
+                        "change_note": vrow["change_note"],
+                        "provenance": json.loads(vrow["prov"]),
+                        "created": vrow["created"],
+                        "extracted_text": vmeta.get("extracted_text", ""),
+                        "filename": vmeta.get("filename"),
+                    }
+                    if vrow["is_binary"]:
+                        v_item["content_base64"] = base64.b64encode(raw_b).decode()
+                    else:
+                        v_item["content"] = raw_b.decode("utf-8", errors="replace")
+                    vers.append(v_item)
+                lines.append(json.dumps({
+                    "type": "document",
+                    "id": drow["id"],
+                    "namespace": drow["ns"],
+                    "path": drow["path"],
+                    "title": drow["title"],
+                    "mime_type": drow["mime_type"],
+                    "collection": drow["collection"],
+                    "tags": json.loads(drow["tags"]),
+                    "summary": drow["summary"],
+                    "source": drow["source"],
+                    "status": drow["status"],
+                    "pinned": bool(drow["pinned"]),
+                    "quarantined": bool(drow["quarantined"]),
+                    "created": drow["created"],
+                    "updated": drow["updated"],
+                    "expires": drow["expires"],
+                    "versions": vers,
+                }, sort_keys=True))
+                doc_n += 1
+        detail = (f"{rec_n} records"
+                  + (f", {rel_n} relations" if include_relations else "")
+                  + (f", {doc_n} documents" if include_documents else ""))
         self._audit_and_capture(caller, "export", detail)
         return "\n".join(lines) + ("\n" if lines else "")
 
@@ -2783,8 +3248,59 @@ class Vault:
         # trailing \r from CRLF is whitespace to json.loads.
         items = [json.loads(l) for l in text.lstrip("\ufeff").split("\n")
                  if l.strip()]
-        records = [r for r in items if r.get("type") != "relation"]
+        docs = [r for r in items if r.get("type") == "document"]
         relations = [r for r in items if r.get("type") == "relation"]
+        records = [r for r in items
+                   if r.get("type") not in ("relation", "document")]
+
+        # Restore documents first so records and relations referencing them
+        # resolve via doc_id_map cleanly.
+        doc_id_map: dict[str, str] = {}
+        doc_n = 0
+        for d in docs:
+            d_ns = namespace or d.get("namespace") or self.config.default_namespace(caller)
+            vers = d.get("versions") or []
+            if not vers:
+                if "content" in d or "content_base64" in d:
+                    vers = [{
+                        "content": d.get("content"),
+                        "content_base64": d.get("content_base64"),
+                        "mime_type": d.get("mime_type"),
+                        "extracted_text": d.get("extracted_text"),
+                        "change_note": d.get("change_note"),
+                        "filename": d.get("filename"),
+                    }]
+            dest_did = None
+            for v_item in vers:
+                res_d = self.doc_put(
+                    path=d.get("path"),
+                    doc_id=dest_did,
+                    content=v_item.get("content"),
+                    content_base64=v_item.get("content_base64"),
+                    title=d.get("title"),
+                    namespace=d_ns,
+                    mime_type=v_item.get("mime_type") or d.get("mime_type"),
+                    collection=d.get("collection"),
+                    tags=d.get("tags"),
+                    summary=d.get("summary"),
+                    source=d.get("source"),
+                    extracted_text=v_item.get("extracted_text"),
+                    status=d.get("status") or "active",
+                    pinned=bool(d.get("pinned", False)),
+                    quarantined=bool(d.get("quarantined", False)),
+                    change_note=v_item.get("change_note"),
+                    expires=d.get("expires"),
+                    filename=v_item.get("filename"),
+                    caller=caller,
+                    prov=v_item.get("provenance"),
+                    _journal=False,
+                )
+                dest_did = res_d["id"]
+            if dest_did and d.get("id"):
+                doc_id_map[str(d["id"])] = dest_did
+            if dest_did:
+                doc_n += 1
+
         # Cleaned here, not only in store(): the vectors below are computed
         # before store() sees the text, and the tokenizer refuses a lone
         # surrogate exactly as it does there.
@@ -2828,6 +3344,13 @@ class Vault:
             if r.get("superseded_by"):
                 history += 1
                 continue
+            mapped_doc = None
+            raw_doc = r.get("doc_id")
+            if raw_doc:
+                mapped_doc = doc_id_map.get(str(raw_doc))
+                if (mapped_doc is None
+                        and self.db.get_document(str(raw_doc)) is not None):
+                    mapped_doc = str(raw_doc)
             # store() returns without inserting when the record is a
             # near-duplicate, so counting every line would report a file that
             # was already present as fully imported. _gate=False: an import
@@ -2845,6 +3368,9 @@ class Vault:
                              created=r.get("created"),
                              kind=r.get("kind") or "fact",
                              affirmed=r.get("affirmed"),
+                             doc_id=mapped_doc,
+                             doc_version=r.get("doc_version"),
+                             doc_section=r.get("doc_section"),
                              vec=vec, _journal=False, _expiry_strict=False,
                              _gate=False)
             if r.get("id") and res.get("id"):
@@ -2862,21 +3388,1422 @@ class Vault:
                 if (mapped_src is None
                         and self.db.get_row(str(raw_src)) is not None):
                     mapped_src = str(raw_src)
+            mapped_rel_doc = None
+            if rel.get("doc_id"):
+                mapped_rel_doc = doc_id_map.get(str(rel["doc_id"]))
+                if (mapped_rel_doc is None
+                        and self.db.get_document(str(rel["doc_id"])) is not None):
+                    mapped_rel_doc = str(rel["doc_id"])
             res_rel = self.link(
                 rel["subject"], rel["predicate"], rel["object"],
                 caller=caller, namespace=namespace or rel.get("namespace"),
                 src_id=mapped_src, valid_from=instant(rel.get("valid_from")),
-                valid_to=instant(rel.get("valid_to")), _journal=False)
+                valid_to=instant(rel.get("valid_to")), doc_id=mapped_rel_doc,
+                _journal=False)
             if not res_rel.get("duplicate"):
                 rel_n += 1
         self._audit_and_capture(
             caller, "import", f"{n} records, {skipped} duplicates skipped"
+                              + (f", {doc_n} documents" if docs else "")
                               + (f", {rel_n} relations" if relations else "")
                               + (f", {stale} expired skipped" if stale else "")
                               + (f", {history} superseded skipped"
                                  if history else ""))
         self.save()
         return n
+
+    # ---------------------------------------- persistent document management
+
+    def _doc_grounding_info(self, row) -> dict:
+        """Grounding metadata for a memory record linked to a document."""
+        did = row["doc_id"]
+        if not did:
+            return {}
+        info: dict = {"doc_id": did}
+        if row["doc_version"] is not None:
+            info["doc_version"] = int(row["doc_version"])
+        if row["doc_section"]:
+            info["doc_section"] = row["doc_section"]
+        doc = self.db.get_document(did)
+        if doc is None:
+            info["doc_missing"] = True
+            info["doc_stale"] = True
+            return info
+        info["doc_path"] = doc["path"]
+        info["doc_title"] = doc["title"]
+        info["doc_current_version"] = int(doc["current_version"])
+        info["doc_status"] = doc["status"]
+        stale = (doc["status"] == "archived"
+                 or (row["doc_version"] is not None
+                     and int(row["doc_version"]) < int(doc["current_version"])))
+        if stale:
+            info["doc_stale"] = True
+        return info
+
+    def _resolve_document(self, ref: str, caller: str,
+                          namespace: str | None = None, *,
+                          require_write: bool = False):
+        """Look up a document by `doc_id` or canonical `path`, enforcing ACL."""
+        ref_clean = clean_text(ref)
+        if not isinstance(ref_clean, str) or not ref_clean.strip():
+            raise CryptoError("Document reference (doc_id or path) is required.")
+        ref_s = ref_clean.strip()
+        row = self.db.get_document(ref_s)
+        if row is not None:
+            if namespace is not None and row["ns"] != namespace:
+                raise CryptoError(
+                    f"Document {ref_s!r} lives in namespace {row['ns']!r}, "
+                    f"not {namespace!r}.")
+            self.config.check(caller, row["ns"], write=require_write)
+            return row
+        try:
+            norm = documents.normalize_doc_path(ref_s)
+        except CryptoError:
+            raise CryptoError(f"No document {ref_s!r}") from None
+        if namespace is not None:
+            self.config.check(caller, namespace, write=require_write)
+            row = self.db.find_document_by_path(namespace, norm)
+            if row is None:
+                raise CryptoError(
+                    f"No document at path {norm!r} in namespace {namespace!r}")
+            return row
+        allowed = self._readable_namespaces(caller)
+        matches = []
+        for ns in allowed:
+            cand = self.db.find_document_by_path(ns, norm)
+            if cand is not None:
+                matches.append(cand)
+        if not matches:
+            raise CryptoError(f"No document {ref_s!r}")
+        if len(matches) > 1:
+            ns_list = ", ".join(m["ns"] for m in matches)
+            raise CryptoError(
+                f"Document path {norm!r} exists in multiple namespaces "
+                f"({ns_list}); pass namespace or doc_id to disambiguate.")
+        row = matches[0]
+        self.config.check(caller, row["ns"], write=require_write)
+        return row
+
+    @staticmethod
+    def _format_doc_summary(row, *, memory_counts: tuple[int, int] | None = None) -> dict:
+        item = {
+            "id": row["id"],
+            "namespace": row["ns"],
+            "path": row["path"],
+            "folder": documents.folder_of(row["path"]),
+            "title": row["title"],
+            "mime_type": row["mime_type"],
+            "is_binary": bool(row["is_binary"]),
+            "collection": row["collection"],
+            "tags": json.loads(row["tags"]),
+            "summary": row["summary"],
+            "source": row["source"],
+            "status": row["status"],
+            "pinned": bool(row["pinned"]),
+            "version": int(row["current_version"]),
+            "size_bytes": int(row["size_bytes"]),
+            "sha256": row["sha256"],
+            "created": row["created"],
+            "created_local": local_stamp(row["created"]),
+            "updated": row["updated"],
+            "updated_local": local_stamp(row["updated"]),
+            "expires": row["expires"],
+            "provenance": json.loads(row["prov"]),
+        }
+        if memory_counts is not None:
+            item["memory_count"] = memory_counts[0]
+            item["stale_memory_count"] = memory_counts[1]
+        if row["quarantined"]:
+            item["quarantined"] = True
+            item["warning"] = QUARANTINE_WARNING
+        return item
+
+    def _apply_doc_index_delta(self, added: list[tuple[int, str, str, np.ndarray]],
+                               removed: list[int]) -> None:
+        if self.doc_index is None:
+            return
+        for k in removed:
+            self.doc_index.remove(k)
+            self._doc_chunk_by_ikey.pop(k, None)
+        for k, cid, did, vec in added:
+            self._doc_chunk_by_ikey[k] = (cid, did)
+            self.doc_index.add(k, vec)
+
+    @_synchronized
+    def doc_put(
+        self,
+        path: str | None = None,
+        *,
+        content: str | None = None,
+        raw_bytes: bytes | None = None,
+        content_base64: str | None = None,
+        doc_id: str | None = None,
+        title: str | None = None,
+        namespace: str | None = None,
+        mime_type: str | None = None,
+        collection: str | None = None,
+        tags: list[str] | None = None,
+        summary: str | None = None,
+        source: str | None = None,
+        extracted_text: str | None = None,
+        status: str | None = None,
+        pinned: bool | None = None,
+        quarantined: bool | None = None,
+        change_note: str | None = None,
+        new_path: str | None = None,
+        expires: str | None = None,
+        filename: str | None = None,
+        caller: str = "user",
+        prov: dict | None = None,
+        _journal: bool = True,
+    ) -> dict:
+        """Create a persistent encrypted document, append a new immutable
+        version, or update its metadata/location.
+
+        Content is deduplicated per document by SHA-256: saving identical
+        content updates metadata if requested without creating a redundant
+        version. Updating content creates version N+1, re-chunks and re-embeds
+        for hybrid search, and reports any grounded atomic memories that now
+        lag behind the new version."""
+        self._require_open()
+        self._refuse_if_diverged()
+        path = clean_text(path)
+        new_path = clean_text(new_path)
+        title = clean_text(title)
+        namespace = clean_text(namespace)
+        collection = clean_text(collection)
+        summary = clean_text(summary)
+        source = clean_text(source)
+        extracted_text = clean_text(extracted_text)
+        change_note = clean_text(change_note)
+        tags = clean_text(tags)
+
+        if status is not None and status not in documents.VALID_DOC_STATUSES:
+            raise CryptoError(
+                f"Invalid document status {status!r}; expected one of "
+                f"{', '.join(documents.VALID_DOC_STATUSES)}")
+
+        # Resolve existing document if updating by doc_id or (ns, path).
+        existing = None
+        if doc_id:
+            existing = self._resolve_document(
+                doc_id, caller, namespace=namespace, require_write=True)
+            ns = existing["ns"]
+        else:
+            ns = namespace or self.config.default_namespace(caller)
+            self.config.check(caller, ns, write=True)
+            if path:
+                norm_lookup = documents.normalize_doc_path(path)
+                existing = self.db.find_document_by_path(ns, norm_lookup)
+
+        # Decode incoming payload if any.
+        has_payload = any(x is not None for x in (content, raw_bytes, content_base64))
+        if sum(x is not None for x in (content, raw_bytes, content_base64)) > 1:
+            raise CryptoError(
+                "Pass only one of 'content', 'content_base64', or 'raw_bytes'.")
+
+        raw: bytes | None = None
+        if content is not None:
+            if not isinstance(content, str):
+                raise CryptoError("'content' must be a string")
+            raw = clean_text(content).encode("utf-8")
+        elif content_base64 is not None:
+            try:
+                raw = base64.b64decode(content_base64, validate=True)
+            except Exception as exc:
+                raise CryptoError(
+                    f"Invalid base64 in content_base64: {exc}") from exc
+        elif raw_bytes is not None:
+            raw = bytes(raw_bytes)
+
+        if raw is not None:
+            max_bytes = int(self.config.settings.get(
+                "max_document_bytes", documents.DEFAULT_MAX_DOC_BYTES))
+            if max_bytes > 0 and len(raw) > max_bytes:
+                raise CryptoError(
+                    f"Document is {len(raw):,} bytes, exceeding "
+                    f"max_document_bytes ({max_bytes:,}). Increase "
+                    "settings.max_document_bytes in the vault config if intended.")
+
+        if existing is None and not has_payload:
+            raise CryptoError(
+                "Creating a new document requires 'content', 'content_base64', "
+                "or 'raw_bytes'.")
+
+        # Determine target canonical path.
+        if new_path is not None:
+            target_path = documents.normalize_doc_path(new_path)
+        elif existing is not None:
+            target_path = existing["path"]
+        else:
+            target_path = documents.normalize_doc_path(
+                path, title=title, mime_type=mime_type)
+
+        # Check path collision on rename.
+        if existing is not None and target_path != existing["path"]:
+            conflict = self.db.find_document_by_path(ns, target_path)
+            if conflict is not None and conflict["id"] != existing["id"]:
+                raise CryptoError(
+                    f"Cannot move document to {target_path!r}: another document "
+                    f"({conflict['id']}) already exists at that path in {ns!r}.")
+
+        exp_val = (expiry_date(expires, strict=True)
+                   if expires not in (None, "") else
+                   (existing["expires"] if existing is not None else None))
+
+        # Fast path: metadata-only update OR unchanged content SHA-256.
+        same_content = (
+            existing is not None
+            and (raw is None or crypto.sha256(raw) == existing["sha256"])
+            and extracted_text is None
+        )
+        if same_content:
+            did = existing["id"]
+            new_title = title.strip() if (title and title.strip()) else existing["title"]
+            new_coll = (collection if collection is not None
+                        else existing["collection"])
+            new_tags = (list(tags) if tags is not None
+                        else json.loads(existing["tags"]))
+            new_sum = summary if summary is not None else existing["summary"]
+            new_src = source if source is not None else existing["source"]
+            new_status = status if status is not None else existing["status"]
+            new_pinned = (bool(pinned) if pinned is not None
+                          else bool(existing["pinned"]))
+            new_quar = (bool(quarantined) if quarantined is not None
+                        else bool(existing["quarantined"]))
+            meta_changed = (
+                target_path != existing["path"]
+                or new_title != existing["title"]
+                or new_coll != existing["collection"]
+                or new_tags != json.loads(existing["tags"])
+                or new_sum != existing["summary"]
+                or new_src != existing["source"]
+                or new_status != existing["status"]
+                or new_pinned != bool(existing["pinned"])
+                or new_quar != bool(existing["quarantined"])
+                or exp_val != existing["expires"]
+            )
+            if not meta_changed:
+                cur_row = self.db.get_document(did)
+                mc = self.db.doc_memory_counts([did]).get(did, (0, 0))
+                out = self._format_doc_summary(cur_row, memory_counts=mc)
+                out["created_new"] = False
+                out["unchanged"] = True
+                return out
+
+            now = time.time()
+            self.db.update_document_meta(
+                did, path=target_path, title=new_title, collection=new_coll,
+                tags=new_tags, summary=new_sum, source=new_src,
+                status=new_status, pinned=new_pinned, quarantined=new_quar,
+                expires=exp_val, updated=now)
+            # Re-index search header/chunks if title/path/summary/tags changed.
+            j_meta: dict = {
+                "id": did, "path": target_path, "title": new_title,
+                "collection": new_coll, "tags": new_tags, "summary": new_sum,
+                "source": new_src, "status": new_status, "pinned": new_pinned,
+                "quarantined": new_quar, "expires": exp_val, "updated": now,
+            }
+            if (target_path != existing["path"] or new_title != existing["title"]
+                    or new_sum != existing["summary"]
+                    or new_tags != json.loads(existing["tags"])
+                    or new_coll != existing["collection"]):
+                ver_row = self.db.get_document_version(did)
+                if ver_row is not None:
+                    cur_raw, cur_meta = self.db.decrypt_document_version(
+                        ver_row, self._master)
+                    ext_txt = cur_meta.get("extracted_text", "")
+                    if not ext_txt and not ver_row["is_binary"]:
+                        ext_txt = cur_raw.decode("utf-8", errors="replace")
+                    chunks = documents.chunk_document(
+                        ext_txt, self.embedder, title=new_title,
+                        path=target_path, summary=new_sum or "", tags=new_tags)
+                    dim = int(self.header.model["dim"])
+                    vecs = (self.embedder.embed_passages(
+                        [c["embed_text"] for c in chunks])
+                        if chunks else np.zeros((0, dim), dtype=np.float32))
+                    fts_header = " ".join(
+                        p for p in (new_title, target_path, new_coll or "",
+                                    new_sum or "", " ".join(new_tags)) if p)
+                    added, removed = self.db.replace_doc_chunks(
+                        did, ver_row["id"], chunks, vecs, self._master,
+                        fts_header=fts_header)
+                    self._apply_doc_index_delta(added, removed)
+                    j_meta["version_id"] = ver_row["id"]
+                    j_meta["chunks"] = [
+                        {"id": cid, "seq": ch["seq"], "section": ch["section"],
+                         "char_start": ch["char_start"], "char_end": ch["char_end"],
+                         "text": ch["text"]}
+                        for ch, (_k, cid, _d, _v) in zip(chunks, added)
+                    ]
+                    j_meta["vecs"] = base64.b64encode(
+                        np.ascontiguousarray(vecs, np.float32).tobytes()).decode()
+                    j_meta["fts_header"] = fts_header
+            arow = self._audit_and_capture(
+                caller, "doc-meta", f"ns={ns} id={did} path={target_path}")
+            if _journal:
+                self._journal({"op": "doc_meta", "meta": j_meta, "audit": arow})
+            cur_row = self.db.get_document(did)
+            mc = self.db.doc_memory_counts([did]).get(did, (0, 0))
+            out = self._format_doc_summary(cur_row, memory_counts=mc)
+            out["created_new"] = False
+            out["unchanged"] = False
+            out["metadata_updated"] = True
+            return out
+
+        # Content write: create v1 or new version v(N+1).
+        if raw is None and existing is not None:
+            # Caller updated extracted_text on an existing binary doc.
+            cur_ver = self.db.get_document_version(existing["id"])
+            raw, _ = self.db.decrypt_document_version(cur_ver, self._master)
+        assert raw is not None
+        det_mime, is_bin = documents.detect_mime_type(
+            target_path, raw, explicit=mime_type or (
+                existing["mime_type"] if existing is not None else None))
+        if extracted_text is not None:
+            searchable = extracted_text
+        else:
+            searchable = clean_text(
+                documents.extract_searchable_text(raw, det_mime, target_path))
+        doc_title = (
+            title.strip() if (title and title.strip()) else
+            (existing["title"] if existing is not None else
+             documents.default_title(target_path, searchable if not is_bin else None))
+        )
+        doc_coll = (collection if collection is not None else
+                    (existing["collection"] if existing is not None else None))
+        doc_tags = (list(tags) if tags is not None else
+                    (json.loads(existing["tags"]) if existing is not None else []))
+        doc_sum = (summary if summary is not None else
+                   (existing["summary"] if existing is not None else None))
+        doc_src = (source if source is not None else
+                   (existing["source"] if existing is not None else "from chat"))
+        doc_status = (status if status is not None else
+                      (existing["status"] if existing is not None else "active"))
+        doc_pinned = (bool(pinned) if pinned is not None else
+                      (bool(existing["pinned"]) if existing is not None else False))
+        doc_quar = (bool(quarantined) if quarantined is not None else
+                    (bool(existing["quarantined"]) if existing is not None else False))
+        prov_eff = prov or {"host": platform.node(), "agent": caller,
+                            "session": env("SESSION", "-")}
+        slug = detect_project_slug()
+        if slug and "project" not in prov_eff:
+            prov_eff = {**prov_eff, "project": slug}
+
+        chunks = documents.chunk_document(
+            searchable, self.embedder, title=doc_title, path=target_path,
+            summary=doc_sum or "", tags=doc_tags)
+        dim = int(self.header.model["dim"])
+        vecs = (self.embedder.embed_passages([c["embed_text"] for c in chunks])
+                if chunks else np.zeros((0, dim), dtype=np.float32))
+        now = time.time()
+        did, vid, ver_num, added, removed = self.db.put_document_version(
+            doc_id=existing["id"] if existing is not None else None,
+            version_id=None, ns=ns, path=target_path, title=doc_title,
+            mime_type=det_mime, is_binary=is_bin, raw_bytes=raw,
+            extracted_text=searchable, chunks=chunks, vecs=vecs,
+            master_key=self._master, collection=doc_coll, tags=doc_tags,
+            summary=doc_sum, source=doc_src, status=doc_status,
+            pinned=doc_pinned, quarantined=doc_quar, change_note=change_note,
+            prov=prov_eff, updated=now, expires=exp_val, filename=filename)
+        self._apply_doc_index_delta(added, removed)
+
+        arow = self._audit_and_capture(
+            caller, "doc-put",
+            f"ns={ns} id={did} path={target_path} v{ver_num} ({len(raw)}B)")
+        if _journal:
+            if len(raw) <= documents.JOURNAL_INLINE_MAX_BYTES:
+                self._journal({
+                    "op": "doc_put",
+                    "audit": arow,
+                    "doc": {
+                        "id": did, "version_id": vid, "version": ver_num,
+                        "ns": ns, "path": target_path, "title": doc_title,
+                        "mime_type": det_mime, "is_binary": is_bin,
+                        "raw_b64": base64.b64encode(raw).decode(),
+                        "extracted_text": searchable,
+                        "chunks": [
+                            {"id": cid, "seq": ch["seq"], "section": ch["section"],
+                             "char_start": ch["char_start"],
+                             "char_end": ch["char_end"], "text": ch["text"]}
+                            for ch, (_k, cid, _d, _v) in zip(chunks, added)
+                        ],
+                        "vecs": base64.b64encode(
+                            np.ascontiguousarray(vecs, np.float32).tobytes()
+                        ).decode(),
+                        "collection": doc_coll, "tags": doc_tags,
+                        "summary": doc_sum, "source": doc_src,
+                        "status": doc_status, "pinned": doc_pinned,
+                        "quarantined": doc_quar, "change_note": change_note,
+                        "prov": prov_eff, "created": now, "updated": now,
+                        "expires": exp_val, "filename": filename,
+                    },
+                })
+            else:
+                self.save()
+
+        cur_row = self.db.get_document(did)
+        mc = self.db.doc_memory_counts([did]).get(did, (0, 0))
+        out = self._format_doc_summary(cur_row, memory_counts=mc)
+        out["created_new"] = existing is None
+        out["unchanged"] = False
+        out["chunks_indexed"] = len(added)
+        out["has_text"] = bool(searchable.strip())
+        # Surface any grounded atomic memories now lagging behind this version!
+        if existing is not None and mc[1] > 0:
+            stale_list = []
+            for mrow in self.db.records_for_document(did):
+                if (mrow["doc_version"] is not None
+                        and int(mrow["doc_version"]) < ver_num):
+                    stale_list.append({
+                        "id": mrow["id"],
+                        "doc_version": int(mrow["doc_version"]),
+                        "doc_section": mrow["doc_section"],
+                        "text": self.db.decrypt_text(mrow, self._master),
+                    })
+            if stale_list:
+                out["stale_memories"] = stale_list
+        return out
+
+    @_synchronized
+    def doc_patch(
+        self,
+        ref: str,
+        *,
+        append: str | None = None,
+        replace_old: str | None = None,
+        replace_new: str | None = None,
+        replace_all: bool = False,
+        section: str | None = None,
+        section_content: str | None = None,
+        create_section: bool = True,
+        change_note: str | None = None,
+        namespace: str | None = None,
+        caller: str = "user",
+        prov: dict | None = None,
+    ) -> dict:
+        """Incrementally edit a living text document (replace, section update,
+        or append) and persist the result as a new immutable version."""
+        self._require_open()
+        doc = self._resolve_document(
+            ref, caller, namespace=namespace, require_write=True)
+        if doc["is_binary"]:
+            raise CryptoError(
+                f"Cannot text-patch binary document {doc['path']!r} "
+                f"({doc['mime_type']}); use doc_put to upload a new version.")
+        ver = self.db.get_document_version(doc["id"])
+        if ver is None:
+            raise CryptoError(f"Document {doc['id']!r} has no stored version")
+        raw_b, _ = self.db.decrypt_document_version(ver, self._master)
+        current_text = raw_b.decode("utf-8", errors="replace")
+        patched = documents.patch_document_text(
+            current_text,
+            append=clean_text(append),
+            replace_old=clean_text(replace_old),
+            replace_new=clean_text(replace_new),
+            replace_all=replace_all,
+            section=clean_text(section),
+            section_content=clean_text(section_content),
+            create_section=create_section,
+        )
+        return self.doc_put(
+            doc_id=doc["id"],
+            content=patched,
+            namespace=doc["ns"],
+            change_note=change_note or (
+                f"patched section {section}" if section else "patched document"),
+            caller=caller,
+            prov=prov,
+        )
+
+    @_synchronized
+    def doc_get(
+        self,
+        ref: str,
+        *,
+        caller: str = "user",
+        namespace: str | None = None,
+        version: int | None = None,
+        section: str | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        offset: int | None = None,
+        max_chars: int | None = None,
+        outline_only: bool = False,
+        include_memories: bool = False,
+        include_history: bool = False,
+        diff_from_version: int | None = None,
+        include_binary: bool = False,
+        _audit: bool = True,
+    ) -> dict:
+        """Read a persistent document (full, section, windowed slice, outline,
+        historical version, unified diff, and/or grounded atomic memories)."""
+        self._require_open()
+        doc = self._resolve_document(ref, caller, namespace=namespace)
+        ver = self.db.get_document_version(doc["id"], version=version)
+        if ver is None:
+            raise CryptoError(
+                f"Document {doc['path']!r} has no version {version!r}")
+        raw_b, vmeta = self.db.decrypt_document_version(ver, self._master)
+        is_bin = bool(ver["is_binary"])
+        text = "" if is_bin else raw_b.decode("utf-8", errors="replace")
+        ext_text = vmeta.get("extracted_text", "") if is_bin else text
+
+        mc = self.db.doc_memory_counts([doc["id"]]).get(doc["id"], (0, 0))
+        out = self._format_doc_summary(doc, memory_counts=mc)
+        out["requested_version"] = int(ver["version"])
+        out["version_id"] = ver["id"]
+        out["version_sha256"] = ver["sha256"]
+        out["version_size_bytes"] = int(ver["size_bytes"])
+        out["version_change_note"] = ver["change_note"]
+        out["version_created_local"] = local_stamp(ver["created"])
+        if vmeta.get("filename"):
+            out["filename"] = vmeta["filename"]
+
+        outline_src = text if not is_bin else ext_text
+        outline = documents.extract_outline(outline_src)
+        out["outline"] = [
+            {"level": h["level"], "heading": h["heading"],
+             "path": h["path"], "line": h["line"]}
+            for h in outline
+        ]
+
+        if not outline_only:
+            if section:
+                sec = documents.extract_section(outline_src, section)
+                if sec is None:
+                    raise CryptoError(
+                        f"Section {section!r} not found in {doc['path']!r}")
+                out["section"] = sec["path"]
+                out["section_lines"] = [sec["start_line"], sec["end_line"]]
+                out["content"] = sec["content"]
+            elif is_bin:
+                if ext_text:
+                    sliced, sl_meta = documents.slice_text(
+                        ext_text, start_line=start_line, end_line=end_line,
+                        offset=offset, max_chars=max_chars)
+                    out["extracted_text"] = sliced
+                    out["slice"] = sl_meta
+                if include_binary:
+                    out["content_base64"] = base64.b64encode(raw_b).decode()
+                else:
+                    out["binary_omitted"] = True
+            else:
+                sliced, sl_meta = documents.slice_text(
+                    text, start_line=start_line, end_line=end_line,
+                    offset=offset, max_chars=max_chars)
+                out["content"] = sliced
+                out["slice"] = sl_meta
+
+        if include_history:
+            out["versions"] = [
+                {
+                    "version": int(v["version"]),
+                    "version_id": v["id"],
+                    "sha256": v["sha256"],
+                    "size_bytes": int(v["size_bytes"]),
+                    "mime_type": v["mime_type"],
+                    "change_note": v["change_note"],
+                    "created": v["created"],
+                    "created_local": local_stamp(v["created"]),
+                    "provenance": json.loads(v["prov"]),
+                }
+                for v in self.db.list_document_versions(doc["id"])
+            ]
+
+        if diff_from_version is not None:
+            if is_bin:
+                raise CryptoError(
+                    "Unified text diff is not available for binary documents.")
+            old_v = self.db.get_document_version(
+                doc["id"], version=int(diff_from_version))
+            if old_v is None:
+                raise CryptoError(
+                    f"Document {doc['path']!r} has no version {diff_from_version}")
+            old_raw, _ = self.db.decrypt_document_version(old_v, self._master)
+            old_text = old_raw.decode("utf-8", errors="replace")
+            out["diff"] = documents.diff_versions(
+                old_text, text,
+                from_label=f"{doc['path']}@v{old_v['version']}",
+                to_label=f"{doc['path']}@v{ver['version']}")
+
+        if include_memories:
+            mems = []
+            cur_v = int(doc["current_version"])
+            for mrow in self.db.records_for_document(doc["id"]):
+                m_item = {
+                    "id": mrow["id"],
+                    "namespace": mrow["ns"],
+                    "text": self.db.decrypt_text(mrow, self._master),
+                    "kind": mrow["kind"] or "fact",
+                    "doc_version": mrow["doc_version"],
+                    "doc_section": mrow["doc_section"],
+                    "stale": (doc["status"] == "archived"
+                              or (mrow["doc_version"] is not None
+                                  and int(mrow["doc_version"]) < cur_v)),
+                    "created_local": local_stamp(mrow["created"]),
+                    "tags": json.loads(mrow["tags"]),
+                }
+                mems.append(m_item)
+            out["memories"] = mems
+
+        if _audit:
+            self.db.touch_document(doc["id"])
+            self._audit_and_capture(
+                caller, "doc-get",
+                f"id={doc['id']} path={doc['path']} v{ver['version']}")
+        out["note"] = DATA_NOT_INSTRUCTIONS
+        return out
+
+    @_synchronized
+    def doc_history(self, ref: str, *, caller: str = "user",
+                    namespace: str | None = None) -> dict:
+        self._require_open()
+        doc = self._resolve_document(ref, caller, namespace=namespace)
+        vers = [
+            {
+                "version": int(v["version"]),
+                "version_id": v["id"],
+                "sha256": v["sha256"],
+                "size_bytes": int(v["size_bytes"]),
+                "mime_type": v["mime_type"],
+                "is_binary": bool(v["is_binary"]),
+                "change_note": v["change_note"],
+                "created": v["created"],
+                "created_local": local_stamp(v["created"]),
+                "provenance": json.loads(v["prov"]),
+            }
+            for v in self.db.list_document_versions(doc["id"])
+        ]
+        return {
+            "id": doc["id"],
+            "namespace": doc["ns"],
+            "path": doc["path"],
+            "title": doc["title"],
+            "current_version": int(doc["current_version"]),
+            "versions": vers,
+        }
+
+    @_synchronized
+    def doc_diff(self, ref: str, from_version: int,
+                 to_version: int | None = None, *, caller: str = "user",
+                 namespace: str | None = None) -> dict:
+        res = self.doc_get(
+            ref, caller=caller, namespace=namespace, version=to_version,
+            outline_only=True, diff_from_version=from_version)
+        return {
+            "id": res["id"],
+            "path": res["path"],
+            "from_version": int(from_version),
+            "to_version": int(res["requested_version"]),
+            "diff": res.get("diff", ""),
+        }
+
+    @_synchronized
+    def doc_memories(self, ref: str, *, caller: str = "user",
+                     namespace: str | None = None,
+                     include_superseded: bool = False) -> dict:
+        self._require_open()
+        doc = self._resolve_document(ref, caller, namespace=namespace)
+        allowed = set(self._readable_namespaces(caller))
+        cur_v = int(doc["current_version"])
+        mems = []
+        for mrow in self.db.records_for_document(
+                doc["id"], include_superseded=include_superseded):
+            if mrow["ns"] not in allowed:
+                continue
+            mems.append({
+                "id": mrow["id"],
+                "namespace": mrow["ns"],
+                "text": self.db.decrypt_text(mrow, self._master),
+                "kind": mrow["kind"] or "fact",
+                "doc_version": mrow["doc_version"],
+                "doc_section": mrow["doc_section"],
+                "stale": (doc["status"] == "archived"
+                          or (mrow["doc_version"] is not None
+                              and int(mrow["doc_version"]) < cur_v)),
+                "superseded_by": mrow["superseded_by"],
+                "created_local": local_stamp(mrow["created"]),
+                "tags": json.loads(mrow["tags"]),
+            })
+        rels = [
+            {"id": r["id"], "subject": r["subject"], "predicate": r["predicate"],
+             "object": r["object"], "namespace": r["ns"]}
+            for r in self.db.relations_for_document(doc["id"], ns_in=allowed)
+        ]
+        return {
+            "id": doc["id"],
+            "path": doc["path"],
+            "title": doc["title"],
+            "current_version": cur_v,
+            "memories": mems,
+            "relations": rels,
+            "note": DATA_NOT_INSTRUCTIONS,
+        }
+
+    @_synchronized
+    def doc_stale_memories(self, *, caller: str = "user",
+                           namespace: str | None = None) -> dict:
+        """All live atomic memories whose grounding document moved on or was archived."""
+        self._require_open()
+        if namespace is not None:
+            self.config.grant_for(caller, namespace)
+            allowed = {namespace}
+        else:
+            allowed = set(self._readable_namespaces(caller))
+        rows = self.db.stale_document_records(ns_in=allowed)
+        items = []
+        for r in rows:
+            items.append({
+                "id": r["id"],
+                "namespace": r["ns"],
+                "text": self.db.decrypt_text(r, self._master),
+                "doc_id": r["doc_id"],
+                "doc_path": r["cur_doc_path"],
+                "doc_title": r["cur_doc_title"],
+                "doc_version": r["doc_version"],
+                "doc_current_version": r["cur_doc_version"],
+                "doc_status": r["cur_doc_status"] or "deleted",
+                "doc_section": r["doc_section"],
+                "created_local": local_stamp(r["created"]),
+            })
+        return {"stale": items, "count": len(items),
+                "note": DATA_NOT_INSTRUCTIONS}
+
+    @_synchronized
+    def doc_list(
+        self,
+        *,
+        caller: str = "user",
+        namespace: str | None = None,
+        path_prefix: str | None = None,
+        collection: str | None = None,
+        tags: list[str] | None = None,
+        status: str = "active",
+        mime_type: str | None = None,
+        pinned_only: bool = False,
+        stale_memories_only: bool = False,
+        sort_by: str = "updated",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """Browse the encrypted document library with folder/collection summaries."""
+        self._require_open()
+        if namespace is not None:
+            self.config.grant_for(caller, namespace)
+            allowed = {namespace}
+        else:
+            allowed = set(self._readable_namespaces(caller))
+        if not allowed or self.db.document_count() == 0:
+            return {"documents": [], "total": 0, "folders": [],
+                    "collections": []}
+        prefix = (documents.normalize_doc_path(path_prefix)
+                  if path_prefix and path_prefix.strip() else None)
+        ph = ",".join("?" * len(allowed))
+        rows = self.db.conn.execute(
+            f"SELECT * FROM documents WHERE ns IN ({ph})",
+            sorted(allowed)).fetchall()
+
+        filtered = []
+        for r in rows:
+            if status != "all":
+                if status == "active":
+                    if r["status"] == "archived":
+                        continue
+                elif r["status"] != status:
+                    continue
+            if prefix is not None:
+                if not (r["path"] == prefix or r["path"].startswith(prefix + "/")):
+                    continue
+            if collection is not None and (r["collection"] or "") != collection:
+                continue
+            if mime_type is not None and not r["mime_type"].startswith(mime_type):
+                continue
+            if pinned_only and not r["pinned"]:
+                continue
+            if tags and not set(tags) <= set(json.loads(r["tags"])):
+                continue
+            filtered.append(r)
+
+        counts_map = self.db.doc_memory_counts([r["id"] for r in filtered])
+        if stale_memories_only:
+            filtered = [r for r in filtered
+                        if counts_map.get(r["id"], (0, 0))[1] > 0]
+
+        sort_key = {
+            "updated": lambda r: (-float(r["updated"]), r["path"]),
+            "created": lambda r: (-float(r["created"]), r["path"]),
+            "path": lambda r: (r["path"].lower(), r["id"]),
+            "title": lambda r: (r["title"].lower(), r["path"]),
+            "size": lambda r: (-int(r["size_bytes"]), r["path"]),
+        }.get(sort_by, lambda r: (-float(r["updated"]), r["path"]))
+        filtered.sort(key=lambda r: (0 if r["pinned"] else 1, sort_key(r)))
+
+        folders: dict[str, int] = {}
+        collections: dict[str, int] = {}
+        for r in filtered:
+            f = documents.folder_of(r["path"]) or "/"
+            folders[f] = folders.get(f, 0) + 1
+            if r["collection"]:
+                collections[r["collection"]] = collections.get(
+                    r["collection"], 0) + 1
+
+        off = max(0, int(offset))
+        lim = max(0, int(limit))
+        page = filtered[off:off + lim] if lim > 0 else []
+        docs_out = [
+            self._format_doc_summary(
+                r, memory_counts=counts_map.get(r["id"], (0, 0)))
+            for r in page
+        ]
+        return {
+            "documents": docs_out,
+            "total": len(filtered),
+            "folders": [{"folder": f, "count": c}
+                        for f, c in sorted(folders.items())],
+            "collections": [{"collection": col, "count": c}
+                            for col, c in sorted(collections.items(),
+                                                 key=lambda kv: (-kv[1], kv[0]))],
+        }
+
+    def _search_documents_internal(
+        self,
+        query: str,
+        *,
+        caller: str,
+        namespace: str | None = None,
+        path_prefix: str | None = None,
+        collection: str | None = None,
+        tags: list[str] | None = None,
+        mime_type: str | None = None,
+        status: str = "active",
+        pinned_only: bool = False,
+        top_k: int = 8,
+        queries: list[str] | None = None,
+        qvec: np.ndarray | None = None,
+        audit_read: bool = True,
+        lexical_only: bool = False,
+    ) -> list[dict]:
+        """Hybrid vector + self-information FTS5 search over document chunks."""
+        if self.db.document_count() == 0 or top_k <= 0:
+            return []
+        if namespace is not None:
+            self.config.grant_for(caller, namespace)
+            allowed = {namespace}
+        else:
+            allowed = set(self._readable_namespaces(caller))
+        if not allowed:
+            return []
+
+        facets: list[str] = []
+        seen_f: set[str] = set()
+        if query and query.strip():
+            facets.append(query.strip())
+            seen_f.add(query.strip())
+        for fq in (queries or []):
+            if isinstance(fq, str) and fq.strip() and fq.strip() not in seen_f:
+                seen_f.add(fq.strip())
+                facets.append(fq.strip())
+        if not facets:
+            return []
+
+        if lexical_only:
+            qvecs = [None] * len(facets)
+        elif len(facets) == 1 and qvec is not None:
+            qvecs = [qvec]
+        elif len(facets) == 1:
+            qvecs = [self.embedder.embed_query(facets[0])]
+        else:
+            emb = self.embedder
+            qvecs = (list(emb.embed_queries(facets))
+                     if hasattr(emb, "embed_queries")
+                     else [emb.embed_query(f) for f in facets])
+
+        pool = max(CANDIDATE_POOL, top_k * 12)
+        chunk_best_score: dict[str, float] = {}
+        chunk_best_cos: dict[str, float] = {}
+        chunk_doc: dict[str, str] = {}
+
+        for fq, fv in zip(facets, qvecs):
+            vec_cos: dict[str, float] = {}
+            v_rank: dict[str, int] = {}
+            if (fv is not None and self.doc_index is not None
+                    and len(self._doc_chunk_by_ikey) > 0):
+                for ikey, s in self.doc_index.search(fv, pool):
+                    pair = self._doc_chunk_by_ikey.get(ikey)
+                    if pair is None:
+                        continue
+                    cid, did = pair
+                    chunk_doc[cid] = did
+                    if s > vec_cos.get(cid, -2.0):
+                        vec_cos[cid] = float(s)
+                    if cid not in v_rank:
+                        v_rank[cid] = len(v_rank)
+            fts_hits = self.db.doc_fts_search(fq, pool)
+            l_rank: dict[str, int] = {}
+            for idx, (cid, did, _rank) in enumerate(fts_hits):
+                chunk_doc[cid] = did
+                if cid not in l_rank:
+                    l_rank[cid] = idx
+            info = self.db.doc_term_information(fq)
+            total_info = sum(info.values())
+            lex_p: dict[str, float] = {}
+            if total_info > 0 and fts_hits:
+                for cid, did, _ in fts_hits[:LEX_COVERAGE_DEPTH]:
+                    crow = self.db.get_chunk_row(cid)
+                    if crow is None:
+                        continue
+                    drow = self.db.get_document(did)
+                    ctext = self.db.decrypt_document_chunk(crow, self._master)
+                    header = (f"{drow['title']} {drow['path']} "
+                              f"{drow['summary'] or ''} "
+                              f"{' '.join(json.loads(drow['tags']))}"
+                              if drow is not None else "")
+                    lex_p[cid] = information_coverage(
+                        info, f"{header}\n{ctext}")
+            for cid in set(vec_cos) | set(l_rank):
+                pv = p_from_cosine(vec_cos.get(cid))
+                pl = lex_p.get(cid, 0.0)
+                sc = evidence(pv, pl, v_rank.get(cid), l_rank.get(cid))
+                if sc > chunk_best_score.get(cid, -1.0):
+                    chunk_best_score[cid] = sc
+                if vec_cos.get(cid, -2.0) > chunk_best_cos.get(cid, -2.0):
+                    chunk_best_cos[cid] = vec_cos[cid]
+
+        # Group matching chunks by document, filtering by ACL & document filters.
+        prefix = (documents.normalize_doc_path(path_prefix)
+                  if path_prefix and path_prefix.strip() else None)
+        q_toks = set(_tokens(" ".join(facets)))
+        doc_rows: dict[str, object] = {}
+        doc_chunks: dict[str, list[tuple[float, str]]] = {}
+
+        def _doc_matches_filters(drow) -> bool:
+            if drow["ns"] not in allowed:
+                return False
+            if status != "all":
+                if status == "active":
+                    if drow["status"] == "archived":
+                        return False
+                elif drow["status"] != status:
+                    return False
+            if prefix is not None:
+                if not (drow["path"] == prefix
+                        or drow["path"].startswith(prefix + "/")):
+                    return False
+            if collection is not None and (drow["collection"] or "") != collection:
+                return False
+            if mime_type is not None and not drow["mime_type"].startswith(mime_type):
+                return False
+            if pinned_only and not drow["pinned"]:
+                return False
+            if tags and not set(tags) <= set(json.loads(drow["tags"])):
+                return False
+            return True
+
+        for cid, sc in chunk_best_score.items():
+            did = chunk_doc.get(cid)
+            if not did:
+                continue
+            drow = doc_rows.get(did)
+            if drow is None:
+                drow = self.db.get_document(did)
+                if drow is None:
+                    continue
+                doc_rows[did] = drow
+            if not _doc_matches_filters(drow):
+                continue
+            doc_chunks.setdefault(did, []).append((sc, cid))
+
+        # Direct title/path/tag/collection substring matching ensures short
+        # filename or prefix queries (e.g. "tax", "spec", "q4") always find
+        # matching documents even when FTS5 exact tokens miss a prefix.
+        q_lowers = [f.lower() for f in facets if len(f.strip()) >= 2]
+        meta_boosted: set[str] = set()
+        if q_lowers:
+            ph = ",".join("?" * len(allowed))
+            for drow in self.db.conn.execute(
+                    f"SELECT * FROM documents WHERE ns IN ({ph})",
+                    sorted(allowed)).fetchall():
+                if not _doc_matches_filters(drow):
+                    continue
+                hay = " ".join((
+                    drow["title"] or "",
+                    drow["path"] or "",
+                    drow["collection"] or "",
+                    drow["summary"] or "",
+                    " ".join(json.loads(drow["tags"] or "[]")),
+                )).lower()
+                if any(ql in hay for ql in q_lowers):
+                    did = drow["id"]
+                    doc_rows[did] = drow
+                    meta_boosted.add(did)
+                    if did not in doc_chunks:
+                        first_chunk = self.db.conn.execute(
+                            "SELECT id FROM document_chunks "
+                            "WHERE doc_id = ? ORDER BY seq ASC LIMIT 1",
+                            (did,)).fetchone()
+                        if first_chunk is not None:
+                            doc_chunks[did] = [(max(RESULT_ABSOLUTE_FLOOR, 0.35),
+                                                first_chunk["id"])]
+                        else:
+                            doc_chunks[did] = []
+
+        if not doc_chunks:
+            return []
+
+        ranked_docs: list[tuple[float, float, str, list[tuple[float, str]]]] = []
+        for did, clist in doc_chunks.items():
+            clist.sort(key=lambda x: -x[0])
+            base_score = clist[0][0] if clist else max(RESULT_ABSOLUTE_FLOOR, 0.35)
+            if did in meta_boosted and base_score < RESULT_ABSOLUTE_FLOOR:
+                base_score = max(RESULT_ABSOLUTE_FLOOR, base_score)
+            drow = doc_rows[did]
+            mult = 1.0
+            if drow["pinned"]:
+                mult += documents.W_DOC_PINNED
+            if q_toks:
+                tp_toks = set(_tokens(f"{drow['title']} {drow['path']}"))
+                overlap = len(q_toks & tp_toks) / max(1, len(q_toks))
+                if overlap > 0:
+                    mult += documents.W_DOC_TITLE_MATCH * overlap
+            if did in meta_boosted:
+                mult += 0.15
+            ranked_docs.append((base_score * mult, base_score, did, clist))
+
+        ranked_docs.sort(key=lambda x: -x[0])
+        # Drop pure-noise hits when nothing actually matched meaningfully.
+        best_base = ranked_docs[0][1]
+        if best_base < RESULT_ABSOLUTE_FLOOR * 0.65:
+            return []
+
+        top_docs = ranked_docs[:top_k]
+        counts_map = self.db.doc_memory_counts([d[2] for d in top_docs])
+        results: list[dict] = []
+        for final_sc, _base_sc, did, clist in top_docs:
+            drow = doc_rows[did]
+            excerpts = []
+            for c_sc, cid in clist[:3]:
+                crow = self.db.get_chunk_row(cid)
+                if crow is None:
+                    continue
+                ctext = self.db.decrypt_document_chunk(crow, self._master)
+                excerpts.append({
+                    "chunk_id": cid,
+                    "section": crow["section"] or "",
+                    "score": round(c_sc, 5),
+                    "cosine": round(chunk_best_cos.get(cid, 0.0), 4),
+                    "excerpt": ctext[:500] + ("…" if len(ctext) > 500 else ""),
+                })
+            item = self._format_doc_summary(
+                drow, memory_counts=counts_map.get(did, (0, 0)))
+            item["score"] = round(final_sc, 5)
+            item["cosine"] = round(
+                max((chunk_best_cos.get(cid, 0.0) for _, cid in clist),
+                    default=0.0), 4)
+            item["matches"] = excerpts
+            if excerpts:
+                item["best_section"] = excerpts[0]["section"]
+                item["excerpt"] = excerpts[0]["excerpt"]
+            results.append(item)
+            if audit_read:
+                self.db.touch_document(did)
+        if audit_read:
+            self._audit_and_capture(
+                caller, "doc-search",
+                f"q={query[:80]!r} hits={len(results)}")
+        return results
+
+    @_synchronized
+    def doc_search(
+        self,
+        query: str,
+        *,
+        caller: str = "user",
+        namespace: str | None = None,
+        path_prefix: str | None = None,
+        collection: str | None = None,
+        tags: list[str] | None = None,
+        mime_type: str | None = None,
+        status: str = "active",
+        pinned_only: bool = False,
+        top_k: int = 8,
+        queries: list[str] | None = None,
+    ) -> dict:
+        """Hybrid vector + keyword search across persistent documents."""
+        self._require_open()
+        query = clean_text(query)
+        namespace = clean_text(namespace)
+        path_prefix = clean_text(path_prefix)
+        collection = clean_text(collection)
+        tags = clean_text(tags)
+        queries = clean_text(queries)
+        hits = self._search_documents_internal(
+            query, caller=caller, namespace=namespace, path_prefix=path_prefix,
+            collection=collection, tags=tags, mime_type=mime_type,
+            status=status, pinned_only=pinned_only, top_k=int(top_k),
+            queries=queries, audit_read=True)
+        return {"results": hits, "note": DATA_NOT_INSTRUCTIONS}
+
+    @_synchronized
+    def doc_delete(
+        self,
+        ref: str,
+        *,
+        caller: str = "user",
+        namespace: str | None = None,
+        archive: bool = False,
+        version: int | None = None,
+        shred: bool = False,
+    ) -> dict:
+        """Archive or permanently delete a document (or one historical version).
+
+        Never silently deletes atomic memories grounded in this document;
+        returns `affected_memory_ids` so callers can review or supersede them."""
+        self._require_open()
+        self._refuse_if_diverged()
+        doc = self._resolve_document(
+            ref, caller, namespace=namespace, require_write=True)
+        did = doc["id"]
+        affected = [r["id"] for r in self.db.records_for_document(did)]
+        now = time.time()
+
+        if archive:
+            self.db.update_document_meta(did, status="archived", updated=now)
+            arow = self._audit_and_capture(
+                caller, "doc-archive", f"id={did} path={doc['path']}")
+            self._journal({"op": "doc_delete", "id": did, "archive": True,
+                           "updated": now, "audit": arow})
+            out = {"id": did, "path": doc["path"], "archived": True,
+                   "deleted": False, "shredded": False}
+            if affected:
+                out["affected_memory_ids"] = affected
+            return out
+
+        if version is not None:
+            ok = self.db.delete_document_version(did, int(version), shred=shred)
+            if not ok:
+                raise CryptoError(
+                    f"Document {doc['path']!r} has no version {version}")
+            arow = self._audit_and_capture(
+                caller, "doc-delete",
+                f"id={did} path={doc['path']} v{version} shred={shred}")
+            self._journal({"op": "doc_delete", "id": did,
+                           "version": int(version), "shred": shred,
+                           "audit": arow})
+            if shred:
+                self.save()
+            return {"id": did, "path": doc["path"], "version_deleted": int(version),
+                    "shredded": shred}
+
+        removed = self.db.delete_document(did, shred=shred)
+        self._apply_doc_index_delta([], removed)
+        arow = self._audit_and_capture(
+            caller, "doc-delete",
+            f"id={did} path={doc['path']} shred={shred}")
+        self._journal({"op": "doc_delete", "id": did, "shred": shred,
+                       "audit": arow})
+        if shred:
+            self.save()
+        out = {"id": did, "path": doc["path"], "deleted": True,
+               "archived": False, "shredded": shred}
+        if affected:
+            out["affected_memory_ids"] = affected
+        return out
+
+    @_synchronized
+    def doc_compile(
+        self,
+        path: str,
+        *,
+        caller: str = "user",
+        title: str | None = None,
+        namespace: str | None = None,
+        tags: list[str] | None = None,
+        query: str | None = None,
+        collection: str | None = None,
+        limit: int = 50,
+        description: str | None = None,
+    ) -> dict:
+        """Deterministically compile matching atomic memories into a persistent
+        versioned Markdown document inside the vault."""
+        self._require_open()
+        ns = namespace or self.config.default_namespace(caller)
+        self.config.check(caller, ns, write=True)
+        if query:
+            mems = self.search(
+                query, caller=caller, namespace=namespace, tags=tags,
+                top_k=limit, include_documents=False)["results"]
+        else:
+            rec = self.recent(
+                caller=caller, namespace=namespace, limit=limit,
+                include_seeded=False)["results"]
+            if tags:
+                req = set(tags)
+                mems = [m for m in rec if req <= set(m.get("tags") or [])]
+            else:
+                mems = rec
+        norm_path = documents.normalize_doc_path(path, title=title)
+        doc_title = title or documents.default_title(norm_path)
+        md = documents.compile_memories_markdown(
+            mems, title=doc_title, description=description)
+        res = self.doc_put(
+            path=norm_path, content=md, title=doc_title, namespace=ns,
+            collection=collection or "compiled",
+            tags=list(tags or []) + ["compiled"],
+            source=f"compiled from {len(mems)} memories",
+            change_note=f"compiled from {len(mems)} memories",
+            caller=caller,
+        )
+        res["compiled_memories"] = len(mems)
+        return res
+
+    @_synchronized
+    def doc_import_path(
+        self,
+        fs_path: str,
+        *,
+        caller: str = "user",
+        namespace: str | None = None,
+        prefix: str = "",
+        collection: str | None = None,
+        tags: list[str] | None = None,
+        include_hidden: bool = False,
+        dry_run: bool = False,
+    ) -> dict:
+        """Import a file or directory tree from disk into encrypted documents."""
+        self._require_open()
+        ns = namespace or self.config.default_namespace(caller)
+        self.config.check(caller, ns, write=True)
+        src = os.path.abspath(os.path.expanduser(fs_path))
+        if not os.path.exists(src):
+            raise CryptoError(f"Path does not exist: {fs_path}")
+        skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+        files: list[tuple[str, str]] = []  # (abs_fs_path, vault_rel_path)
+        norm_prefix = (documents.normalize_doc_path(prefix)
+                       if prefix and prefix.strip() else "")
+        if os.path.isfile(src):
+            base = os.path.basename(src)
+            vpath = f"{norm_prefix}/{base}" if norm_prefix else base
+            files.append((src, documents.normalize_doc_path(vpath)))
+        else:
+            for root, dirs, fnames in os.walk(src):
+                dirs[:] = sorted(
+                    d for d in dirs
+                    if d not in skip_dirs
+                    and (include_hidden or not d.startswith(".")))
+                for fn in sorted(fnames):
+                    if not include_hidden and fn.startswith("."):
+                        continue
+                    full = os.path.join(root, fn)
+                    if os.path.islink(full) or not os.path.isfile(full):
+                        continue
+                    rel = os.path.relpath(full, src).replace("\\", "/")
+                    vpath = f"{norm_prefix}/{rel}" if norm_prefix else rel
+                    files.append((full, documents.normalize_doc_path(vpath)))
+
+        imported = updated = unchanged = skipped = 0
+        details: list[dict] = []
+        max_bytes = int(self.config.settings.get(
+            "max_document_bytes", documents.DEFAULT_MAX_DOC_BYTES))
+        for full, vpath in files:
+            size = os.path.getsize(full)
+            if max_bytes > 0 and size > max_bytes:
+                skipped += 1
+                details.append({"path": vpath, "action": "skipped_too_large",
+                                "size_bytes": size})
+                continue
+            if dry_run:
+                existing = self.db.find_document_by_path(ns, vpath)
+                with open(full, "rb") as fh:
+                    raw = fh.read()
+                sha = crypto.sha256(raw)
+                if existing is None:
+                    act = "create"
+                    imported += 1
+                elif existing["sha256"] == sha:
+                    act = "unchanged"
+                    unchanged += 1
+                else:
+                    act = "update"
+                    updated += 1
+                details.append({"path": vpath, "action": act, "size_bytes": size})
+                continue
+            with open(full, "rb") as fh:
+                raw = fh.read()
+            res = self.doc_put(
+                path=vpath, raw_bytes=raw, namespace=ns, collection=collection,
+                tags=tags, source=f"imported from {full}",
+                filename=os.path.basename(full),
+                change_note=f"imported from {os.path.basename(full)}",
+                caller=caller)
+            if res.get("unchanged"):
+                unchanged += 1
+                act = "unchanged"
+            elif res.get("created_new"):
+                imported += 1
+                act = "created"
+            else:
+                updated += 1
+                act = "updated"
+            details.append({"path": vpath, "id": res["id"],
+                            "version": res["version"], "action": act})
+        return {
+            "imported": imported, "updated": updated,
+            "unchanged": unchanged, "skipped": skipped,
+            "dry_run": dry_run, "files": details,
+        }
+
+    @_synchronized
+    def doc_export_file(self, ref: str, dest_path: str, *,
+                        caller: str = "user", namespace: str | None = None,
+                        version: int | None = None) -> dict:
+        """Export one encrypted document version cleanly back to disk."""
+        self._require_open()
+        doc = self._resolve_document(ref, caller, namespace=namespace)
+        ver = self.db.get_document_version(doc["id"], version=version)
+        if ver is None:
+            raise CryptoError(
+                f"Document {doc['path']!r} has no version {version!r}")
+        raw_b, _ = self.db.decrypt_document_version(ver, self._master)
+        dst = os.path.abspath(os.path.expanduser(dest_path))
+        parent = os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(dst, "wb") as f:
+            f.write(raw_b)
+        self._audit_and_capture(
+            caller, "doc-export",
+            f"id={doc['id']} path={doc['path']} v{ver['version']} → {dst}")
+        return {
+            "id": doc["id"], "path": doc["path"],
+            "version": int(ver["version"]), "dest": dst,
+            "size_bytes": len(raw_b), "sha256": ver["sha256"],
+        }
+
+    @_synchronized
+    def doc_export_all(self, dest_dir: str, *, caller: str = "user",
+                       namespace: str | None = None,
+                       path_prefix: str | None = None,
+                       include_archived: bool = False) -> dict:
+        """Export matching documents back to a directory tree (zero lock-in)."""
+        self._require_open()
+        listing = self.doc_list(
+            caller=caller, namespace=namespace, path_prefix=path_prefix,
+            status="all" if include_archived else "active", limit=100_000)
+        root = os.path.abspath(os.path.expanduser(dest_dir))
+        os.makedirs(root, exist_ok=True)
+        exported = []
+        multi_ns = len({d["namespace"] for d in listing["documents"]}) > 1
+        for d in listing["documents"]:
+            rel = (os.path.join(d["namespace"], *d["path"].split("/"))
+                   if multi_ns else os.path.join(*d["path"].split("/")))
+            target = os.path.abspath(os.path.join(root, rel))
+            if not (target == root or target.startswith(root + os.sep)):
+                raise CryptoError(
+                    f"Refusing to export outside destination directory: {d['path']!r}")
+            exported.append(self.doc_export_file(
+                d["id"], target, caller=caller, namespace=d["namespace"]))
+        return {"dest": root, "exported": len(exported), "files": exported}
 
 
 # ---------------------------------------------------------------------------

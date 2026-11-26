@@ -11,6 +11,7 @@ Honest threat model. Read the "cannot protect against" section too. I can honest
 | Keyslots | LUKS-style: random 256-bit master key wrapped per slot |
 | Recovery | none. Your passphrase is the only credential; nothing is generated for you |
 | Per-record keys | wrapped by master key → crypto-shred on `forget --shred` |
+| Per-document-version keys | wrapped by master key → crypto-shred on `doc delete --shred` |
 | Signing (vaults + packs) | Ed25519 |
 | Integrity | AEAD tags everywhere + hash-chained audit log |
 
@@ -39,8 +40,9 @@ record id) - ciphertexts cannot be transplanted between contexts.
   Only the project key ships as trusted; a third party key has to be named
   deliberately (`compartment pack install --trusted-key HEX`). Signature,
   then content hash, then decrypt, then parse. Failure aborts install.
-- **Forensic recovery of deleted memories:** `forget --shred` destroys the
-  per-record key, deletes the row + FTS entries, VACUUMs, and rewrites the
+- **Forensic recovery of deleted memories and documents:** `forget --shred`
+  and `doc delete --shred` destroy the per-record / per-document-version keys,
+  delete the rows + FTS entries + chunk vectors, `VACUUM`, and rewrite the
   payload - the content is gone from the current vault file and its
   ciphertext history within that file.
 - **Cross-agent memory access:** per-caller namespace grants (rw/ro/none);

@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "compartment",
   "display_name": "Compartment",
-  "version": "4.16.1",
+  "version": "4.17.0",
   "description": "Encrypted, fully offline memory for Claude: one vault on your machine, shared with every MCP client. No network, no API key.",
   "long_description": "Compartment is persistent memory for AI agents, stored on your own computer and encrypted at rest. What Claude learns in one conversation is available in every later one, and to Claude Code, Cursor, Codex, Gemini CLI, Hermes Agent, OpenClaw and any other MCP client on the same machine. Nothing leaves it: the embedding model runs locally, the server speaks stdio only and opens no ports, and there is no account.\n\n**Before the first run**, create the vault once in a terminal: `pip install compartment && compartment init` (or `pipx install compartment`, or `uv tool install compartment`). It asks for a passphrase you choose; that passphrase is the only key and Compartment cannot recover it. If the vault is locked after a restart, run `compartment unlock`.\n\nIf you already connected Claude Desktop with `compartment integrate claude` or the app's Connect button, you do not need this extension as well: both would start the same server and Claude would see every tool twice.",
   "author": {
@@ -43,6 +43,12 @@
     {"name": "memory_recent", "description": "The most recently stored memories."},
     {"name": "memory_status", "description": "Vault status: lock state, counts, model, index."},
     {"name": "memory_selftest", "description": "Health check against the built-in reference facts."},
+    {"name": "doc_put", "description": "Create or save a new version of an encrypted persistent document."},
+    {"name": "doc_patch", "description": "Incrementally patch a living text document and save a new version."},
+    {"name": "doc_get", "description": "Read a persistent document (full, section, slice, outline, version, diff, or grounded memories)."},
+    {"name": "doc_list", "description": "Browse persistent documents with folder, collection, and staleness summaries."},
+    {"name": "doc_search", "description": "Hybrid semantic and keyword search across persistent documents."},
+    {"name": "doc_delete", "description": "Archive or permanently delete (optionally crypto-shred) a document or historical version."},
     {"name": "memory_lock", "description": "Panic lock: seal the vault and drop the key now."},
     {"name": "memory_unlock", "description": "Unlock from the agent; disabled unless the vault config enables it."}
   ],

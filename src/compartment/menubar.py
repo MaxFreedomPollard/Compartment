@@ -531,17 +531,18 @@ def apply_snapshot(state: dict, snap: dict | None) -> bool:
         return False
     if not snap.get("exists"):
         state.update(exists=False, locked=True, records=0, organic=0,
-                     recent=[], error=NO_VAULT_NOTE)
+                     documents=0, recent=[], error=NO_VAULT_NOTE)
         return True
     if snap.get("locked"):
         state.update(exists=True, locked=True, records=0, organic=0,
-                     recent=[], error=(CREDENTIAL_REFUSED_NOTE
-                                       if snap.get("credential_refused")
-                                       else None))
+                     documents=0, recent=[], error=(CREDENTIAL_REFUSED_NOTE
+                                                    if snap.get("credential_refused")
+                                                    else None))
         return True
     state.update(exists=True, locked=False,
                  records=int(snap.get("records") or 0),
                  organic=int(snap.get("organic") or 0),
+                 documents=int(snap.get("documents") or 0),
                  # newest first reads better in a list you glance at
                  recent=list(reversed(snap.get("recent") or [])),
                  error=None)
@@ -734,7 +735,7 @@ class PanelState:
             # locked or unlocked, because neither is known.
             "locked": None if exists else True,
             "checking": exists,
-            "records": 0, "organic": 0, "recent": [],
+            "records": 0, "organic": 0, "documents": 0, "recent": [],
             "error": None if exists else NO_VAULT_NOTE,
             "integrations": {t: False for t, _ in INTEGRATION_TARGETS},
             "settings": dict(DEFAULT_SETTINGS)}
@@ -867,17 +868,58 @@ class PanelState:
         with self._lock:
             self._gen += 1
         with self.view.held():
-            # A dashboard this panel started holds the key in a process of
-            # its own, and went on serving the vault after the lock.
+            # A dashboard or GUI this panel started holds the key in a process
+            # of its own, and went on serving the vault after the lock.
             stop_dashboard()
+            stop_gui()
             ok = bool(lock_fn())
         if ok:
             self.mark(locked=True, checking=False, records=0, organic=0,
-                      recent=[], error=None)
+                      documents=0, recent=[], error=None)
         else:
             self.mark(error="Could not lock. Try `compartment lock` in a "
                             "terminal.")
         return ok
+
+    def search_documents(self, query: str = "", limit: int = 6,
+                         status: str = "active") -> dict:
+        """Read-only document search via the panel's single VaultView child."""
+        ans = self.view.request(
+            "doc_search", query=query, limit=int(limit), status=status)
+        if not isinstance(ans, dict):
+            return {"ok": False, "results": [],
+                    "error": "Could not search documents right now."}
+        if ans.get("locked"):
+            return {"ok": False, "locked": True, "results": [],
+                    "error": "Unlock the vault to search documents."}
+        if not ans.get("ok"):
+            return {"ok": False, "results": [],
+                    "error": ans.get("error") or "Document search failed."}
+        return {
+            "ok": True,
+            "results": list(ans.get("results") or []),
+            "total_documents": int(ans.get("total_documents") or 0),
+        }
+
+    def get_document(self, doc_id: str, *, max_chars: int = 24_000,
+                     version: int | None = None,
+                     section: str | None = None) -> dict:
+        """Read-only document preview via the panel's single VaultView child."""
+        fields: dict = {"doc_id": doc_id, "max_chars": int(max_chars)}
+        if version is not None:
+            fields["version"] = int(version)
+        if section:
+            fields["section"] = section
+        ans = self.view.request("doc_get", **fields)
+        if not isinstance(ans, dict):
+            return {"ok": False, "error": "Could not read that document."}
+        if ans.get("locked"):
+            return {"ok": False, "locked": True,
+                    "error": "Unlock the vault to read documents."}
+        if not ans.get("ok"):
+            return {"ok": False,
+                    "error": ans.get("error") or "Could not read that document."}
+        return {"ok": True, "document": ans.get("document")}
 
     def close(self) -> None:
         """For quitting."""
@@ -1101,6 +1143,66 @@ def stop_dashboard() -> None:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+#: Optional desktop GUI process(es) started from this panel.
+_GUI: dict = {"proc": None, "procs": []}
+
+
+def open_gui(vault: str, doc_id: str | None = None) -> bool:
+    """Launch Compartment's optional full desktop GUI window.
+
+    Runs as a separate process (`compartment gui`) so the status bar / tray
+    stays lightweight when the full GUI is not open. Never raises."""
+    proc = _GUI.get("proc")
+    if proc is not None and proc.poll() is None and not doc_id:
+        if sys.platform == "darwin":
+            with contextlib.suppress(Exception):
+                import importlib
+                ak = importlib.import_module("AppKit")
+                app = ak.NSRunningApplication.runningApplicationWithProcessIdentifier_(
+                    proc.pid)
+                if app is not None:
+                    app.activateWithOptions_(2)
+        return True
+    argv = [*_cli_argv(), "--vault", vault, "gui"]
+    if doc_id:
+        argv += ["--doc", str(doc_id)]
+    try:
+        child = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**os.environ, "PATH": user_path()}, **_no_console())
+    except (OSError, subprocess.SubprocessError):
+        return False
+    _GUI["proc"] = child
+    _GUI["procs"] = [p for p in _GUI.get("procs", []) if p.poll() is None]
+    _GUI["procs"].append(child)
+    return True
+
+
+def stop_gui() -> None:
+    """End any optional GUI window started from this panel."""
+    procs = list(_GUI.get("procs") or [])
+    if _GUI.get("proc") is not None and _GUI["proc"] not in procs:
+        procs.append(_GUI["proc"])
+    _GUI["proc"] = None
+    _GUI["procs"] = []
+    for proc in procs:
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+
+def search_documents(vault: str, query: str = "", limit: int = 6,
+                     status: str = "active") -> dict:
+    """One-shot read-only document search (pure Python, testable on any OS)."""
+    from .vaultview import VaultView
+    return VaultView(vault).doc_search(query, limit=limit, status=status)
 
 
 def lock_vault(vault: str) -> bool:
@@ -1783,8 +1885,12 @@ def summarise(state: dict) -> str:
         return "locked - enter your passphrase to unlock"
     if state.get("checking"):
         return "unlocked - reading the vault…"
-    return (f"{state['records']:,} memories · "
+    base = (f"{state['records']:,} memories · "
             f"{state['organic']:,} stored by you")
+    docs = int(state.get("documents") or 0)
+    if docs > 0:
+        return f"{base} · {docs:,} {'doc' if docs == 1 else 'docs'}"
+    return base
 
 
 def lock_badge(state: dict) -> str:
@@ -2621,6 +2727,13 @@ def run(vault: str | None = None, show: bool = False,
             self.merging_src = None   # .vault awaiting its passphrase
             self.merge_pw = None      # secure field while merging_src is set
             self.merge_note = None    # prompt or error on merge-passphrase view
+            self.doc_field = None     # inline document search field
+            self.doc_query = ""       # last submitted document search query
+            self.doc_results = None   # None before search; list after search
+            self.doc_note = None      # search status, count, or error
+            self.doc_searching = False
+            self.viewing_doc = None   # full doc dict when previewing a hit
+            self.doc_copy_note = None
             return self
 
         # ---- building the popover contents -----------------------------
@@ -2719,13 +2832,80 @@ def run(vault: str | None = None, show: bool = False,
             views.append(row(merge_b, cancel_b, _spacer()))
             return self._finish(views)
 
+        @objc.python_method
+        def buildDocViewBody(self, st):
+            """Focused preview of one document opened from top-bar search."""
+            doc = self.viewing_doc or {}
+            title_s = doc.get("title") or doc.get("path") or "Document"
+            meta = (f"{doc.get('namespace', 'main')}/{doc.get('path', '')}  ·  "
+                    f"v{doc.get('version', 1)}  ·  "
+                    f"{int(doc.get('size_bytes') or 0):,} B")
+            if doc.get("status") and doc["status"] != "active":
+                meta += f"  ·  [{doc['status']}]"
+
+            back_b = NSButton.buttonWithTitle_target_action_(
+                "← Back", self, "closeDocView:")
+            copy_b = NSButton.buttonWithTitle_target_action_(
+                "Copy", self, "copyDocView:")
+            gui_b = NSButton.buttonWithTitle_target_action_(
+                "Open in GUI", self, "openViewedDocInGui:")
+            views = [
+                row(back_b, _spacer(), copy_b, gui_b, spacing=6),
+                label(title_s, 14, bold=True, wrap=True),
+                label(meta, 10, secondary=True, wrap=True),
+            ]
+            if self.doc_copy_note:
+                views.append(label(self.doc_copy_note, 10, bold=True, wrap=True))
+            views.append(divider())
+
+            outline = doc.get("outline") or []
+            if outline:
+                heads = " · ".join(h.get("heading", "") for h in outline[:6])
+                views.append(label("SECTIONS", 9, bold=True, secondary=True))
+                views.append(label(heads, 10, secondary=True, wrap=True))
+                views.append(divider())
+
+            body_text = doc.get("content")
+            if body_text is None:
+                body_text = doc.get("extracted_text") or ""
+            if body_text:
+                clipped = body_text[:1800]
+                if len(body_text) > 1800 or doc.get("truncated"):
+                    clipped += "\n\n… (open in GUI to read or edit full document)"
+                views.append(label(clipped, 11, wrap=True))
+            elif doc.get("is_binary"):
+                views.append(label(
+                    f"Binary file ({doc.get('mime_type', 'application/octet-stream')}). "
+                    "Open in GUI to export or inspect.", 11, secondary=True,
+                    wrap=True))
+            else:
+                views.append(label("(empty document)", 11, secondary=True))
+
+            mems = doc.get("memories") or []
+            if mems:
+                views.append(divider())
+                stale_n = sum(1 for m in mems if m.get("stale"))
+                hdr = f"GROUNDED MEMORIES ({len(mems)}" + (
+                    f", {stale_n} stale)" if stale_n else ")")
+                views.append(label(hdr, 9, bold=True, secondary=True))
+                for m in mems[:5]:
+                    prefix = "[STALE] " if m.get("stale") else "• "
+                    mt = " ".join((m.get("text") or "").split())
+                    views.append(label(
+                        prefix + mt[:110] + ("…" if len(mt) > 110 else ""),
+                        10, wrap=True))
+            return self._finish(views)
+
         def buildBody(self):
             st = self.state
             if self.changing_pw and st["exists"] and st["locked"] is False:
                 return self.buildChangeBody(st)
             if self.merging_src and st["exists"] and st["locked"] is False:
                 return self.buildMergePwBody(st)
+            if self.viewing_doc is not None and st["exists"] and st["locked"] is False:
+                return self.buildDocViewBody(st)
             self.merge_pw = None
+            self.doc_field = None
             views = []
             # "locked" over an empty disk describes a vault that is not
             # there, and sends the user looking for the Unlock control that
@@ -2884,6 +3064,71 @@ def run(vault: str | None = None, show: bool = False,
                                    wrap=True))
             views.append(divider())
 
+            if st["exists"] and st["locked"] is False:
+                doc_count = int(st.get("documents") or 0)
+                doc_hdr = (f"DOCUMENTS ({doc_count:,})" if doc_count > 0
+                           else "DOCUMENTS")
+                gui_b = NSButton.buttonWithTitle_target_action_(
+                    "Open GUI", self, "openGui:")
+                gui_b.setControlSize_(1)
+                gui_b.setToolTip_(
+                    "Open the full Compartment desktop window for documents, "
+                    "versions, memories, and relations")
+                views.append(row(label(doc_hdr, 10, bold=True, secondary=True),
+                                 _spacer(), gui_b))
+                has_res = self.doc_results is not None
+                field_w = CONTENT_WIDTH - (132 if has_res else 76)
+                dfield = NSTextField.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, field_w, 22))
+                dfield.setPlaceholderString_("Search documents…")
+                if self.doc_query:
+                    dfield.setStringValue_(self.doc_query)
+                dfield.setTarget_(self)
+                dfield.setAction_("searchDocs:")
+                self.doc_field = dfield
+                search_b = NSButton.buttonWithTitle_target_action_(
+                    "Search", self, "searchDocs:")
+                search_b.setControlSize_(1)
+                search_b.setEnabled_(not self.doc_searching)
+                search_row = [dfield, search_b]
+                if has_res:
+                    clear_b = NSButton.buttonWithTitle_target_action_(
+                        "Clear", self, "clearDocSearch:")
+                    clear_b.setControlSize_(1)
+                    search_row.append(clear_b)
+                views.append(row(*search_row, spacing=5))
+                if self.doc_note:
+                    views.append(label(self.doc_note, 10, secondary=True,
+                                       wrap=True))
+                for idx, d in enumerate((self.doc_results or [])[:6]):
+                    pin = "★ " if d.get("pinned") else ""
+                    title_s = d.get("title") or d.get("path") or "Document"
+                    stale_s = (f" · {d['stale_memory_count']} stale"
+                               if d.get("stale_memory_count") else "")
+                    btn_title = (f"{pin}{title_s[:42]}"
+                                 f"{'…' if len(title_s) > 42 else ''}  "
+                                 f"(v{d.get('version', 1)}{stale_s})")
+                    db = NSButton.buttonWithTitle_target_action_(
+                        btn_title, self, "openDocResult:")
+                    db.setControlSize_(1)
+                    db.setBordered_(False)
+                    db.setTag_(idx)
+                    db.setAlignment_(0)
+                    db.setToolTip_(
+                        f"{d.get('namespace', 'main')}/{d.get('path', '')} "
+                        "- click to preview")
+                    views.append(row(db, _spacer()))
+                    sub = f"{d.get('namespace', 'main')}/{d.get('path', '')}"
+                    if d.get("best_section"):
+                        sub += f"  [{d['best_section']}]"
+                    views.append(label(sub, 9, secondary=True, truncate=True))
+                    if d.get("excerpt"):
+                        snip = " ".join(str(d["excerpt"]).split())
+                        views.append(label(
+                            snip[:110] + ("…" if len(snip) > 110 else ""),
+                            10, secondary=True, wrap=True))
+                views.append(divider())
+
             head = label(f"LAST {RECENT_COUNT} MEMORIES", 10, bold=True,
                          secondary=True)
             if st["exists"] and st["locked"] is False:
@@ -2970,7 +3215,9 @@ def run(vault: str | None = None, show: bool = False,
                 views.append(row(refresh, lock, change, _spacer(), quit_b,
                                  spacing=6))
             else:
-                views.append(row(refresh, _spacer(), quit_b))
+                gui_b = NSButton.buttonWithTitle_target_action_(
+                    "Open GUI", self, "openGui:")
+                views.append(row(refresh, gui_b, _spacer(), quit_b, spacing=6))
 
             return self._finish(views)
 
@@ -3044,6 +3291,12 @@ def run(vault: str | None = None, show: bool = False,
                       self.new_pw, self.new_repeat, self.merge_pw):
                 try:
                     if f is not None and str(f.stringValue() or ""):
+                        return True
+                except Exception:                       # noqa: BLE001
+                    pass
+            if self.doc_field is not None:
+                try:
+                    if self.doc_field.currentEditor() is not None:
                         return True
                 except Exception:                       # noqa: BLE001
                     pass
@@ -3292,12 +3545,114 @@ def run(vault: str | None = None, show: bool = False,
 
         def lockDone_(self, _):
             self.unlock_note = None
+            self.doc_query = ""
+            self.doc_results = None
+            self.doc_note = None
+            self.doc_searching = False
+            self.viewing_doc = None
+            self.doc_copy_note = None
             self.rebuild()
             self.panel.refresh_async(force=True)    # and confirm it from disk
 
         def openDashboard_(self, sender):
             if open_dashboard(vault_path) is None:
                 _d("the dashboard did not start")
+
+        def openGui_(self, sender):
+            if not open_gui(vault_path):
+                _d("the GUI did not start")
+
+        def searchDocs_(self, sender):
+            if self.doc_searching:
+                return
+            q = str(self.doc_field.stringValue() or "").strip() if self.doc_field is not None else ""
+            self.doc_query = q
+            self.doc_searching = True
+            self.doc_note = "Searching documents…"
+            self.viewing_doc = None
+            self.rebuild()
+            self._inBackground(
+                lambda: self.panel.search_documents(q, limit=6),
+                "docSearchDone:")
+
+        def docSearchDone_(self, out):
+            self.doc_searching = False
+            if isinstance(out, Exception):
+                self.doc_results = []
+                self.doc_note = f"Document search failed: {out}"
+            elif not out.get("ok"):
+                self.doc_results = []
+                self.doc_note = out.get("error") or "Document search failed."
+            else:
+                hits = out.get("results") or []
+                total = int(out.get("total_documents") or 0)
+                self.doc_results = hits
+                if hits:
+                    self.doc_note = None
+                elif total == 0:
+                    self.doc_note = "No documents stored yet. Open GUI to add or import."
+                else:
+                    self.doc_note = f"No documents matched {self.doc_query!r}."
+            self.rebuild()
+
+        def clearDocSearch_(self, sender):
+            self.doc_query = ""
+            self.doc_results = None
+            self.doc_note = None
+            self.viewing_doc = None
+            self.doc_copy_note = None
+            self.rebuild()
+
+        def openDocResult_(self, sender):
+            try:
+                idx = int(sender.tag())
+                hit = (self.doc_results or [])[idx]
+            except (IndexError, ValueError, TypeError, AttributeError):
+                return
+            did = hit.get("id")
+            if not did:
+                return
+            self.doc_note = f"Opening {hit.get('path') or hit.get('title')}…"
+            self.rebuild()
+            self._inBackground(
+                lambda: self.panel.get_document(did, max_chars=24_000),
+                "docOpenDone:")
+
+        def docOpenDone_(self, out):
+            if isinstance(out, Exception) or not out.get("ok") or not out.get("document"):
+                err = (f"could not open document: {out}"
+                       if isinstance(out, Exception)
+                       else (out.get("error") or "could not open document"))
+                self.doc_note = err
+                self.rebuild()
+                return
+            self.doc_note = None
+            self.doc_copy_note = None
+            self.viewing_doc = out["document"]
+            self.rebuild()
+
+        def closeDocView_(self, sender):
+            self.viewing_doc = None
+            self.doc_copy_note = None
+            self.rebuild()
+
+        def copyDocView_(self, sender):
+            doc = self.viewing_doc or {}
+            text = doc.get("content")
+            if text is None:
+                text = doc.get("extracted_text") or doc.get("path") or ""
+            try:
+                pb = NSPasteboard.generalPasteboard()
+                pb.clearContents()
+                pb.setString_forType_(str(text), NSPasteboardTypeString)
+                self.doc_copy_note = "Copied to clipboard."
+            except Exception as exc:                    # noqa: BLE001
+                self.doc_copy_note = f"Copy failed: {exc}"
+            self.rebuild()
+
+        def openViewedDocInGui_(self, sender):
+            doc = self.viewing_doc or {}
+            open_gui(vault_path, doc_id=doc.get("id"))
 
         def openPrivacy_(self, sender):
             run_in_background(
@@ -3460,6 +3815,7 @@ def run(vault: str | None = None, show: bool = False,
         def _stopHelpers(self):
             self.panel.close()
             stop_dashboard()
+            stop_gui()
             if _in_macos_app_sandbox():
                 with contextlib.suppress(Exception):
                     from . import embed_daemon
@@ -3639,4 +3995,5 @@ def run(vault: str | None = None, show: bool = False,
 __all__ = ["run", "self_check", "fetch_state", "read_settings", "set_setting",
            "summarise", "lock_badge", "auto_lock_label", "default_vault",
            "default_backup_filename", "backup_vault", "merge_vault",
+           "open_gui", "stop_gui", "search_documents",
            "compartment_bin", "PanelState", "ViewProcess", "AUTO_LOCK_CHOICES"]

@@ -16,7 +16,7 @@ import uuid
 
 import numpy as np
 
-from . import crypto, wire
+from . import crypto, documents, wire
 from .crypto import CryptoError
 from .ranking import camel_subtokens
 
@@ -108,6 +108,74 @@ CREATE TABLE IF NOT EXISTS audit (
     hash TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- Persistent encrypted documents (Compartment DMS). Every document has a
+-- stable id, a canonical path within its namespace, full immutable version
+-- history in `document_versions` (each sealed under its own per-version key
+-- for crypto-shred), and structure-aware encrypted chunks in `document_chunks`
+-- + `doc_fts` for hybrid vector + keyword retrieval.
+CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    ns TEXT NOT NULL,
+    path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    collection TEXT,
+    tags TEXT NOT NULL,
+    summary TEXT,
+    source TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    quarantined INTEGER NOT NULL DEFAULT 0,
+    current_version INTEGER NOT NULL DEFAULT 1,
+    current_version_id TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL DEFAULT '',
+    is_binary INTEGER NOT NULL DEFAULT 0,
+    prov TEXT NOT NULL,
+    created REAL NOT NULL,
+    updated REAL NOT NULL,
+    accessed REAL NOT NULL,
+    expires TEXT,
+    UNIQUE(ns, path)
+);
+CREATE INDEX IF NOT EXISTS docs_by_ns ON documents(ns);
+CREATE INDEX IF NOT EXISTS docs_by_status ON documents(status);
+CREATE INDEX IF NOT EXISTS docs_by_collection ON documents(collection);
+CREATE INDEX IF NOT EXISTS docs_by_updated ON documents(updated);
+CREATE TABLE IF NOT EXISTS document_versions (
+    id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    ct BLOB NOT NULL,
+    key_wrapped BLOB NOT NULL,
+    compression TEXT NOT NULL DEFAULT 'none',
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mime_type TEXT NOT NULL,
+    is_binary INTEGER NOT NULL DEFAULT 0,
+    has_text INTEGER NOT NULL DEFAULT 0,
+    change_note TEXT,
+    prov TEXT NOT NULL,
+    created REAL NOT NULL,
+    UNIQUE(doc_id, version)
+);
+CREATE INDEX IF NOT EXISTS doc_versions_by_doc ON document_versions(doc_id, version);
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id TEXT PRIMARY KEY,
+    ikey INTEGER UNIQUE,
+    doc_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    section TEXT,
+    char_start INTEGER NOT NULL DEFAULT 0,
+    char_end INTEGER NOT NULL DEFAULT 0,
+    ct BLOB NOT NULL,
+    vec BLOB NOT NULL,
+    dim INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS doc_chunks_by_doc ON document_chunks(doc_id, seq);
+CREATE INDEX IF NOT EXISTS doc_chunks_by_ver ON document_chunks(version_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(chunk_id UNINDEXED, doc_id UNINDEXED, text);
 """
 
 
@@ -180,6 +248,11 @@ class Store:
         self._ns_cache: list[dict] | None = None
         self._relation_n: int | None = None
         self._rel_ns_cache: set[str] | None = None
+        # Document-store caches: keep zero-document vaults at zero overhead.
+        self._doc_n: int | None = None
+        self._doc_ns_cache: set[str] | None = None
+        self._doc_df_cache: dict[str, int] = {}
+        self._doc_fts_rowids: dict[str, list[int]] | None = None
         try:
             if image is not None:
                 self.conn.deserialize(image)
@@ -226,7 +299,15 @@ class Store:
                       # kept for history and still readable by id. Never a
                       # deletion - the journal and audit chain retain the
                       # full story of what was believed when.
-                      ("superseded_by", "TEXT"))
+                      ("superseded_by", "TEXT"),
+                      # Document grounding: optional cryptographic provenance
+                      # tying an atomic memory to the persistent document (and
+                      # exact version + section) it was extracted from. When
+                      # that document advances to a newer version, readers can
+                      # immediately flag the derived memory as stale.
+                      ("doc_id", "TEXT"),
+                      ("doc_version", "INTEGER"),
+                      ("doc_section", "TEXT"))
 
     #: Indexes on columns that arrive by migration. They cannot live in SCHEMA:
     #: that runs BEFORE the ALTER TABLE above, so on a vault sealed by an older
@@ -235,6 +316,10 @@ class Store:
     _ADDED_INDEXES = (
         ("records_by_expiry", "CREATE INDEX IF NOT EXISTS records_by_expiry "
                               "ON records(expires)"),
+        ("records_by_doc", "CREATE INDEX IF NOT EXISTS records_by_doc "
+                           "ON records(doc_id)"),
+        ("rel_doc", "CREATE INDEX IF NOT EXISTS rel_doc "
+                    "ON relations(doc_id)"),
     )
 
     def _migrate_columns(self) -> None:
@@ -244,6 +329,10 @@ class Store:
             if name not in have:
                 self.conn.execute(
                     f"ALTER TABLE records ADD COLUMN {name} {decl}")
+        rel_have = {r["name"] for r in
+                    self.conn.execute("PRAGMA table_info(relations)").fetchall()}
+        if "doc_id" not in rel_have:
+            self.conn.execute("ALTER TABLE relations ADD COLUMN doc_id TEXT")
         for _name, ddl in self._ADDED_INDEXES:
             self.conn.execute(ddl)
 
@@ -290,7 +379,10 @@ class Store:
                source: str | None = None, discovered: str | None = None,
                expires: str | None = None, kind: str | None = None,
                affirmed: float | None = None,
-               superseded_by: str | None = None) -> str:
+               superseded_by: str | None = None,
+               doc_id: str | None = None,
+               doc_version: int | None = None,
+               doc_section: str | None = None) -> str:
         rid = record_id or uuid.uuid4().hex
         rk, wrapped = crypto.new_record_key(master_key, rid)
         ct = crypto.seal(rk, crypto.canonical_json({"text": text}),
@@ -304,14 +396,16 @@ class Store:
         self.conn.execute(
             "INSERT INTO records (id, ikey, ns, ct, key_wrapped, vec, dim, tags, importance,"
             " quarantined, pack, prov, created, accessed, source, tags_origin,"
-            " discovered, expires, kind, affirmed, superseded_by)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " discovered, expires, kind, affirmed, superseded_by,"
+            " doc_id, doc_version, doc_section)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, self.next_ikey(), ns, ct, wrapped,
              head.tobytes(), int(head.shape[0]),
              json.dumps(tags), float(importance), int(quarantined), pack,
              json.dumps(prov), created or now, now,
              source, json.dumps(tags), discovered, expires,
-             kind, affirmed, superseded_by),
+             kind, affirmed, superseded_by,
+             doc_id, doc_version, doc_section),
         )
         self.set_vectors(rid, allv)
         # A record born superseded (a restore of history) never joins the
@@ -599,7 +693,8 @@ class Store:
     #: candidates, so SELECT * costs megabytes of copying to reach eleven
     #: small columns. The full row is fetched only for the results returned.
     RANK_COLUMNS = ("id, ns, pack, tags, importance, created, affirmed, "
-                    "kind, superseded_by, expires, discovered, prov")
+                    "kind, superseded_by, expires, discovered, prov, "
+                    "doc_id, doc_version, doc_section")
 
     def rank_row(self, record_id: str) -> sqlite3.Row | None:
         """One candidate's ranking and filtering columns, without its body."""
@@ -679,7 +774,7 @@ class Store:
     # hook's "claude-file:<project>/<file>" tag is the same kind: it names the
     # memory file a record came from, so it must not spread to a neighbour as
     # if it were a subject, nor be pruned off the record it names.
-    PROTECTED_TAG_PREFIXES = ("id:", "claude-file:", "project:")
+    PROTECTED_TAG_PREFIXES = ("id:", "claude-file:", "project:", "doc:")
 
     def protected_tags(self, record_id: str) -> list[str]:
         row = self.conn.execute(
@@ -915,16 +1010,18 @@ class Store:
     def insert_relation(self, *, rel_id: str | None, subject: str, predicate: str,
                         obj: str, ns: str, src_id: str | None,
                         valid_from: float | None, valid_to: float | None,
-                        prov: dict, created: float | None = None) -> str:
+                        prov: dict, created: float | None = None,
+                        doc_id: str | None = None) -> str:
         rid = rel_id or uuid.uuid4().hex
         self.conn.execute(
             "INSERT INTO relations (id, subject, subject_n, predicate, predicate_n,"
-            " object, object_n, ns, src_id, valid_from, valid_to, prov, created)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " object, object_n, ns, src_id, valid_from, valid_to, prov, created, doc_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, subject.strip(), self._norm_entity(subject),
              predicate.strip(), self._norm_entity(predicate),
              obj.strip(), self._norm_entity(obj), ns, src_id,
-             valid_from, valid_to, json.dumps(prov), created or time.time()))
+             valid_from, valid_to, json.dumps(prov), created or time.time(),
+             doc_id))
         if self._relation_n is not None:
             self._relation_n += 1
         self._rel_ns_cache = None
@@ -1061,6 +1158,563 @@ class Store:
                 e["degree"] += 1
         out = sorted(seen.values(), key=lambda e: -e["degree"])
         return out[:limit]
+
+    # -- documents (persistent encrypted DMS) -------------------------------
+
+    def _invalidate_doc_df(self) -> None:
+        self._doc_df_cache.clear()
+
+    def _invalidate_doc_caches(self) -> None:
+        self._doc_n = None
+        self._doc_ns_cache = None
+        self._doc_df_cache.clear()
+
+    def _doc_fts_rows(self) -> dict[str, list[int]]:
+        if self._doc_fts_rowids is None:
+            rows: dict[str, list[int]] = {}
+            for rowid, did in self.conn.execute(
+                    "SELECT rowid, doc_id FROM doc_fts"):
+                rows.setdefault(did, []).append(rowid)
+            self._doc_fts_rowids = rows
+        return self._doc_fts_rowids
+
+    def _doc_fts_added(self, doc_id: str, rowid: int) -> None:
+        if self._doc_fts_rowids is not None:
+            self._doc_fts_rowids.setdefault(doc_id, []).append(rowid)
+
+    def _doc_fts_delete(self, doc_id: str) -> None:
+        rowids = self._doc_fts_rows().pop(doc_id, None)
+        if rowids:
+            self.conn.execute(
+                "DELETE FROM doc_fts WHERE rowid IN ("
+                + ",".join("?" * len(rowids)) + ")", rowids)
+
+    def document_count(self, ns: str | None = None, *,
+                       include_archived: bool = True) -> int:
+        if ns is None and include_archived:
+            if self._doc_n is None:
+                self._doc_n = int(self.conn.execute(
+                    "SELECT COUNT(*) c FROM documents").fetchone()["c"])
+            return self._doc_n
+        where, params = [], []
+        if ns is not None:
+            where.append("ns = ?")
+            params.append(ns)
+        if not include_archived:
+            where.append("status != 'archived'")
+        sql = "SELECT COUNT(*) c FROM documents"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return int(self.conn.execute(sql, params).fetchone()["c"])
+
+    def document_version_count(self) -> int:
+        if self.document_count() == 0:
+            return 0
+        return int(self.conn.execute(
+            "SELECT COUNT(*) c FROM document_versions").fetchone()["c"])
+
+    def document_chunk_count(self) -> int:
+        if self.document_count() == 0:
+            return 0
+        return int(self.conn.execute(
+            "SELECT COUNT(*) c FROM document_chunks").fetchone()["c"])
+
+    def document_total_bytes(self, ns_in: set[str] | None = None) -> int:
+        if self.document_count() == 0:
+            return 0
+        if ns_in is None:
+            return int(self.conn.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) s FROM documents"
+            ).fetchone()["s"])
+        if not ns_in:
+            return 0
+        ph = ",".join("?" * len(ns_in))
+        return int(self.conn.execute(
+            f"SELECT COALESCE(SUM(size_bytes), 0) s FROM documents WHERE ns IN ({ph})",
+            sorted(ns_in)).fetchone()["s"])
+
+    def document_namespaces(self) -> set[str]:
+        if self.document_count() == 0:
+            return set()
+        if self._doc_ns_cache is None:
+            self._doc_ns_cache = {
+                r["ns"] for r in self.conn.execute(
+                    "SELECT DISTINCT ns FROM documents")}
+        return set(self._doc_ns_cache)
+
+    def next_doc_ikey(self) -> int:
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(ikey), 0) + 1 AS n FROM document_chunks"
+        ).fetchone()
+        return int(row["n"])
+
+    def get_document(self, doc_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+
+    def find_document_by_path(self, ns: str, path: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM documents WHERE ns = ? AND path = ?",
+            (ns, path)).fetchone()
+
+    def get_document_version(self, doc_id: str,
+                             version: int | None = None) -> sqlite3.Row | None:
+        if version is None:
+            doc = self.get_document(doc_id)
+            if doc is None or not doc["current_version_id"]:
+                return None
+            return self.get_document_version_by_id(doc["current_version_id"])
+        return self.conn.execute(
+            "SELECT * FROM document_versions WHERE doc_id = ? AND version = ?",
+            (doc_id, int(version))).fetchone()
+
+    def get_document_version_by_id(self, version_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM document_versions WHERE id = ?",
+            (version_id,)).fetchone()
+
+    def list_document_versions(self, doc_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT id, doc_id, version, compression, sha256, size_bytes, "
+            "mime_type, is_binary, has_text, change_note, prov, created "
+            "FROM document_versions WHERE doc_id = ? ORDER BY version DESC",
+            (doc_id,)).fetchall()
+
+    def decrypt_document_version(self, ver_row: sqlite3.Row,
+                                 master_key: bytes) -> tuple[bytes, dict]:
+        dk = crypto.unwrap_doc_key(master_key, ver_row["id"],
+                                   ver_row["key_wrapped"])
+        plain = crypto.unseal_any(dk, ver_row["ct"],
+                                  *wire.doc_body(ver_row["id"]))
+        return documents.unpack_version_payload(plain, ver_row["compression"])
+
+    def decrypt_document_chunk(self, chunk_row: sqlite3.Row,
+                               master_key: bytes) -> str:
+        ver = self.get_document_version_by_id(chunk_row["version_id"])
+        if ver is None:
+            raise StoreError(
+                f"Document chunk {chunk_row['id']!r} references missing version")
+        dk = crypto.unwrap_doc_key(master_key, ver["id"], ver["key_wrapped"])
+        body = crypto.unseal_any(dk, chunk_row["ct"],
+                                 *wire.doc_chunk(chunk_row["id"]))
+        return json.loads(body)["text"]
+
+    def get_chunk_row(self, chunk_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM document_chunks WHERE id = ?",
+            (chunk_id,)).fetchone()
+
+    def doc_chunk_keys(self, doc_id: str) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT ikey FROM document_chunks WHERE doc_id = ? ORDER BY seq",
+            (doc_id,)).fetchall()
+        return [int(r["ikey"]) for r in rows]
+
+    def replace_doc_chunks(
+        self,
+        doc_id: str,
+        version_id: str,
+        chunks: list[dict],
+        vecs: np.ndarray,
+        master_key: bytes,
+        *,
+        version_key: bytes | None = None,
+        fts_header: str = "",
+    ) -> tuple[list[tuple[int, str, str, np.ndarray]], list[int]]:
+        """Replace all indexed chunks + FTS rows for `doc_id` with `chunks`.
+
+        Returns (added_entries, removed_ikeys) where each added entry is
+        (ikey, chunk_id, doc_id, vec_1d)."""
+        removed = self.doc_chunk_keys(doc_id)
+        self.conn.execute(
+            "DELETE FROM document_chunks WHERE doc_id = ?", (doc_id,))
+        self._doc_fts_delete(doc_id)
+
+        if version_key is None:
+            ver = self.get_document_version_by_id(version_id)
+            if ver is None:
+                raise StoreError(f"No document version {version_id!r}")
+            version_key = crypto.unwrap_doc_key(
+                master_key, ver["id"], ver["key_wrapped"])
+
+        added: list[tuple[int, str, str, np.ndarray]] = []
+        if chunks:
+            mat = np.atleast_2d(np.asarray(vecs, dtype=np.float32))
+            if mat.shape[0] != len(chunks):
+                raise StoreError(
+                    f"Chunk count ({len(chunks)}) != vector rows ({mat.shape[0]})")
+            next_k = self.next_doc_ikey()
+            for i, ch in enumerate(chunks):
+                cid = ch.get("id") or uuid.uuid4().hex
+                ct = crypto.seal(
+                    version_key,
+                    crypto.canonical_json({"text": ch["text"]}),
+                    aad=wire.doc_chunk(cid)[0],
+                )
+                v = np.ascontiguousarray(mat[i], dtype=np.float32)
+                k = next_k + i
+                self.conn.execute(
+                    "INSERT INTO document_chunks "
+                    "(id, ikey, doc_id, version_id, seq, section, char_start, "
+                    "char_end, ct, vec, dim) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (cid, k, doc_id, version_id, int(ch["seq"]),
+                     ch.get("section") or "", int(ch.get("char_start", 0)),
+                     int(ch.get("char_end", 0)), ct, v.tobytes(),
+                     int(v.shape[0])),
+                )
+                fts_body = ch["text"]
+                if i == 0 and fts_header:
+                    fts_body = f"{fts_header}\n{fts_body}"
+                cur = self.conn.execute(
+                    "INSERT INTO doc_fts (chunk_id, doc_id, text) VALUES (?,?,?)",
+                    (cid, doc_id, self._fts_text(fts_body)))
+                self._doc_fts_added(doc_id, cur.lastrowid)
+                added.append((k, cid, doc_id, v))
+        self._invalidate_doc_df()
+        return added, removed
+
+    def put_document_version(
+        self,
+        *,
+        doc_id: str | None,
+        version_id: str | None,
+        ns: str,
+        path: str,
+        title: str,
+        mime_type: str,
+        is_binary: bool,
+        raw_bytes: bytes,
+        extracted_text: str,
+        chunks: list[dict],
+        vecs: np.ndarray,
+        master_key: bytes,
+        collection: str | None = None,
+        tags: list[str] | None = None,
+        summary: str | None = None,
+        source: str | None = None,
+        status: str = "active",
+        pinned: bool = False,
+        quarantined: bool = False,
+        change_note: str | None = None,
+        prov: dict | None = None,
+        created: float | None = None,
+        updated: float | None = None,
+        expires: str | None = None,
+        filename: str | None = None,
+        version_num: int | None = None,
+    ) -> tuple[str, str, int, list[tuple[int, str, str, np.ndarray]], list[int]]:
+        """Insert a new document or append a new version to an existing one."""
+        now = time.time()
+        ts_updated = updated or now
+        existing = self.get_document(doc_id) if doc_id else None
+        if existing is None:
+            existing = self.find_document_by_path(ns, path)
+        did = existing["id"] if existing is not None else (doc_id or uuid.uuid4().hex)
+        vid = version_id or uuid.uuid4().hex
+        ver = (int(version_num) if version_num is not None else
+               (int(existing["current_version"]) + 1 if existing is not None else 1))
+
+        dk, wrapped_dk = crypto.new_doc_key(master_key, vid)
+        packed, compression = documents.pack_version_payload(
+            raw_bytes, extracted_text=extracted_text, filename=filename)
+        ct = crypto.seal(dk, packed, aad=wire.doc_body(vid)[0])
+        digest = crypto.sha256(raw_bytes)
+        size_bytes = len(raw_bytes)
+        has_text = int(bool(extracted_text.strip()))
+        prov_json = json.dumps(prov or {})
+        tags_list = [str(t).strip() for t in (tags or []) if str(t).strip()]
+        tags_json = json.dumps(tags_list)
+
+        self.conn.execute(
+            "INSERT INTO document_versions "
+            "(id, doc_id, version, ct, key_wrapped, compression, sha256, "
+            "size_bytes, mime_type, is_binary, has_text, change_note, prov, created) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (vid, did, ver, ct, wrapped_dk, compression, digest, size_bytes,
+             mime_type, int(is_binary), has_text, change_note, prov_json,
+             ts_updated),
+        )
+
+        if existing is None:
+            self.conn.execute(
+                "INSERT INTO documents "
+                "(id, ns, path, title, mime_type, collection, tags, summary, "
+                "source, status, pinned, quarantined, current_version, "
+                "current_version_id, size_bytes, sha256, is_binary, prov, "
+                "created, updated, accessed, expires) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (did, ns, path, title, mime_type, collection, tags_json,
+                 summary, source, status, int(pinned), int(quarantined), ver,
+                 vid, size_bytes, digest, int(is_binary), prov_json,
+                 created or ts_updated, ts_updated, ts_updated, expires),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE documents SET path=?, title=?, mime_type=?, "
+                "collection=?, tags=?, summary=?, source=?, status=?, "
+                "pinned=?, quarantined=?, current_version=?, "
+                "current_version_id=?, size_bytes=?, sha256=?, is_binary=?, "
+                "updated=?, accessed=?, expires=? WHERE id=?",
+                (path, title, mime_type, collection, tags_json, summary,
+                 source, status, int(pinned), int(quarantined), ver, vid,
+                 size_bytes, digest, int(is_binary), ts_updated, ts_updated,
+                 expires, did),
+            )
+
+        fts_header = " ".join(
+            p for p in (title, path, collection or "", summary or "",
+                        " ".join(tags_list)) if p)
+        added, removed = self.replace_doc_chunks(
+            did, vid, chunks, vecs, master_key,
+            version_key=dk, fts_header=fts_header)
+        self._invalidate_doc_caches()
+        return did, vid, ver, added, removed
+
+    def update_document_meta(
+        self,
+        doc_id: str,
+        *,
+        path: str | None = None,
+        title: str | None = None,
+        collection: str | None = ...,
+        tags: list[str] | None = None,
+        summary: str | None = ...,
+        source: str | None = ...,
+        status: str | None = None,
+        pinned: bool | None = None,
+        quarantined: bool | None = None,
+        expires: str | None = ...,
+        updated: float | None = None,
+    ) -> bool:
+        row = self.get_document(doc_id)
+        if row is None:
+            return False
+        new_path = path if path is not None else row["path"]
+        new_title = title if title is not None else row["title"]
+        new_coll = row["collection"] if collection is ... else collection
+        new_tags = (json.dumps([str(t).strip() for t in tags if str(t).strip()])
+                    if tags is not None else row["tags"])
+        new_sum = row["summary"] if summary is ... else summary
+        new_src = row["source"] if source is ... else source
+        new_status = status if status is not None else row["status"]
+        new_pinned = int(pinned) if pinned is not None else row["pinned"]
+        new_quar = (int(quarantined) if quarantined is not None
+                    else row["quarantined"])
+        new_exp = row["expires"] if expires is ... else expires
+        ts = updated or time.time()
+        cur = self.conn.execute(
+            "UPDATE documents SET path=?, title=?, collection=?, tags=?, "
+            "summary=?, source=?, status=?, pinned=?, quarantined=?, "
+            "expires=?, updated=? WHERE id=?",
+            (new_path, new_title, new_coll, new_tags, new_sum, new_src,
+             new_status, new_pinned, new_quar, new_exp, ts, doc_id),
+        )
+        self._invalidate_doc_caches()
+        return cur.rowcount > 0
+
+    def touch_document(self, doc_id: str) -> None:
+        self.conn.execute(
+            "UPDATE documents SET accessed = ? WHERE id = ?",
+            (time.time(), doc_id))
+
+    def delete_document(self, doc_id: str, *, shred: bool = False) -> list[int]:
+        removed = self.doc_chunk_keys(doc_id)
+        self.conn.execute(
+            "DELETE FROM document_chunks WHERE doc_id = ?", (doc_id,))
+        self._doc_fts_delete(doc_id)
+        self.conn.execute(
+            "DELETE FROM document_versions WHERE doc_id = ?", (doc_id,))
+        self.conn.execute(
+            "DELETE FROM documents WHERE id = ?", (doc_id,))
+        self._invalidate_doc_caches()
+        if shred:
+            self.conn.execute("VACUUM")
+        return removed
+
+    def delete_document_version(self, doc_id: str, version: int, *,
+                                shred: bool = False) -> bool:
+        doc = self.get_document(doc_id)
+        if doc is None:
+            return False
+        if int(doc["current_version"]) == int(version):
+            raise StoreError(
+                f"Cannot delete current version v{version} alone; delete the "
+                "document or save a newer version first.")
+        cur = self.conn.execute(
+            "DELETE FROM document_versions WHERE doc_id = ? AND version = ?",
+            (doc_id, int(version)))
+        if cur.rowcount == 0:
+            return False
+        if shred:
+            self.conn.execute("VACUUM")
+        return True
+
+    def all_doc_vectors(self) -> tuple[list[str], list[str], list[int], np.ndarray]:
+        """Every indexed document chunk vector as (chunk_ids, doc_ids, ikeys, mat)."""
+        if self.document_count() == 0:
+            return [], [], [], np.zeros((0, 0), dtype=np.float32)
+        rows = self.conn.execute(
+            "SELECT id, doc_id, ikey, vec FROM document_chunks ORDER BY ikey"
+        ).fetchall()
+        cids = [r["id"] for r in rows]
+        dids = [r["doc_id"] for r in rows]
+        ikeys = [int(r["ikey"]) for r in rows]
+        if not rows:
+            return cids, dids, ikeys, np.zeros((0, 0), dtype=np.float32)
+        mat = np.vstack([np.frombuffer(r["vec"], dtype=np.float32) for r in rows])
+        return cids, dids, ikeys, mat
+
+    def _doc_match(self, expr: str, limit: int) -> list[tuple[str, str, float]]:
+        if not expr:
+            return []
+        try:
+            rows = self.conn.execute(
+                "SELECT chunk_id, doc_id, rank FROM doc_fts "
+                "WHERE doc_fts MATCH ? ORDER BY rank LIMIT ?",
+                (expr, limit)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [(r["chunk_id"], r["doc_id"], float(r["rank"])) for r in rows]
+
+    def doc_chunk_frequency(self, term: str) -> int:
+        key = term.lower()
+        if key in self._doc_df_cache:
+            return self._doc_df_cache[key]
+        try:
+            n = int(self.conn.execute(
+                "SELECT count(*) c FROM doc_fts WHERE doc_fts MATCH ?",
+                ('"' + term.replace('"', "") + '"',)).fetchone()["c"])
+        except sqlite3.OperationalError:
+            n = 0
+        self._doc_df_cache[key] = n
+        return n
+
+    def _doc_expanded_terms(self, query: str) -> list[str]:
+        base = self._terms(query)
+        seen = {t.lower() for t in base}
+        out: list[str] = []
+        for t in base:
+            extra = camel_subtokens(t)
+            if extra and self.doc_chunk_frequency(t) == 0:
+                added = False
+                for p in extra:
+                    if p not in seen:
+                        seen.add(p)
+                        out.append(p)
+                        added = True
+                    elif p in out:
+                        added = True
+                if not added:
+                    out.append(t)
+            else:
+                out.append(t)
+        return out
+
+    def doc_fts_search(self, query: str, limit: int,
+                       common_fraction: float = 0.25) -> list[tuple[str, str, float]]:
+        if self.document_count() == 0:
+            return []
+        terms = self._doc_expanded_terms(query)
+        if not terms:
+            return []
+        hits = self._doc_match(" ".join(f'"{t}"' for t in terms), limit)
+        if hits:
+            return hits
+        total = max(1, self.document_chunk_count())
+        ceiling = max(2, int(total * common_fraction))
+        keep = [t for t in terms if self.doc_chunk_frequency(t) <= ceiling] or terms
+        return self._doc_match(" OR ".join(f'"{t}"' for t in keep), limit)
+
+    def doc_term_information(self, query: str) -> dict[str, float]:
+        total = max(1, self.document_chunk_count())
+        info: dict[str, float] = {}
+        for t in self._doc_expanded_terms(query):
+            df = self.doc_chunk_frequency(t)
+            if df > 0:
+                # Floor small corpora smoothly so a 1-document vault still
+                # grants meaningful lexical coverage to literal matches.
+                info[t] = math.log((total + 2.0) / (1.0 + df))
+        return info
+
+    def records_for_document(self, doc_id: str, *,
+                             include_superseded: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM records WHERE doc_id = ?"
+        if not include_superseded:
+            sql += " AND superseded_by IS NULL"
+        sql += " ORDER BY created DESC, id"
+        return self.conn.execute(sql, (doc_id,)).fetchall()
+
+    def relations_for_document(self, doc_id: str,
+                               ns_in: set[str] | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM relations WHERE doc_id = ?"
+        params: list = [doc_id]
+        if ns_in is not None:
+            if not ns_in:
+                return []
+            ph = ",".join("?" * len(ns_in))
+            sql += f" AND ns IN ({ph})"
+            params.extend(sorted(ns_in))
+        sql += " ORDER BY created DESC, id"
+        return self.conn.execute(sql, params).fetchall()
+
+    def doc_memory_counts(self, doc_ids: list[str]) -> dict[str, tuple[int, int]]:
+        """{doc_id: (live_grounded_memories, stale_grounded_memories)}."""
+        if not doc_ids:
+            return {}
+        ph = ",".join("?" * len(doc_ids))
+        rows = self.conn.execute(
+            f"SELECT r.doc_id, COUNT(*) AS total, "
+            f"SUM(CASE WHEN d.id IS NULL OR d.status = 'archived' "
+            f"OR (r.doc_version IS NOT NULL AND r.doc_version < d.current_version) "
+            f"THEN 1 ELSE 0 END) AS stale "
+            f"FROM records r LEFT JOIN documents d ON d.id = r.doc_id "
+            f"WHERE r.superseded_by IS NULL AND r.doc_id IN ({ph}) "
+            f"GROUP BY r.doc_id",
+            doc_ids).fetchall()
+        return {r["doc_id"]: (int(r["total"]), int(r["stale"] or 0))
+                for r in rows}
+
+    def grounded_memory_counts(self, ns_in: set[str] | None = None) -> tuple[int, int]:
+        """(total_grounded_live_memories, stale_grounded_live_memories)."""
+        where = "r.superseded_by IS NULL AND r.doc_id IS NOT NULL"
+        params: list = []
+        if ns_in is not None:
+            if not ns_in:
+                return 0, 0
+            ph = ",".join("?" * len(ns_in))
+            where += f" AND r.ns IN ({ph})"
+            params.extend(sorted(ns_in))
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS total, "
+            f"SUM(CASE WHEN d.id IS NULL OR d.status = 'archived' "
+            f"OR (r.doc_version IS NOT NULL AND r.doc_version < d.current_version) "
+            f"THEN 1 ELSE 0 END) AS stale "
+            f"FROM records r LEFT JOIN documents d ON d.id = r.doc_id "
+            f"WHERE {where}",
+            params).fetchone()
+        return int(row["total"] or 0), int(row["stale"] or 0)
+
+    def stale_document_records(self,
+                               ns_in: set[str] | None = None) -> list[sqlite3.Row]:
+        """Live memories grounded in an outdated, archived, or deleted doc."""
+        where = (
+            "r.superseded_by IS NULL AND r.doc_id IS NOT NULL AND ("
+            "d.id IS NULL OR d.status = 'archived' OR "
+            "(r.doc_version IS NOT NULL AND r.doc_version < d.current_version))"
+        )
+        params: list = []
+        if ns_in is not None:
+            if not ns_in:
+                return []
+            ph = ",".join("?" * len(ns_in))
+            where += f" AND r.ns IN ({ph})"
+            params.extend(sorted(ns_in))
+        return self.conn.execute(
+            f"SELECT r.*, d.path AS cur_doc_path, d.title AS cur_doc_title, "
+            f"d.current_version AS cur_doc_version, d.status AS cur_doc_status "
+            f"FROM records r LEFT JOIN documents d ON d.id = r.doc_id "
+            f"WHERE {where} ORDER BY r.created DESC, r.id",
+            params).fetchall()
 
     # -- meta ---------------------------------------------------------------
 

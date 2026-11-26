@@ -366,6 +366,26 @@ def unwrap_record_key(master_key: bytes, record_id: str, wrapped: bytes) -> byte
     return unseal_any(master_key, wrapped, *wire.record_key(record_id))
 
 
+# ---------------------------------------------------------------------------
+# Per-document-version keys → crypto-shred for documents & chunks
+# ---------------------------------------------------------------------------
+
+def wrap_doc_key(master_key: bytes, version_id: str, doc_key: bytes) -> bytes:
+    aad, _ = wire.doc_key(version_id)
+    return seal(master_key, doc_key, aad=aad)
+
+
+def new_doc_key(master_key: bytes, version_id: str) -> tuple[bytes, bytes]:
+    """Returns (version_key, wrapped_version_key). Destroying the wrapped key
+    makes that document version and its chunks permanently undecryptable."""
+    dk = new_key()
+    return dk, wrap_doc_key(master_key, version_id, dk)
+
+
+def unwrap_doc_key(master_key: bytes, version_id: str, wrapped: bytes) -> bytes:
+    return unseal_any(master_key, wrapped, *wire.doc_key(version_id))
+
+
 # 256 short, common, distinct words for recovery phrases (16 words = 128 bits).
 WORDLIST = (
     "acid actor alarm album alien amber angel ankle apple apron arrow atlas "
