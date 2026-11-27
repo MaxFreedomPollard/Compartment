@@ -1,201 +1,99 @@
 # Compartment Security Model
 
-Honest threat model. Read the "cannot protect against" section too. I can honestly say Compartment has the best security of any vector memory. Important, as vector memory literally holds the entire computer's memory and essentially all chat logs + everything else from all operations. Vector memory is the #1 target for hackers, because of its high value and (until now) total lack of any security.
+Honest threat model for Compartment, covering both what it defends against and its hard limits. Read the bottom section too. Compartment is designed to provide the strongest practical local security of any AI memory and document vault: persistent memory and documents hold your private context, decisions, notes, and files, making them a high-value target.
+
+Compartment runs **100% offline, with zero network calls of any kind**, and stores all memories, documents, versions, relations, and embeddings inside a single portable, encrypted `.vault` file you own and can back up or copy anywhere (local disk, USB, NAS, or any cloud drive) like any other file.
+
+## What Compartment defends against
+
+- **Stolen disk, stolen laptop, or exposed backups (vault and documents at rest):**
+  Everything lives inside one `FORMAT.md` v1 `.vault` file sealed with XChaCha20-Poly1305 AEAD under a random 256-bit master key wrapped with Argon2id (`t=3, m=64 MiB, p=4`). Atomic memories, persistent documents (every immutable version and chunk), relations, FTS5 indexes, and embedding vectors are all encrypted together. No plaintext file, plaintext vector index, temp file, or log ever exists on disk (Invariant I2). No recovery phrase or hidden backdoor credential is generated; only your passphrase (and optional 2FA keyfile) opens the vault.
+- **Reboot and stolen session-credential theft (volatile kernel secret):**
+  `compartment unlock` wraps the master key under HMAC-SHA256 keyed by a random 32-byte per-boot secret plus boot timestamp, UID, and machine ID, stored mode `0600` in `~/.compartment/session/`. The 32-byte secret lives strictly in a volatile kernel object (POSIX shared memory via `shm_open` on macOS/Linux, a volatile registry key on Windows) and is never written to any filesystem. A reboot (or Windows logoff) destroys it automatically, so a stolen disk image, snapshot, backup, or credential file on its own opens nothing. Where no volatile kernel holder is available, storing a session credential is refused rather than degrading to predictable values.
+- **Offline brute force, online passphrase guessing, and argv leaks:**
+  Argon2id slows offline guessing. Failed online passphrase attempts are paced with a flat 5-second interval (deliberately flat with no escalating lockout, so an attacker cannot lock the vault owner out of an unrecoverable file). Passphrases from the apps and CLI travel over `stdin` (`--passphrase-stdin`), never `argv` (never exposed in process listings), and UI passphrase boxes clear immediately on submit. Optional cryptographic two-factor unlock (`compartment 2fa enable`) mixes passphrase and keyfile directly into Argon2id (`Argon2id(passphrase || keyfile)`), making the second factor a mathematical KDF requirement rather than a bypassable prompt.
+- **Network exfiltration, silent phone-home, and runtime telemetry:**
+  Zero network calls of any kind at runtime and zero listening network ports (the MCP server speaks stdio only; the optional desktop GUI opens zero sockets). A runtime offline guard (`--assert-offline` / `COMPARTMENT_ASSERT_OFFLINE=1`), backed by Python audit hooks (`sys.addaudithook`) and socket/DNS interception, aborts on any network socket or non-local DNS attempt and runs across the test suite in CI on macOS, Linux, and Windows. Compartment also sets `ORT_DISABLE_TELEMETRY=1` before loading ONNX Runtime so the local embedding engine sends nothing.
+- **Embedding inversion attacks:**
+  Dense embeddings can be partially inverted back toward source text. Compartment encrypts all memory window vectors and document chunk vectors inside the vault alongside the prose; no plaintext vector index ever touches disk.
+- **Tampering, truncation, splicing, downgrade, and ciphertext transplantation:**
+  Every layer carries AEAD authentication tags with strict domain-separated Associated Data (AAD) binding each ciphertext to its exact role and identity (payload, vault ID, journal sequence number, keyslot, record ID, document version ID, and document chunk ID). Modified bits, truncated files, malformed keyslots/salts, spliced journal entries, and cross-context ciphertext swaps fail loudly with specific errors. Optional Ed25519 vault signing (`lock --sign`) lets any recipient verify origin and integrity (`compartment verify`) without any passphrase.
+- **Backup corruption and plaintext leaks during backup or multi-machine merge:**
+  Encrypted backups (`compartment backup` / **Back up…**) work locked or unlocked without prompting for a passphrase or writing plaintext, strip any unacknowledged crashed journal tail, write atomically at mode `0600` with `fsync`, and re-parse plus SHA-256 verify the result. Multi-machine merges (`compartment merge` / **Merge…**) decrypt and reconcile memories, relations, and documents strictly in RAM without writing plaintext to disk.
+- **Forensic recovery of deleted memories and documents (crypto-shred):**
+  Every memory record has its own wrapped per-record key and every document version has its own wrapped 256-bit data key. `forget --shred` and `doc delete --shred` (for an entire document or one historical version) destroy those wrapped keys, delete the rows, FTS entries, and chunk vectors, `VACUUM` the in-memory SQLite image, and atomically rewrite the sealed payload.
+- **Path traversal and unsafe document exports:**
+  Document paths reject `..`, `.`, drive letters, NUL bytes, and control characters before entering the vault, and `doc export-all` verifies every resolved output path stays strictly inside the target destination directory.
+- **Malicious or forged memory packs:**
+  Pack Ed25519 signatures are verified strictly against a trusted key, never against the `signer_pub` embedded in the pack itself. Only the project key ships as trusted; third-party keys must be named explicitly (`compartment pack install --trusted-key HEX`). Verification runs strictly in order (signature -> content hash -> decrypt -> parse) and aborts on any failure.
+- **Cross-agent leakage, concurrent corruption, and stored prompt injection:**
+  Per-caller namespace ACLs enforce `rw`, `ro`, or `none` access; `packs/*` is immutable for every caller. Advisory file locking serializes writes across concurrent processes and detects foreign disk writes loudly (`VaultStaleError`) instead of silently overwriting them. All recalled memories and document excerpts are wrapped with a data-not-instructions envelope; untrusted records/documents can be flagged `quarantined` for an explicit warning on every recall; `memory_unlock` over MCP is disabled by default so passphrases never cross an LLM context window; and agent rule integrations stay strictly additive to host instruction/skill files so recalled memory data never replaces trusted instructions. Grounding atomic memories in a source document (`doc_id`, `doc_version`) automatically flags older derived claims `doc_stale: true` whenever the source document changes, archives, or is deleted.
+- **Local UI, helper, dashboard, and embedding-daemon exposure:**
+  - The menu bar / tray helper (`compartment.vaultview`) communicates solely over private stdin/stdout pipes (no socket, no port), opens the vault strictly read-only, exits after 10 minutes idle, and drops the master key within 30 seconds of an external `compartment lock`.
+  - The optional desktop GUI (`compartment gui`) opens zero sockets, clears passphrase entries immediately, watches for external locks every 15 seconds to drop its in-RAM key automatically, and drops its key when closed.
+  - The local browser dashboard (`compartment dash`) binds `127.0.0.1` only on an ephemeral port, gates access behind a constant-time-compared random URL token (`404` without it), is strictly read-only (`GET` only), sets `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and strict `Content-Security-Policy: default-src 'none' ...`, and stops automatically on `Lock`.
+  - The shared embedding daemon (`embed_daemon`) never opens a vault and holds no keys; its Unix domain socket sits inside the mode-`0700` session directory, enforces same-UID peer credentials (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS), and validates exact package version and model SHA-256.
+- **History falsification and binary / CI supply-chain tampering:**
+  The audit log is hash-chained so `compartment audit verify` pinpoints any deleted, altered, or reordered entry. macOS releases are signed deepest-path-first with Apple Developer ID certificates under Hardened Runtime (with Library Validation intact across every `.dylib`, `.so`, embedded Python runtime, and native launcher), Apple notarized (`xcrun notarytool`), stapled (`xcrun stapler`), and shipped with `SHA256SUMS.txt` (plus optional macOS App Sandbox packaging). Release and CI GitHub Actions workflows pin third-party actions to full commit SHAs.
+
+---
 
 ## Cryptography
 
 | Purpose | Primitive |
 |---|---|
 | All encryption at rest | XChaCha20-Poly1305 AEAD (libsodium via PyNaCl) |
-| Key derivation | Argon2id (t=3, m=64MiB, p=4; params stored in header) |
+| Key derivation | Argon2id (`t=3`, `m=64 MiB`, `p=4`; params stored in header) |
 | Keyslots | LUKS-style: random 256-bit master key wrapped per slot |
-| Recovery | none. Your passphrase is the only credential; nothing is generated for you |
-| Per-record keys | wrapped by master key → crypto-shred on `forget --shred` |
-| Per-document-version keys | wrapped by master key → crypto-shred on `doc delete --shred` |
+| Recovery | None. Your passphrase (plus optional 2FA keyfile) is the only credential |
+| Per-record keys | Wrapped by master key -> crypto-shred on `forget --shred` |
+| Per-document-version keys | Wrapped by master key -> crypto-shred on `doc delete --shred` |
 | Signing (vaults + packs) | Ed25519 |
 | Integrity | AEAD tags everywhere + hash-chained audit log |
 
-Vaults created before 1.8.0 were issued a 16-word recovery phrase in their own
-keyslot. Those still open with that phrase, but no new vault is given one.
+Vaults created before 1.8.0 were issued a 16-word recovery phrase in their own keyslot. Those still open with that phrase, but no new vault is given one.
 
-No homemade crypto. AAD binds every ciphertext to its role and vault
-(payloads, journal entries by sequence number, keyslots, record bodies by
-record id) - ciphertexts cannot be transplanted between contexts.
-
-## What Compartment protects against
-
-- **Stolen disk / stolen laptop (vault at rest):** the vault file is a
-  single AEAD-sealed blob under an Argon2id-wrapped key. No plaintext,
-  no plaintext index, no temp files, no logs exist on disk - ever (I2).
-- **Vault interception in transit:** a locked vault is safe to move over
-  any channel. Optional Ed25519 manifest (`lock --sign`) lets the
-  recipient verify origin and integrity without any credential.
-- **Tampering:** any modified bit fails AEAD authentication loudly.
-  Truncating the file, editing the header, splicing journal entries,
-  and downgrade-style version games all produce specific errors.
-- **Malicious or modified memory packs:** the Ed25519 signature is checked
-  against a TRUSTED key, never against the `signer_pub` the pack carries.
-  A pack cannot vouch for itself: anyone can mint a keypair and sign
-  anything, so a self-consistent signature proves nothing about authorship.
-  Only the project key ships as trusted; a third party key has to be named
-  deliberately (`compartment pack install --trusted-key HEX`). Signature,
-  then content hash, then decrypt, then parse. Failure aborts install.
-- **Forensic recovery of deleted memories and documents:** `forget --shred`
-  and `doc delete --shred` destroy the per-record / per-document-version keys,
-  delete the rows + FTS entries + chunk vectors, `VACUUM`, and rewrite the
-  payload - the content is gone from the current vault file and its
-  ciphertext history within that file.
-- **Cross-agent memory access:** per-caller namespace grants (rw/ro/none);
-  `packs/*` immutable for everyone. Run one server instance per host for
-  boundary enforcement (see limitations).
-- **Embedding inversion:** vectors can be partially inverted back toward
-  text, so Compartment encrypts vectors like everything else. No plaintext
-  vector index ever exists on disk.
-- **Stored prompt injection:** memories recalled from storage are wrapped
-  with a data-not-instructions notice; content stored from untrusted
-  sources can be flagged `quarantined`, which attaches an explicit warning
-  envelope to every future recall. This is a mitigation, not a guarantee -
-  the host agent must still treat memory as data.
-- **History falsification:** the audit log is hash-chained; `compartment audit
-  verify` reports the first broken link.
-
-## What Compartment CANNOT protect against
-
-- **A compromised OS while the vault is unlocked.** Anything that can read
-  this process's RAM can read the working set and the master key. This is
-  true of every encryption product; unlock only on machines you trust.
-- **RAM at unlock time generally** - including swap in pathological cases.
-  Python cannot guarantee zeroization (the GC may copy buffers); `lock`
-  wipes what it can, best-effort. A future Rust core would tighten this.
-- **Pre-shred backups.** Crypto-shred removes content from the *current*
-  vault. Copies made before the shred still contain it (encrypted).
-- **A hostile host agent within its granted namespaces.** The `--caller`
-  identity is declarative. A host that lies about its name gets that
-  name's grants. For real isolation, run one `compartment serve` per host with
-  its own config file and OS-level separation.
-- **Weak passphrases.** Argon2id slows attackers; it cannot save
-  "password1". The passphrase is user-chosen and is the ONLY credential -
-  Compartment never generates a password or recovery seed, so there is nothing
-  written down anywhere unless you write it. Losing the passphrase (and
-  the 2FA keyfile, if enrolled) makes the vault permanently
-  unrecoverable; that is the design, not a failure mode. To harden a
-  human-memorable passphrase, enable two-factor unlock: `compartment 2fa
-  enable` wraps the master key under Argon2id(passphrase ‖ keyfile), so
-  both the thing you know and the file you hold are required - a
-  cryptographic requirement, not a prompt that malware can skip. (Why not
-  authenticator-app codes? A six-digit TOTP cannot cryptographically
-  protect an offline file: the verifying secret would have to live next
-  to the data it guards, so any code-based gate on a local vault is
-  theater. The keyfile is the honest second factor for this threat
-  model.)
-- **Search-audit persistence gap:** search audit entries are held in RAM
-  until the next save/lock (writes are journaled immediately; reads don't
-  cost an fsync). A kill -9 can lose recent *search* audit entries - never
-  store/forget entries.
+No homemade cryptography is used. Domain-separated AAD binds every ciphertext to its role and vault (`payload`, `journal` entry sequence number, `keyslot`, `record-key`, `record-body`, `doc-key`, `doc-body`, `doc-chunk`, `pack`) so ciphertexts cannot be transplanted between contexts.
 
 ## Unlock paths, ranked
 
-1. **Boot-session credential (the default).** `compartment unlock` wraps the
-   master key under HMAC-SHA256 keyed by a random 32-byte per-boot secret,
-   together with the boot timestamp, uid and machine id, and stores it 0600
-   in `~/.compartment/session/`. The secret is held in a volatile kernel
-   object - a POSIX shared-memory segment on macOS and Linux, a volatile
-   registry key on Windows - and is never written to any filesystem, so a
-   backup, snapshot or disk image does not contain it. A restart destroys it,
-   which is what makes the relock real rather than a policy. On Windows a
-   full logoff relocks as well. A stolen *file* on its own is therefore
-   useless: guessing the boot time, uid and machine id still leaves 32
-   unknown bytes. It remains a convenience credential - anything running as
-   you on the live machine reads the same secret, and could read the master
-   key out of process RAM anyway, and a RAM capture (hibernation image,
-   suspended VM, swap or pagefile) can expose it too. It is not a second
-   factor. Where no volatile holder exists, storing a credential is REFUSED
-   rather than falling back to values an attacker would already hold.
-2. **macOS Keychain** (`compartment unlock --keychain`, explicit opt-in):
-   credential guarded by the OS keychain. Stronger against file theft than
-   the session credential, but it SURVIVES REBOOTS - choose it only if
-   that is what you want.
-3. **`COMPARTMENT_PASSPHRASE` env var:** for scripts/CI; visible to anything
-   that can read the process environment.
-4. **`memory_unlock` MCP tool: DISABLED by default.** The passphrase would
-   transit the agent's context window and possibly the host's logs/model
-   provider. Enable only if you accept that
-   (`settings.unlock_tool_enabled` in `<vault>.config.json`).
+1. **Boot-session credential (default):** `compartment unlock` wraps the master key under HMAC-SHA256 keyed by the random 32-byte volatile kernel secret (POSIX `shm_open` on macOS/Linux, volatile registry key on Windows) plus boot timestamp, UID, and machine ID, stored mode `0600` in `~/.compartment/session/`. A reboot (or Windows logoff) destroys the kernel secret and forces a fresh unlock. It is a convenience credential on an already-trusted live session, not a second factor.
+2. **macOS Keychain (`compartment unlock --keychain`, explicit opt-in):** Credential guarded by the OS keychain. Stronger against raw file theft than the session file, but it survives reboots; enable it only if you want unlock to persist across restarts.
+3. **`COMPARTMENT_PASSPHRASE` environment variable:** For scripts and CI; visible to anything that can inspect the process environment.
+4. **`memory_unlock` MCP tool (DISABLED by default):** Passing a passphrase through MCP sends it across the agent's context window and potentially host logs or model providers. Enable only if you explicitly accept that tradeoff (`settings.unlock_tool_enabled` in `<vault>.config.json`).
 
-`compartment lock` and the `memory_lock` panic tool clear ALL stored
-credentials (session + keychain). Auto-lock drops the in-RAM key after
-`auto_lock_minutes` (default 30) idle; while a stored credential remains,
-the next operation silently re-opens - stored credentials represent
-standing user intent, ended by `compartment lock` or a reboot.
+`compartment lock` and the `memory_lock` panic tool clear all stored credentials (session + keychain) and end running panel helpers/dashboards/GUIs. Auto-lock drops the in-RAM key after `auto_lock_minutes` (default 30) idle; while a stored credential remains, the next operation silently re-opens (stored credentials represent standing user intent until `compartment lock` or a reboot).
 
-**Two-factor interaction, stated honestly:** with `compartment 2fa enable`,
-every *credential-based* unlock (passphrase paths 3-4 above, and any
-fresh `compartment unlock`) requires the keyfile too - that is enforced by
-the KDF. The session and keychain paths store the unwrapped MASTER key,
-so after one successful two-factor unlock they re-open the vault without
-re-presenting the keyfile, exactly as they skip the passphrase. That is
-the design (they encode standing intent on an already-trusted machine);
-if you want every single open to need both factors, run `compartment unlock
---once` and don't store a credential.
+**Two-factor interaction, stated honestly:** With `compartment 2fa enable`, every passphrase-based unlock requires the keyfile too (enforced by Argon2id). Once unlocked, the session and keychain credentials hold the unwrapped master key so subsequent calls re-open without re-presenting the keyfile, just as they skip the passphrase. If you want every single open to require both factors, use `compartment unlock --once` and store no credential.
 
-## Multi-agent, one vault
+## Process and UI isolation
 
-Several agent processes (Hermes provider, Claude via MCP, the CLI) may
-share one vault: an advisory file lock serializes every journal append and
-save, and each process detects foreign writes (inode/size/mtime) and reloads
-before proceeding - a stale writer gets a loud VaultStaleError, never
-silent corruption. Namespace ACLs are per-caller; `--caller` identity is
-declarative (see the hostile-host limitation above).
+- **Multi-agent, one vault:** Concurrent agent processes (Claude, Codex, Hermes, AntiGravity, OpenClaw, CLI, GUI) serialize journal appends and saves under an advisory file lock and detect foreign writes by inode/size/mtime before mutating.
+- **Top-bar / tray reader (`compartment.vaultview`):** Runs as one read-only child talking JSON lines over private stdin/stdout pipes (no socket, no port), serves both snapshots and document search/preview without writing to the vault or audit log, exits after 10 idle minutes, and drops its key within 30 seconds of an external lock.
+- **Optional desktop GUI (`compartment gui`):** Runs locally over standard-library `tkinter`/`ttk` with zero sockets, drops its key on window close or external lock detection (polled every 15 seconds), and only writes plaintext to disk on explicit user export.
+- **Shared embedding daemon (`embed_daemon`):** Runs one shared local ONNX process (~70 MB) over a mode-`0700` Unix domain socket (macOS/Linux; Windows keeps the model in-process). Only query/passage text goes in and unit vectors come out; no passphrase, master key, record key, or vault data ever crosses it. Disable per-vault (`embed_daemon: false`) or via `COMPARTMENT_EMBED_DAEMON=0`.
 
-## The panel's reader
+---
 
-Since 4.11.0 the menu bar and tray panel read the vault through one helper,
-`compartment.vaultview`, which the panel starts and talks to over the
-helper's own stdin and stdout. It has no socket and no port, so no other
-process can reach it. While it runs it holds the master key and the
-decrypted rows, as any `compartment serve` does. It opens the vault
-read-only: it writes nothing, compacts nothing, sweeps nothing and adds no
-audit rows, the same rule the dashboard keeps. It exits after ten minutes
-without a request, and it drops the key within 30 seconds of the stored
-credential disappearing, so a `compartment lock` typed in a terminal clears
-it too. The panel's Lock button ends it before clearing the credentials. An
-idle panel holds neither the vault nor the key.
+## What Compartment cannot defend against
 
-## The shared embedding process
+Be clear-eyed about these hard boundaries:
 
-Since 4.9.6 the encoder runs once per machine, in a daemon that every
-`compartment serve`, the command line and the app talk to over a Unix domain
-socket, rather than once per agent. What crosses that socket: the text of a
-memory being stored or of a query being searched, going in; unit vectors
-coming out. What never crosses it: a passphrase, a master key, a record key,
-or anything read from the vault at rest. The daemon opens no vault and holds
-no key; a capture of its memory is a copy of the model and of whatever text
-was in flight.
-
-The socket lives in the session directory (`~/.compartment/session`, mode
-0700) beside the boot-bound unlock credential. The daemon accepts a
-connection only from a process with its own uid (`SO_PEERCRED` on Linux,
-`LOCAL_PEERCRED` on macOS); a client connects only to a socket file its own
-uid owns, and only to a daemon that reports the same protocol, the same
-package version and the same SHA-256 of the model file, so a vector never
-comes from a model other than the one the vault is pinned to. A process
-running as the same user is already inside the trust boundary - it can read
-the session credential and open the vault directly - so the socket gives
-that user nothing they did not have. It is not a network listener:
-`--assert-offline` allows AF_UNIX and forbids everything else, exactly as
-before. The one AF_INET exception is the loopback pair that
-`socket.socketpair` is on Windows, which asyncio's event loop needs, and it
-is allowed only while that call runs.
-
-`COMPARTMENT_EMBED_DAEMON=0`, or `embed_daemon: false` in the vault's
-settings, keeps the model inside each process instead. Windows has no
-AF_UNIX in Python and always does.
+- **A compromised OS or malicious process running as your user while the vault is unlocked:**
+  Anything with permission to inspect your live user processes or volatile kernel memory can read the working set, the per-boot session secret, and the master key. This is true of every local encryption tool; unlock only on machines you trust.
+- **RAM exposure at unlock time (including swap, hibernation, and Python GC):**
+  A live RAM capture, hibernation image, suspended VM snapshot, or swap/pagefile copy made while unlocked can expose plaintext or keys. Python cannot guarantee deterministic zeroization because the garbage collector may copy buffers; `lock` clears references and wipes mutable buffers on a best-effort basis.
+- **Pre-shred backups and copies:**
+  `forget --shred` and `doc delete --shred` remove content and keys from the *current* vault file. Copies or backups made before the shred still retain that earlier encrypted state.
+- **A hostile host agent within its granted namespaces:**
+  The `--caller` identity is declarative. A host process that lies about its `--caller` name receives that caller's namespace grants. For real multi-tenant isolation, run separate `compartment serve` instances with separate config files and OS-level user/container separation.
+- **Host agents ignoring the data-not-instructions boundary:**
+  Compartment wraps recalled memories and documents as untrusted data and supports `quarantined` warnings, but preventing prompt injection ultimately depends on the host LLM/agent honoring that boundary.
+- **Weak passphrases and forgotten credentials:**
+  Argon2id slows brute force, but it cannot rescue `"password1"`. Because Compartment intentionally creates no recovery phrase or backdoor, forgetting your passphrase (or losing your 2FA keyfile if enabled) makes the vault permanently unrecoverable. (TOTP authenticator codes are intentionally not used as an offline second factor because a local verifying secret next to the vault would be security theater; a high-entropy keyfile mixed into Argon2id is the honest cryptographic second factor.)
+- **Search-audit persistence gap on `kill -9`:**
+  Write operations (`store`, `forget`, `link`, `doc_put`, `doc_patch`, `doc_delete`) are journaled immediately. Read/search audit entries stay in RAM until the next save or lock so reads do not cost an `fsync`; an abrupt `kill -9` can lose recent *search* audit rows, never write entries.
 
 ## Reporting
 
-Report vulnerabilities privately to the maintainer. No telemetry exists in
-this product; nothing phones home, so nothing can be recalled remotely.
-The ONNX runtime the encoder runs on keeps telemetry of its own by default
-(a device id and an event queue on disk, with an uploader in the same
-library), so Compartment sets `ORT_DISABLE_TELEMETRY=1` before loading it,
-leaving a value you set yourself as it is.
+Report security vulnerabilities privately to the maintainer (via GitHub Private Vulnerability Reporting on the repository Security tab). Because Compartment includes zero telemetry and makes zero network calls, nothing phones home and nothing can be recalled remotely.
