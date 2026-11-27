@@ -7,4 +7,4 @@ Always use language that demonstrates what Compartment **provides**, and not wha
 - **Do say:** Compartment runs **100% offline, with zero network calls of any kind**, and stores memories in a portable, encrypted `.vault` file that users own and can copy, sync, or back up anywhere — local drives, USB, NAS, or any cloud storage provider — just like any other file.
 - **Do not say:** *"zero cloud uploads"* or similar phrasing in release notes, docs, UI strings, or commit/PR descriptions. That wording makes it sound as if Compartment blocks or prevents users from uploading their vault to the cloud, when in fact a `.vault` is a self-contained encrypted file designed to be safely stored anywhere.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASING.md](RELEASING.md) for testing, storage format, and release gates.
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) and [docs/RELEASING.md](docs/RELEASING.md) for testing, storage format, and release gates.

@@ -1,6 +1,6 @@
 # Compartment
 
-**Encrypted, fully offline memory for AI agents.** One vault on your own
+**Encrypted, fully offline memory and document vault for AI agents.** One vault on your own
 computer, read and written by Claude Code, Claude Desktop, Hermes Agent,
 OpenClaw, AntiGravity, Cursor, Codex and any other MCP client. No API key, no account, no
 network, no telemetry.
@@ -206,19 +206,19 @@ in the applications menu. Linux gets a window on purpose: a tray icon may
 never appear on GNOME or Wayland, and the control that unlocks your memories
 must not fail silently.
 
-The panel shows whether the vault is open, how many memories it holds and how
-many you stored, the three settings worth changing (capture hook, whether
-reference facts appear in search, auto-lock), which agents are connected with
-buttons to connect Claude, Hermes Agent, OpenClaw, AntiGravity or Codex, and the last five
-memories. You can unlock, lock and change your passphrase there without a
-terminal. The panel opens instantly with what it last read and refreshes in
-the background, only when something actually changed. While you use it, one
-helper process keeps the vault open read-only and reads just the new memories
-as agents add them; after ten idle minutes it exits, so an idle app holds no
-vault and no key. Looking never locks, unlocks or rewrites the vault. It is
-meant to be one of the many apps on your
-computer, not something you have to learn: every function is a button or a
-switch, and the defaults were chosen by measurement.
+The panel shows whether the vault is open, how many memories and documents it
+holds, the settings worth changing (capture hook, whether reference facts appear
+in search, expiry, auto-lock), which agents are connected with buttons to
+connect Claude, Hermes Agent, OpenClaw, AntiGravity or Codex, inline **Document
+Search** with quick preview, and the last five memories. You can unlock, lock,
+back up, merge, and change your passphrase there without a terminal. The panel
+opens instantly with what it last read and refreshes in the background, only
+when something actually changed. While you use it, one helper process keeps the
+vault open read-only and reads just the new memories and documents as agents add
+them; after ten idle minutes it exits, so an idle app holds no vault and no key.
+Looking never locks, unlocks or rewrites the vault. It is meant to be one of the
+many apps on your computer, not something you have to learn: every function is a
+button or a switch, and the defaults were chosen by measurement.
 
 The **Open GUI** button (or `compartment gui` / `compartment app`) opens an
 optional full cross-platform desktop workspace (macOS, Windows, and Linux) for
@@ -425,7 +425,7 @@ never a key · a runtime guard that aborts on any network socket attempt
 (`--assert-offline`), with CI running the whole suite under it on Linux,
 macOS and Windows. The full threat model,
 including what Compartment cannot protect against, is in
-[SECURITY.md](SECURITY.md).
+[docs/SECURITY.md](docs/SECURITY.md).
 
 ### From the app
 
@@ -494,7 +494,7 @@ compartment --vault memory.vault unlock     # your passphrase (+ keyfile if 2FA)
 `lock --sign` adds an Ed25519 manifest that the recipient can check with
 `compartment verify` and no credential. `export --plaintext` writes the vault
 as JSONL and `import` reads it back, so you are never locked in.
-[FORMAT.md](FORMAT.md) specifies the `.vault` and `.mpack` files byte by
+[docs/FORMAT.md](docs/FORMAT.md) specifies the `.vault` and `.mpack` files byte by
 byte. Per-agent namespaces take `rw`, `ro` or `none` grants in the settings
 file, so a scratch agent can read without writing.
 
@@ -504,7 +504,7 @@ under `packs/<name>`, read-only for every caller, and
 `include_packs_in_search` toggles them. A pack's signature is checked against
 a key you trust, never against the key inside the pack. The reference facts
 are the one pack that lives in `main` as ordinary memories.
-[PACKS.md](PACKS.md) covers authoring.
+[docs/PACKS.md](docs/PACKS.md) covers authoring.
 
 `compartment setup airgap-bundle` prepares an install for a machine with no
 network; `setup download-model` and `setup download-longmemeval` fetch what
@@ -819,6 +819,8 @@ copy; a later install backs up a changed copy rather than overwriting it.
 | `retag_prune` | `false` | whether that pass may also remove tags |
 | `index_precision` | `"f32"` | `"int8"` uses a quarter of the RAM |
 | `embed_daemon` | `true` | ask the machine's shared embedding process for vectors instead of loading the model in this process |
+| `max_document_bytes` | `33554432` | maximum uncompressed byte size per stored document version (32 MiB) |
+| `search_documents_in_memory_search` | `true` | surface matching persistent document excerpts alongside atomic memories in `memory_search` |
 | `unlock_tool_enabled` | `false` | lets an agent unlock the vault. Off because the passphrase would cross the model's context |
 
 ### Environment
@@ -835,12 +837,13 @@ where they apply. Anything exported as `ENGRAM_*` still works.
 ### MCP tools
 
 Every tool has a title and a read-only or destructive annotation, so a
-client can tell the seven read-only tools from the ones that write before
-calling anything. `memory_search`, `memory_store`, `memory_store_many`,
-`memory_get`, `memory_recent`, `memory_forget`, `memory_link`,
-`memory_relations`, `memory_unlink`, `memory_list_namespaces`,
-`memory_status`, `memory_lock`, `memory_selftest`. `memory_unlock` exists but
-is off unless you turn it on above.
+client can tell the ten read-only tools from the ones that write before
+calling anything. Memory tools: `memory_search`, `memory_store`,
+`memory_store_many`, `memory_get`, `memory_recent`, `memory_forget`,
+`memory_link`, `memory_relations`, `memory_unlink`, `memory_list_namespaces`,
+`memory_status`, `memory_lock`, `memory_selftest` (`memory_unlock` exists but
+is off unless you turn it on above). Document tools: `doc_put`, `doc_patch`,
+`doc_get`, `doc_list`, `doc_search`, `doc_delete`.
 
 ## Documentation
 
@@ -850,11 +853,11 @@ is off unless you turn it on above.
 | [docs/PLUGINS.md](docs/PLUGINS.md) | every plugin store and listing: how users install from it, what the maintainer does |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | selecting Compartment in Hermes Agent, OpenClaw, Claude, everything else |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | other memory servers, with sources |
-| [SECURITY.md](SECURITY.md) | the full threat model and its limits |
-| [FORMAT.md](FORMAT.md) | byte-level `.vault` and `.mpack` specs (language-agnostic) |
-| [PACKS.md](PACKS.md) | authoring and shipping signed memory packs |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | setup, good issues, and the guarantees to keep |
-| [RELEASING.md](RELEASING.md) | how a release is cut |
+| [docs/SECURITY.md](docs/SECURITY.md) | the full threat model and its limits |
+| [docs/FORMAT.md](docs/FORMAT.md) | byte-level `.vault` and `.mpack` specs (language-agnostic) |
+| [docs/PACKS.md](docs/PACKS.md) | authoring and shipping signed memory packs |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | setup, good issues, and the guarantees to keep |
+| [docs/RELEASING.md](docs/RELEASING.md) | how a release is cut |
 
 ## Privacy Policy
 
@@ -891,7 +894,7 @@ and [Jenqyang/Awesome-AI-Agents](https://github.com/Jenqyang/Awesome-AI-Agents).
 
 Bugs and feature requests: [Issues](https://github.com/MaxFreedomPollard/Compartment/issues).
 Support and questions: [Discussions](https://github.com/MaxFreedomPollard/Compartment/discussions);
-security reports: [SECURITY.md](SECURITY.md).
+security reports: [docs/SECURITY.md](docs/SECURITY.md).
 Questions and ideas: [Discussions](https://github.com/MaxFreedomPollard/Compartment/discussions).
 
 ---

@@ -13,4 +13,4 @@
 - [ ] No network call at runtime, no open port
 - [ ] No plaintext written to disk
 - [ ] No new dependency that is not a pure wheel on macOS, Linux and Windows
-- [ ] README / FORMAT.md / SECURITY.md still tell the truth
+- [ ] README / docs/FORMAT.md / docs/SECURITY.md still tell the truth

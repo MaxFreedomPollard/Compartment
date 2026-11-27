@@ -78,7 +78,7 @@ loopback-only, read-only.
 
 Runtime embedding happens exactly once per new memory, forever cached
 inside the vault under the pinned model. Optional signed packs can ship
-precomputed vectors bit-exact for that model (see [PACKS.md](../PACKS.md));
+precomputed vectors bit-exact for that model (see [PACKS.md](PACKS.md));
 that is an authoring path, not something you configure day to day.
 
 ## 2. How Compartment decides what becomes a memory

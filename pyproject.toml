@@ -89,7 +89,7 @@ Source = "https://github.com/MaxFreedomPollard/Compartment"
 Issues = "https://github.com/MaxFreedomPollard/Compartment/issues"
 Changelog = "https://github.com/MaxFreedomPollard/Compartment/releases"
 Documentation = "https://github.com/MaxFreedomPollard/Compartment#readme"
-Security = "https://github.com/MaxFreedomPollard/Compartment/blob/main/SECURITY.md"
+Security = "https://github.com/MaxFreedomPollard/Compartment/blob/main/docs/SECURITY.md"
 
 [project.scripts]
 compartment = "compartment.cli:main"
